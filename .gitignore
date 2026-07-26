@@ -1,0 +1,37 @@
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+.coverage
+htmlcov/
+
+# Local generated outputs and sensitive clinical data
+*.xlsx
+*.xlsm
+*.tsv
+*.csv
+*.bam
+*.bai
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+*.pdf
+*.docx
+*.pptx
+
+# Keep tiny anonymized fixtures only
+!tests/fixtures/*.tsv
+!tests/fixtures/*.xlsx
+
+# Local config
+.env
+config.json
+*.log

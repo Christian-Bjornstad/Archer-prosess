@@ -1,0 +1,6 @@
+Sample	Classification	Report	Artifact	Symbol	HGVSp	HGVSc	Depth	AO	AF	Type	Quality Score	gnomAD AF	Source	COSMICID	DBSNPID	Clinical Significance	Consequence	Genomic Location	Ref/Alt Allele	Trans	Has Sample Strand Bias	Has Seq Dir Bias	AF Outlier P Value
+26OUM00001_VPM_S1_R1_001				FLT3		NM_004119.2:c.1419-4dup	1000	100	0.1000	INS	900		Archer			benign	intron_variant	chr13:28608215	C/CT	NM_004119.2	No	No	0.2
+26OUM00002_VPM_S2_R1_001				ASXL1		NM_015338.5:c.1934dup	5065	200	0.0395	INS	800		Archer			VUS	frameshift_variant	chr20:31022442	G/GA	NM_015338.5	No	No	0.1
+26OUM00003_VPM_S3_R1_001				ASXL1		NM_015338.5:c.1934dup	5065	230	0.0450	INS	800		Archer			VUS	frameshift_variant	chr20:31022442	G/GA	NM_015338.5	No	No	0.1
+26OUM00004_VPM_S4_R1_001				TP53	p.R175H	NM_000546.6:c.524G>A	900	480	0.5333	SNV	950	0.00001	Archer	COSM10648	rs28934578	Pathogenic	missense_variant	chr17:7578406	G/A	NM_000546.6	No	No	0.001
+26OUM00005_VPM_S5_R1_001				EZH2		NM_004456.4:c.118-4dup	704	43	0.0611	INS	500		Archer			VUS	splice_region_variant	chr7:148504464	T/TA	NM_004456.4	No	Yes	0.04
