@@ -35,3 +35,42 @@ def test_parallel_search_returns_all_variants_and_progress():
     assert len(seen) == len(variants)
     assert seen[-1][0] == len(variants)
     assert all(len(items) == 2 for items in results.values())
+
+
+def test_gnomad_formatter_reports_population_frequency_context():
+    variant = ArcherTsvReader().read(FIXTURE)[0]
+    service = DatabaseSearchService()
+    evidence = service._format_gnomad_evidence(
+        variant,
+        "12-111856588-C-A",
+        {
+            "variant_id": "12-111856588-C-A",
+            "rsids": ["rs111360561"],
+            "exome": {
+                "ac": 10,
+                "an": 20000,
+                "af": 0.0005,
+                "homozygote_count": 0,
+                "hemizygote_count": 0,
+                "filters": [],
+                "populations": [{"id": "nfe", "ac": 4, "an": 4000, "homozygote_count": 0}],
+                "faf95": {"popmax": 0.0012, "popmax_population": "nfe"},
+            },
+            "genome": {
+                "ac": 2,
+                "an": 10000,
+                "af": 0.0002,
+                "homozygote_count": 0,
+                "hemizygote_count": 0,
+                "filters": ["PASS"],
+                "populations": [{"id": "amr", "ac": 3, "an": 2000, "homozygote_count": 0}],
+                "faf95": {"popmax": 0.0008, "popmax_population": "amr"},
+            },
+        },
+    )
+
+    assert evidence.status == "found"
+    assert evidence.accession == "rs111360561"
+    assert "aggregated_AF=0.0400%" in evidence.summary
+    assert "max_population_AF=0.1500%" in evidence.summary
+    assert "frequency_context=low_frequency_population_variant" in evidence.summary

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import html
+import threading
+import time
 import urllib.parse
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
@@ -21,9 +23,13 @@ MANUAL_DATABASES = {
 
 
 class DatabaseSearchService:
+    _gnomad_lock = threading.Lock()
+    _last_gnomad_request = 0.0
+
     def __init__(self, settings: AppSettings | None = None, timeout: int = 12) -> None:
         self.settings = settings or AppSettings.load()
         self.timeout = timeout
+        self._gnomad_cache: dict[str, DatabaseEvidence] = {}
 
     def search_variant(self, variant: VariantRecord, databases: Iterable[str]) -> list[DatabaseEvidence]:
         evidence: list[DatabaseEvidence] = []
@@ -321,45 +327,149 @@ class DatabaseSearchService:
                 summary="gnomAD live lookup needs genomic location plus ref/alt alleles.",
                 url=self._manual_url("gnomAD", variant),
             )
+        cached = self._gnomad_cache.get(variant_id)
+        if cached:
+            return cached
         query = """
         query Variant($variantId: String!, $datasetId: DatasetId!) {
           variant(variantId: $variantId, dataset: $datasetId) {
             variant_id
+            reference_genome
             rsids
-            exome { ac an filters }
-            genome { ac an filters }
+            exome {
+              ac an af ac_hom ac_hemi homozygote_count hemizygote_count filters
+              populations { id ac an ac_hom ac_hemi homozygote_count hemizygote_count }
+              faf95 { popmax popmax_population }
+            }
+            genome {
+              ac an af ac_hom ac_hemi homozygote_count hemizygote_count filters
+              populations { id ac an ac_hom ac_hemi homozygote_count hemizygote_count }
+              faf95 { popmax popmax_population }
+            }
           }
         }
         """
         try:
+            self._wait_for_gnomad_slot()
             response = requests.post(
                 "https://gnomad.broadinstitute.org/api/",
-                json={"query": query, "variables": {"variantId": variant_id, "datasetId": "gnomad_r2_1"}},
+                json={"query": query, "variables": {"variantId": variant_id, "datasetId": self.settings.gnomad_dataset}},
                 timeout=self.timeout,
             )
+            if response.status_code == 429:
+                evidence = DatabaseEvidence(
+                    "gnomAD",
+                    "rate_limited",
+                    "gnomAD rate limit reached: 10 requests per IP per 60 seconds. Try again later or lower Workers to 1.",
+                    url=self._manual_url("gnomAD", variant),
+                )
+                self._gnomad_cache[variant_id] = evidence
+                return evidence
             response.raise_for_status()
             payload = response.json()
             data = (payload.get("data") or {}).get("variant")
             if not data:
-                return DatabaseEvidence("gnomAD", "not_found", f"No gnomAD v2.1 GRCh37 hit for {variant_id}.", url=self._manual_url("gnomAD", variant), raw=payload)
-            exome = data.get("exome") or {}
-            genome = data.get("genome") or {}
-            af_parts = []
-            for label, source in [("exome", exome), ("genome", genome)]:
-                ac = source.get("ac")
-                an = source.get("an")
-                if ac is not None and an:
-                    af_parts.append(f"{label}_AF={ac / an:.6g} ({ac}/{an})")
-            return DatabaseEvidence(
+                evidence = DatabaseEvidence(
+                    "gnomAD",
+                    "not_found",
+                    f"No {self.settings.gnomad_dataset} hit for {variant_id}.",
+                    url=self._manual_url("gnomAD", variant),
+                    raw=payload,
+                )
+                self._gnomad_cache[variant_id] = evidence
+                return evidence
+            evidence = self._format_gnomad_evidence(variant, variant_id, data)
+            self._gnomad_cache[variant_id] = evidence
+            return evidence
+        except Exception as exc:
+            return DatabaseEvidence("gnomAD", "error", f"gnomAD lookup failed: {exc}", url=self._manual_url("gnomAD", variant))
+
+    def _format_gnomad_evidence(self, variant: VariantRecord, variant_id: str, data: dict) -> DatabaseEvidence:
+        exome = data.get("exome") or {}
+        genome = data.get("genome") or {}
+        exome_af = self._frequency(exome)
+        genome_af = self._frequency(genome)
+        aggregated_ac = (exome.get("ac") or 0) + (genome.get("ac") or 0)
+        aggregated_an = (exome.get("an") or 0) + (genome.get("an") or 0)
+        aggregated_af = aggregated_ac / aggregated_an if aggregated_an else None
+        max_source, max_population, max_af = self._max_population_frequency(exome, genome)
+        hom_count = (exome.get("homozygote_count") or exome.get("ac_hom") or 0) + (genome.get("homozygote_count") or genome.get("ac_hom") or 0)
+        hemi_count = (exome.get("hemizygote_count") or exome.get("ac_hemi") or 0) + (genome.get("hemizygote_count") or genome.get("ac_hemi") or 0)
+        filters = sorted({str(item) for item in (exome.get("filters") or []) + (genome.get("filters") or [])})
+
+        parts = [
+            f"dataset={self.settings.gnomad_dataset}",
+            f"variant={variant_id}",
+        ]
+        if aggregated_af is not None:
+            parts.append(f"aggregated_AF={self._pct(aggregated_af)} ({aggregated_ac}/{aggregated_an})")
+        if exome_af is not None:
+            parts.append(f"exome_AF={self._pct(exome_af)} ({exome.get('ac')}/{exome.get('an')})")
+        if genome_af is not None:
+            parts.append(f"genome_AF={self._pct(genome_af)} ({genome.get('ac')}/{genome.get('an')})")
+        if max_af is not None:
+            parts.append(f"max_population_AF={self._pct(max_af)} ({max_source}:{max_population})")
+        parts.append(f"homozygotes={hom_count}")
+        if hemi_count:
+            parts.append(f"hemizygotes={hemi_count}")
+        if filters:
+            parts.append("filters=" + ",".join(filters))
+        if max_af is not None:
+            parts.append("frequency_context=" + self._frequency_context(max_af, hom_count))
+
+        return DatabaseEvidence(
                 database="gnomAD",
                 status="found",
-                summary="; ".join(af_parts) or f"gnomAD record found for {variant_id}.",
+                summary="; ".join(parts),
                 accession=", ".join(data.get("rsids") or []),
                 url=self._manual_url("gnomAD", variant),
                 raw=data,
             )
-        except Exception as exc:
-            return DatabaseEvidence("gnomAD", "error", f"gnomAD lookup failed: {exc}", url=self._manual_url("gnomAD", variant))
+
+    def _wait_for_gnomad_slot(self) -> None:
+        with self._gnomad_lock:
+            elapsed = time.monotonic() - self._last_gnomad_request
+            wait_seconds = max(0.0, 6.2 - elapsed)
+            if wait_seconds:
+                time.sleep(wait_seconds)
+            type(self)._last_gnomad_request = time.monotonic()
+
+    def _frequency(self, source: dict) -> float | None:
+        if source.get("af") is not None:
+            return source["af"]
+        ac = source.get("ac")
+        an = source.get("an")
+        return ac / an if ac is not None and an else None
+
+    def _max_population_frequency(self, *sources: dict) -> tuple[str, str, float | None]:
+        best_source = ""
+        best_population = ""
+        best_af: float | None = None
+        for source_name, source in zip(["exome", "genome"], sources):
+            faf95 = source.get("faf95") or {}
+            if faf95.get("popmax") is not None and (best_af is None or faf95["popmax"] > best_af):
+                best_source = source_name
+                best_population = faf95.get("popmax_population") or "faf95_popmax"
+                best_af = faf95["popmax"]
+            for population in source.get("populations") or []:
+                af = self._frequency(population)
+                if af is not None and (best_af is None or af > best_af):
+                    best_source = source_name
+                    best_population = population.get("id") or "population"
+                    best_af = af
+        return best_source, best_population, best_af
+
+    def _pct(self, value: float) -> str:
+        return f"{value:.4%}"
+
+    def _frequency_context(self, max_af: float, hom_count: int) -> str:
+        if max_af >= 0.01:
+            return "common_population_variant"
+        if max_af >= 0.001:
+            return "low_frequency_population_variant"
+        if hom_count:
+            return "very_rare_with_homozygotes"
+        return "very_rare_or_absent"
 
     def _gnomad_variant_id(self, variant: VariantRecord) -> str:
         if not variant.genomic_location or not variant.ref_allele or not variant.alt_allele:
@@ -379,7 +489,7 @@ class DatabaseSearchService:
             "COSMIC": f"https://cancer.sanger.ac.uk/cosmic/search?q={query}",
             "OncoKB": f"https://www.oncokb.org/gene/{urllib.parse.quote(variant.symbol)}",
             "Franklin": f"https://franklin.genoox.com/clinical-db/home?search={query}",
-            "gnomAD": f"https://gnomad.broadinstitute.org/variant/{urllib.parse.quote(self._gnomad_variant_id(variant))}?dataset=gnomad_r2_1",
+            "gnomAD": f"https://gnomad.broadinstitute.org/variant/{urllib.parse.quote(self._gnomad_variant_id(variant))}?dataset={self.settings.gnomad_dataset}",
         }
         return urls.get(database, "")
 

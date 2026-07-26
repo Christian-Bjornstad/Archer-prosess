@@ -8,6 +8,7 @@ from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QDateEdit,
     QFileDialog,
     QFrame,
@@ -312,6 +313,9 @@ class MainWindow(QMainWindow):
         self.clinvar_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.oncokb_key_edit = QLineEdit(self.settings.oncokb_api_key)
         self.oncokb_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.gnomad_dataset_combo = QComboBox()
+        self.gnomad_dataset_combo.addItems(["gnomad_r2_1", "gnomad_r3", "gnomad_r4"])
+        self.gnomad_dataset_combo.setCurrentText(self.settings.gnomad_dataset)
         save_btn = QPushButton("Save Settings")
         save_btn.setObjectName("PrimaryButton")
         save_btn.clicked.connect(self._save_settings)
@@ -325,7 +329,9 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.clinvar_key_edit, 2, 1)
         grid.addWidget(QLabel("OncoKB API token"), 3, 0)
         grid.addWidget(self.oncokb_key_edit, 3, 1)
-        grid.addWidget(save_btn, 4, 2)
+        grid.addWidget(QLabel("gnomAD dataset"), 4, 0)
+        grid.addWidget(self.gnomad_dataset_combo, 4, 1)
+        grid.addWidget(save_btn, 5, 2)
         layout.addWidget(group)
         layout.addStretch()
         return page
@@ -456,6 +462,7 @@ class MainWindow(QMainWindow):
         self.settings.clinvar_api_key = self.clinvar_key_edit.text()
         self.settings.oncokb_api_key = self.oncokb_key_edit.text()
         self.settings.database_workers = self.worker_count.value()
+        self.settings.gnomad_dataset = self.gnomad_dataset_combo.currentText()
         self.settings.enabled_databases = [name for name, check in self.db_checks.items() if check.isChecked()]
         self.settings.save()
         if not silent:

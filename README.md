@@ -20,6 +20,7 @@ Current database status:
 
 Database searches run in parallel with a bounded worker count from the Databases tab.
 The default is 3 workers.
+gnomAD lookups are rate-limited internally and default to `gnomad_r2_1` for Archer GRCh37/hg19 coordinates.
 
 ## Run
 
