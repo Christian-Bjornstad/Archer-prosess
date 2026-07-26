@@ -18,6 +18,9 @@ Current database status:
 - OncoKB: live lookup when an API token is saved in Settings.
 - MTBP, HSMD, Franklin: prepared manual/login evidence links.
 
+Database searches run in parallel with a bounded worker count from the Databases tab.
+The default is 3 workers.
+
 ## Run
 
 ```powershell

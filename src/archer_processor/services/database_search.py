@@ -3,6 +3,8 @@ from __future__ import annotations
 import html
 import urllib.parse
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Iterable
 
 import requests
@@ -37,6 +39,48 @@ class DatabaseSearchService:
             else:
                 evidence.append(self._manual_evidence(database, variant))
         return evidence
+
+    def search_variants_parallel(
+        self,
+        variants: list[VariantRecord],
+        databases: Iterable[str],
+        max_workers: int = 3,
+        progress: Callable[[int, int, VariantRecord], None] | None = None,
+    ) -> dict[str, list[DatabaseEvidence]]:
+        database_list = list(databases)
+        total = len(variants)
+        if total == 0:
+            return {}
+
+        workers = max(1, min(int(max_workers or 1), 8, total))
+        results: dict[str, list[DatabaseEvidence]] = {}
+        completed = 0
+
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="db-search") as executor:
+            future_map = {
+                executor.submit(self.search_variant, variant, database_list): variant
+                for variant in variants
+            }
+            for future in as_completed(future_map):
+                variant = future_map[future]
+                key = self.variant_key(variant)
+                try:
+                    results[key] = future.result()
+                except Exception as exc:
+                    results[key] = [
+                        DatabaseEvidence(
+                            database="Search",
+                            status="error",
+                            summary=f"Parallel search failed for {variant.display_name}: {exc}",
+                        )
+                    ]
+                completed += 1
+                if progress:
+                    progress(completed, total, variant)
+        return results
+
+    def variant_key(self, variant: VariantRecord) -> str:
+        return f"{variant.sample}|{variant.hgvsc}"
 
     def _manual_evidence(self, database: str, variant: VariantRecord) -> DatabaseEvidence:
         query = variant.hgvsc or variant.genomic_location or variant.display_name

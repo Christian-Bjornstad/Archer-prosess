@@ -38,3 +38,10 @@ Database evidence sources:
 - OncoKB is token-based. Add the API token in Settings to enable live annotation; without a token the app records a prepared query and direct review link.
 - MTBP, HSMD and Franklin currently require login/license/manual review. The app records prepared queries and direct review links.
 - Evidence must be presented as support for human interpretation, not as automatic final classification.
+
+Parallel search:
+
+- Database searches run in a background GUI thread.
+- Within that thread, variants are searched concurrently with a bounded worker pool.
+- The default is 3 workers and the UI allows 1-8 workers.
+- Use lower worker counts for public APIs without tokens; use higher counts only when local/network policy and API credentials allow it.

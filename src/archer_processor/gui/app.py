@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSpinBox,
     QStatusBar,
     QTableWidget,
     QTableWidgetItem,
@@ -85,19 +86,30 @@ class DatabaseWorker(QObject):
     failed = pyqtSignal(str)
     status = pyqtSignal(str)
 
-    def __init__(self, variants, databases: list[str], settings: AppSettings):
+    def __init__(self, variants, databases: list[str], settings: AppSettings, max_workers: int):
         super().__init__()
         self.variants = variants
         self.databases = databases
         self.settings = settings
+        self.max_workers = max_workers
 
     def run(self) -> None:
         try:
             service = DatabaseSearchService(self.settings)
-            evidence = {}
-            for index, variant in enumerate(self.variants, start=1):
-                self.status.emit(f"Searching evidence {index}/{len(self.variants)}: {variant.display_name}")
-                evidence[f"{variant.sample}|{variant.hgvsc}"] = service.search_variant(variant, self.databases)
+            self.status.emit(
+                f"Parallel search started: {len(self.variants)} variants, "
+                f"{len(self.databases)} sources, {self.max_workers} workers"
+            )
+
+            def on_progress(done: int, total: int, variant) -> None:
+                self.status.emit(f"Evidence {done}/{total} complete: {variant.display_name}")
+
+            evidence = service.search_variants_parallel(
+                self.variants,
+                self.databases,
+                max_workers=self.max_workers,
+                progress=on_progress,
+            )
             self.finished.emit(evidence)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -260,6 +272,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(checks)
 
         actions = QHBoxLayout()
+        actions.addWidget(QLabel("Workers"))
+        self.worker_count = QSpinBox()
+        self.worker_count.setRange(1, 8)
+        self.worker_count.setValue(self.settings.database_workers)
+        self.worker_count.setToolTip("Parallel variant searches. Use 2-3 for public APIs without API keys.")
+        actions.addWidget(self.worker_count)
         self.search_btn = QPushButton("Search Selected Sources")
         self.search_btn.setEnabled(False)
         self.search_btn.clicked.connect(self._start_database_search)
@@ -400,7 +418,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No sources", "Select at least one evidence source.")
             return
         self._set_busy("Searching")
-        worker = DatabaseWorker(self.result.included, databases, self.settings)
+        worker = DatabaseWorker(self.result.included, databases, self.settings, self.worker_count.value())
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -437,6 +455,7 @@ class MainWindow(QMainWindow):
         self.settings.default_output_dir = self.output_dir_edit.text()
         self.settings.clinvar_api_key = self.clinvar_key_edit.text()
         self.settings.oncokb_api_key = self.oncokb_key_edit.text()
+        self.settings.database_workers = self.worker_count.value()
         self.settings.enabled_databases = [name for name, check in self.db_checks.items() if check.isChecked()]
         self.settings.save()
         if not silent:
