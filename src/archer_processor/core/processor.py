@@ -2,21 +2,26 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from archer_processor.io.tsv_reader import ArcherTsvReader
 from archer_processor.knowledge.history import VariantHistoryRepository
 
 from .models import ProcessingResult
 from .rules import FilterEngine
 
+if TYPE_CHECKING:
+    from archer_processor.io.tsv_reader import ArcherTsvReader
+
 
 class VariantProcessor:
     def __init__(
         self,
-        reader: ArcherTsvReader | None = None,
+        reader: "ArcherTsvReader | None" = None,
         filter_engine: FilterEngine | None = None,
         history: VariantHistoryRepository | None = None,
     ) -> None:
+        from archer_processor.io.tsv_reader import ArcherTsvReader
+
         self.reader = reader or ArcherTsvReader()
         self.filter_engine = filter_engine or FilterEngine()
         self.history = history

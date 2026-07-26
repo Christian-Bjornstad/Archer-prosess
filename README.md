@@ -8,7 +8,15 @@ The app is being rebuilt as a clean PyQt6 project with a stable processing core:
 - apply local production filtering rules
 - compare variants with the yearly VPM history workbook
 - prepare review-ready Excel workbooks
-- support database evidence workflows from ClinVar, gnomAD, COSMIC, OncoKB, MTBP, HSMD, Franklin and related manual sources
+- support database evidence workflows from ClinVar, COSMIC, gnomAD, OncoKB, MTBP, HSMD, Franklin and related manual sources
+
+Current database status:
+
+- ClinVar: live lookup through NCBI E-utilities.
+- COSMIC: live basic lookup through NLM Clinical Tables.
+- gnomAD: live GraphQL lookup when genomic coordinates and ref/alt are available.
+- OncoKB: live lookup when an API token is saved in Settings.
+- MTBP, HSMD, Franklin: prepared manual/login evidence links.
 
 ## Run
 

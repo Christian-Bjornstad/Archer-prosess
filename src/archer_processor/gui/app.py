@@ -21,7 +21,6 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
-    QSplitter,
     QStatusBar,
     QTableWidget,
     QTableWidgetItem,
@@ -132,6 +131,8 @@ class MainWindow(QMainWindow):
         self.evidence = {}
         self.processing_thread: QThread | None = None
         self.database_thread: QThread | None = None
+        self.processing_worker: ProcessingWorker | None = None
+        self.database_worker: DatabaseWorker | None = None
         self.setWindowTitle("Archer Prosess")
         self.resize(1280, 820)
         self._build_ui()
@@ -189,10 +190,12 @@ class MainWindow(QMainWindow):
         grid.setColumnStretch(1, 1)
         self.input_edit = QLineEdit()
         self.input_edit.setPlaceholderText("Archer all_samples_filtered_variants.tsv")
+        self.input_edit.textChanged.connect(self._update_process_state)
         input_btn = QPushButton("Browse")
         input_btn.clicked.connect(self._browse_input)
         self.output_edit = QLineEdit()
         self.output_edit.setPlaceholderText("Output workbook")
+        self.output_edit.textChanged.connect(self._update_process_state)
         output_btn = QPushButton("Browse")
         output_btn.clicked.connect(self._browse_output)
         self.run_date = QDateEdit()
@@ -217,6 +220,7 @@ class MainWindow(QMainWindow):
         self.validate_btn.clicked.connect(self._validate_input)
         self.process_btn = QPushButton("Process and Export")
         self.process_btn.setObjectName("PrimaryButton")
+        self.process_btn.setEnabled(False)
         self.process_btn.clicked.connect(self._start_processing)
         actions.addWidget(self.validate_btn)
         actions.addWidget(self.process_btn)
@@ -288,6 +292,8 @@ class MainWindow(QMainWindow):
         dir_btn.clicked.connect(self._browse_output_dir)
         self.clinvar_key_edit = QLineEdit(self.settings.clinvar_api_key)
         self.clinvar_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.oncokb_key_edit = QLineEdit(self.settings.oncokb_api_key)
+        self.oncokb_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         save_btn = QPushButton("Save Settings")
         save_btn.setObjectName("PrimaryButton")
         save_btn.clicked.connect(self._save_settings)
@@ -299,7 +305,9 @@ class MainWindow(QMainWindow):
         grid.addWidget(dir_btn, 1, 2)
         grid.addWidget(QLabel("ClinVar API key"), 2, 0)
         grid.addWidget(self.clinvar_key_edit, 2, 1)
-        grid.addWidget(save_btn, 3, 2)
+        grid.addWidget(QLabel("OncoKB API token"), 3, 0)
+        grid.addWidget(self.oncokb_key_edit, 3, 1)
+        grid.addWidget(save_btn, 4, 2)
         layout.addWidget(group)
         layout.addStretch()
         return page
@@ -333,6 +341,10 @@ class MainWindow(QMainWindow):
         for message in warnings + errors:
             self._log(message)
         if ok:
+            if not self.output_edit.text().strip():
+                output = Path(self.settings.default_output_dir) / f"{path.stem}_archer_review.xlsx"
+                self.output_edit.setText(str(output))
+            self._update_process_state()
             QMessageBox.information(self, "Validation", "TSV validation passed.")
         else:
             QMessageBox.critical(self, "Validation failed", "\n".join(errors))
@@ -340,9 +352,12 @@ class MainWindow(QMainWindow):
     def _start_processing(self) -> None:
         input_path = Path(self.input_edit.text())
         output_path = Path(self.output_edit.text())
-        if not input_path.exists() or not output_path:
+        if not input_path.exists() or not self.output_edit.text().strip():
             QMessageBox.warning(self, "Missing files", "Select an input TSV and output workbook.")
             return
+        if output_path.suffix.lower() != ".xlsx":
+            output_path = output_path.with_suffix(".xlsx")
+            self.output_edit.setText(str(output_path))
         self._save_settings(silent=True)
         self._set_busy("Processing")
         worker = ProcessingWorker(
@@ -363,6 +378,7 @@ class MainWindow(QMainWindow):
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         self.processing_thread = thread
+        self.processing_worker = worker
         thread.start()
 
     def _processing_finished(self, result: ProcessingResult) -> None:
@@ -396,6 +412,7 @@ class MainWindow(QMainWindow):
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         self.database_thread = thread
+        self.database_worker = worker
         thread.start()
 
     def _database_finished(self, evidence: dict) -> None:
@@ -419,6 +436,7 @@ class MainWindow(QMainWindow):
         self.settings.history_workbook = self.history_edit.text()
         self.settings.default_output_dir = self.output_dir_edit.text()
         self.settings.clinvar_api_key = self.clinvar_key_edit.text()
+        self.settings.oncokb_api_key = self.oncokb_key_edit.text()
         self.settings.enabled_databases = [name for name, check in self.db_checks.items() if check.isChecked()]
         self.settings.save()
         if not silent:
@@ -483,9 +501,14 @@ class MainWindow(QMainWindow):
 
     def _set_ready(self) -> None:
         self.status_badge.setText("Ready")
-        self.process_btn.setEnabled(True)
+        self._update_process_state()
         self.search_btn.setEnabled(self.result is not None)
         self.status_bar.showMessage("Ready", 3000)
+
+    def _update_process_state(self) -> None:
+        has_input = Path(self.input_edit.text()).exists()
+        has_output = bool(self.output_edit.text().strip())
+        self.process_btn.setEnabled(has_input and has_output)
 
     def _log(self, message: str) -> None:
         self.log.appendPlainText(message)

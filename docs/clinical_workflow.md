@@ -33,5 +33,8 @@ Special review flags from the current clinical notes:
 Database evidence sources:
 
 - ClinVar can be queried through NCBI E-utilities.
-- MTBP, HSMD, COSMIC, OncoKB, Franklin and several other sources often require login, license, token, or manual review.
+- COSMIC is queried through the NLM Clinical Tables COSMIC endpoint for basic mutation evidence; the official COSMIC site may still require registration/licensing for full clinical review.
+- gnomAD is queried through the public browser GraphQL endpoint when genomic location plus ref/alt alleles can be converted to a GRCh37 variant ID.
+- OncoKB is token-based. Add the API token in Settings to enable live annotation; without a token the app records a prepared query and direct review link.
+- MTBP, HSMD and Franklin currently require login/license/manual review. The app records prepared queries and direct review links.
 - Evidence must be presented as support for human interpretation, not as automatic final classification.

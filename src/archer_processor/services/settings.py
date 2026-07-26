@@ -11,6 +11,7 @@ class AppSettings:
     history_workbook: str = r"C:\Users\molpa\Desktop\HTS\Resultat_VPM\2026_VPM_Variantfunn.xlsx"
     default_output_dir: str = str(Path.home() / "Desktop")
     clinvar_api_key: str = ""
+    oncokb_api_key: str = ""
     enabled_databases: list[str] = field(default_factory=lambda: ["ClinVar"])
 
     @classmethod
