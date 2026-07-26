@@ -12,6 +12,7 @@ class AppSettings:
     default_output_dir: str = str(Path.home() / "Desktop")
     clinvar_api_key: str = ""
     oncokb_api_key: str = ""
+    franklin_api_key: str = ""
     database_workers: int = 3
     gnomad_dataset: str = "gnomad_r2_1"
     enabled_databases: list[str] = field(default_factory=lambda: ["ClinVar"])

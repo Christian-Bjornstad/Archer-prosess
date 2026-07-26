@@ -16,9 +16,8 @@ from archer_processor.services.settings import AppSettings
 
 
 MANUAL_DATABASES = {
-    "MTBP": "Licensed/manual workflow. Search in MTBP Karolinska and record evidence.",
-    "HSMD": "Licensed/manual workflow. Search by variant, gene alteration, or genomic position.",
-    "Franklin": "Login workflow. Use gene, HGVSc/HGVSp, or genomic position.",
+    "MTBP": "Licensed/manual workflow. Capture functional relevance category, population AF, ClinVar class, and evidence notes.",
+    "HSMD": "Licensed/manual workflow. Capture actionability tier, clinical review status, population frequency, and references.",
 }
 
 
@@ -40,6 +39,8 @@ class DatabaseSearchService:
                 evidence.append(self._search_cosmic(variant))
             elif database == "OncoKB":
                 evidence.append(self._search_oncokb(variant))
+            elif database == "Franklin":
+                evidence.append(self._search_franklin(variant))
             elif database == "gnomAD":
                 evidence.append(self._search_gnomad(variant))
             else:
@@ -318,6 +319,85 @@ class DatabaseSearchService:
         except Exception as exc:
             return DatabaseEvidence("OncoKB", "error", f"OncoKB lookup failed: {exc}", url=self._manual_url("OncoKB", variant))
 
+    def _search_franklin(self, variant: VariantRecord) -> DatabaseEvidence:
+        query = self._franklin_search_text(variant)
+        if not query:
+            return DatabaseEvidence("Franklin", "invalid_query", "Needs genomic position/ref/alt, HGVSc, or gene alteration.", url=self._manual_url("Franklin", variant))
+        if not self.settings.franklin_api_key:
+            return DatabaseEvidence(
+                database="Franklin",
+                status="token_required",
+                summary=f"Franklin API requires a token. Query prepared: {query}.",
+                url=self._manual_url("Franklin", variant),
+            )
+        try:
+            response = requests.get(
+                "https://api.genoox.com/v2/search/snp/",
+                params={"search_text": query},
+                headers={
+                    "Authorization": f"Bearer {self.settings.franklin_api_key}",
+                    "Accept": "application/json",
+                },
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            data = response.json()
+            return self._format_franklin_evidence(variant, query, data)
+        except requests.HTTPError as exc:
+            status = "unauthorized" if exc.response is not None and exc.response.status_code in {401, 403} else "error"
+            return DatabaseEvidence("Franklin", status, f"Franklin lookup failed: {exc}", url=self._manual_url("Franklin", variant))
+        except Exception as exc:
+            return DatabaseEvidence("Franklin", "error", f"Franklin lookup failed: {exc}", url=self._manual_url("Franklin", variant))
+
+    def _format_franklin_evidence(self, variant: VariantRecord, query: str, data: dict) -> DatabaseEvidence:
+        record = self._first_franklin_record(data)
+        if not record:
+            return DatabaseEvidence(
+                database="Franklin",
+                status="not_found",
+                summary=f"No Franklin result for {query}.",
+                url=self._manual_url("Franklin", variant),
+                raw=data,
+            )
+
+        annotations = record.get("annotations") or {}
+        classification = record.get("classification") or {}
+        clinical = annotations.get("clinical_evidences") or record.get("clinical_evidences") or {}
+        predictions = annotations.get("predictions") or {}
+        frequencies = annotations.get("frequencies") or {}
+        transcripts = annotations.get("transcripts") or []
+
+        acmg = str(classification.get("acmg_classification") or classification.get("computed_classification") or "")
+        acmg_rules = self._franklin_met_rules(classification)
+        frequency_text = self._franklin_frequency_text(frequencies)
+        prediction_text = self._franklin_prediction_text(predictions)
+        clinvar_text = self._franklin_clinvar_text(clinical)
+        transcript_text = self._franklin_transcript_text(transcripts)
+
+        parts = [f"query={query}"]
+        if acmg:
+            parts.append(f"ACMG={acmg}")
+        if acmg_rules:
+            parts.append(f"rules={acmg_rules}")
+        if frequency_text:
+            parts.append(frequency_text)
+        if prediction_text:
+            parts.append(prediction_text)
+        if clinvar_text:
+            parts.append(f"ClinVar={clinvar_text}")
+        if transcript_text:
+            parts.append(f"transcript={transcript_text}")
+
+        return DatabaseEvidence(
+            database="Franklin",
+            status="found",
+            summary="; ".join(parts),
+            accession=query,
+            clinical_significance=acmg,
+            url=self._franklin_url(record, variant),
+            raw=data,
+        )
+
     def _search_gnomad(self, variant: VariantRecord) -> DatabaseEvidence:
         variant_id = self._gnomad_variant_id(variant)
         if not variant_id:
@@ -480,6 +560,118 @@ class DatabaseSearchService:
             return f"{chrom}-{pos}-{variant.ref_allele}-{variant.alt_allele}"
         except ValueError:
             return ""
+
+    def _franklin_search_text(self, variant: VariantRecord) -> str:
+        if variant.genomic_location and variant.ref_allele and variant.alt_allele:
+            try:
+                chrom, pos = variant.genomic_location.split(":", 1)
+                pos = pos.split("-", 1)[0]
+                if not chrom.lower().startswith("chr"):
+                    chrom = f"chr{chrom}"
+                return f"{chrom}-{pos}-{variant.ref_allele}-{variant.alt_allele}"
+            except ValueError:
+                pass
+        cdna = self._cdna_without_transcript(variant.hgvsc)
+        if variant.symbol and cdna:
+            return f"{variant.symbol}:{cdna}"
+        return variant.hgvsc or variant.genomic_location or variant.display_name
+
+    def _first_franklin_record(self, data: dict) -> dict:
+        if not isinstance(data, dict):
+            return {}
+        for key in ["variant", "result"]:
+            if isinstance(data.get(key), dict):
+                return data[key]
+        for key in ["variants", "results", "data"]:
+            value = data.get(key)
+            if isinstance(value, list) and value and isinstance(value[0], dict):
+                return value[0]
+            if isinstance(value, dict):
+                nested = self._first_franklin_record(value)
+                if nested:
+                    return nested
+        return data if any(key in data for key in ["annotations", "classification", "clinical_evidences"]) else {}
+
+    def _franklin_met_rules(self, classification: dict) -> str:
+        rules = []
+        for rule in classification.get("acmg_rules") or classification.get("rules") or []:
+            if not isinstance(rule, dict):
+                continue
+            is_met = rule.get("is_met")
+            if is_met is False:
+                continue
+            name = rule.get("name") or rule.get("code") or rule.get("rule")
+            if name:
+                rules.append(str(name))
+        return ",".join(rules[:8])
+
+    def _franklin_frequency_text(self, frequencies: dict | list) -> str:
+        entries = []
+        if isinstance(frequencies, dict):
+            iterable = frequencies.values()
+        elif isinstance(frequencies, list):
+            iterable = frequencies
+        else:
+            iterable = []
+        for item in iterable:
+            if not isinstance(item, dict):
+                continue
+            source = item.get("source") or item.get("db") or item.get("database") or item.get("name")
+            value = item.get("frequency") or item.get("af") or item.get("allele_frequency")
+            population = item.get("population") or item.get("subpopulation")
+            if value is not None:
+                label = str(source or "frequency")
+                if population:
+                    label = f"{label}:{population}"
+                entries.append(f"{label}={value}")
+        return "frequencies=" + ", ".join(entries[:5]) if entries else ""
+
+    def _franklin_prediction_text(self, predictions: dict) -> str:
+        if not isinstance(predictions, dict):
+            return ""
+        wanted = ["revel", "aggregated_predictions", "sift", "polyphen", "splice_ai"]
+        entries = []
+        for key in wanted:
+            value = predictions.get(key)
+            if value in [None, "", {}]:
+                continue
+            if isinstance(value, dict):
+                score = value.get("score") or value.get("prediction") or value.get("value")
+                value = score if score not in [None, ""] else value
+            entries.append(f"{key}={value}")
+        return "predictions=" + ", ".join(entries[:5]) if entries else ""
+
+    def _franklin_clinvar_text(self, clinical: dict) -> str:
+        clinvar = clinical.get("clinvar") if isinstance(clinical, dict) else None
+        if not isinstance(clinvar, dict):
+            return ""
+        classification = clinvar.get("classification") or clinvar.get("clinical_significance")
+        submissions = clinvar.get("submissions_by_classification") or []
+        if submissions and isinstance(submissions, list):
+            counts = []
+            for item in submissions:
+                if isinstance(item, dict):
+                    label = item.get("classification") or item.get("clinical_significance") or item.get("name")
+                    count = item.get("count")
+                    if label:
+                        counts.append(f"{label}:{count}" if count is not None else str(label))
+            return ", ".join(counts[:5])
+        return str(classification or "")
+
+    def _franklin_transcript_text(self, transcripts: list) -> str:
+        if not isinstance(transcripts, list) or not transcripts:
+            return ""
+        first = next((item for item in transcripts if isinstance(item, dict) and item.get("transcript_type") == "REFSEQ"), transcripts[0])
+        if not isinstance(first, dict):
+            return ""
+        return " ".join(str(first.get(key)) for key in ["transcript", "cdot", "pdot"] if first.get(key))
+
+    def _franklin_url(self, record: dict, variant: VariantRecord) -> str:
+        for key in ["link", "url", "franklin_url", "variant_url"]:
+            value = record.get(key)
+            if value:
+                return str(value)
+        return self._manual_url("Franklin", variant)
 
     def _manual_url(self, database: str, variant: VariantRecord) -> str:
         query = urllib.parse.quote(" ".join(part for part in [variant.symbol, variant.hgvsc, variant.hgvsp, variant.genomic_location] if part))

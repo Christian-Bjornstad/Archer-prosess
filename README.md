@@ -16,7 +16,8 @@ Current database status:
 - COSMIC: live basic lookup through NLM Clinical Tables.
 - gnomAD: live GraphQL lookup when genomic coordinates and ref/alt are available.
 - OncoKB: live lookup when an API token is saved in Settings.
-- MTBP, HSMD, Franklin: prepared manual/login evidence links.
+- Franklin: live lookup when an API token is saved in Settings; otherwise the app prepares a review query.
+- MTBP, HSMD: prepared manual/login evidence links.
 
 Database searches run in parallel with a bounded worker count from the Databases tab.
 The default is 3 workers.
