@@ -44,12 +44,27 @@ def test_database_diagnostics_reports_ready_token_and_manual_sources():
     settings = AppSettings(enabled_databases=["ClinVar"], oncokb_api_key="", franklin_api_key="")
     service = DatabaseSearchService(settings)
 
-    diagnostics = service.database_diagnostics(["ClinVar", "gnomAD", "COSMIC", "CIViC", "OncoKB", "Franklin", "MTBP", "HSMD"])
+    diagnostics = service.database_diagnostics([
+        "ClinVar",
+        "gnomAD",
+        "COSMIC",
+        "CIViC",
+        "DGIdb",
+        "ClinGen Allele Registry",
+        "cBioPortal",
+        "OncoKB",
+        "Franklin",
+        "MTBP",
+        "HSMD",
+    ])
 
     assert diagnostics["ClinVar"] == "ready"
     assert diagnostics["gnomAD"].startswith("ready")
     assert diagnostics["COSMIC"] == "ready (basic/public lookup)"
     assert diagnostics["CIViC"] == "ready (open GraphQL)"
+    assert diagnostics["DGIdb"] == "ready (open GraphQL)"
+    assert diagnostics["ClinGen Allele Registry"] == "ready (open REST)"
+    assert diagnostics["cBioPortal"] == "ready (public cohort context)"
     assert diagnostics["OncoKB"] == "token required"
     assert diagnostics["Franklin"] == "token required"
     assert diagnostics["MTBP"] == "manual"
@@ -467,6 +482,128 @@ def test_civic_graphql_error_is_reported(monkeypatch):
 
     assert evidence.status == "error"
     assert "schema changed" in evidence.summary
+
+
+def test_dgidb_found_uses_graphql(monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = DatabaseSearchService(timeout=1)
+
+    def fake_post(url, json, headers, timeout):
+        assert url == "https://dgidb.org/api/graphql"
+        assert json["variables"]["names"] == ["TP53"]
+        return FakeResponse(
+            {
+                "data": {
+                    "genes": {
+                        "nodes": [
+                            {
+                                "name": "TP53",
+                                "conceptId": "hgnc:11998",
+                                "longName": "tumor protein p53",
+                                "interactions": [
+                                    {
+                                        "evidenceScore": 19,
+                                        "interactionTypes": [{"type": "inhibitor"}],
+                                        "drug": {"name": "CISPLATIN", "approved": True, "antiNeoplastic": True},
+                                        "sources": [{"sourceDbName": "CIViC"}],
+                                        "publications": [{"pmid": 123}],
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr("archer_processor.services.database_search.requests.post", fake_post)
+
+    evidence = service._search_dgidb(variant)
+
+    assert evidence.status == "found"
+    assert evidence.accession == "hgnc:11998"
+    assert "interactions=1" in evidence.summary
+    assert "approved=1" in evidence.summary
+    assert "CISPLATIN (inhibitor) evidence=19" in evidence.summary
+
+
+def test_clingen_allele_registry_found(monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = DatabaseSearchService(timeout=1)
+
+    def fake_get(url, params, headers, timeout):
+        assert url == "https://reg.clinicalgenome.org/allele"
+        assert params["hgvs"] == "NM_000546.6:c.524G>A"
+        return FakeResponse(
+            {
+                "@id": "http://reg.genome.network/allele/CA000251",
+                "communityStandardTitle": ["NM_000546.6(TP53):c.524G>A (p.Arg175His)"],
+                "externalRecords": {
+                    "COSMIC": [{"id": "COSM10648"}],
+                    "dbSNP": [{"id": "rs28934578"}],
+                },
+            }
+        )
+
+    monkeypatch.setattr("archer_processor.services.database_search.requests.get", fake_get)
+
+    evidence = service._search_clingen_allele_registry(variant)
+
+    assert evidence.status == "found"
+    assert evidence.accession == "CA000251"
+    assert "external_records=COSMIC=1, dbSNP=1" in evidence.summary
+    assert "COSM10648" in evidence.summary
+
+
+def test_clingen_allele_registry_invalid_query(monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = DatabaseSearchService(timeout=1)
+
+    def fake_get(*args, **kwargs):
+        return FakeResponse({"message": "Reference allele does not match."}, status_code=400)
+
+    monkeypatch.setattr("archer_processor.services.database_search.requests.get", fake_get)
+
+    evidence = service._search_clingen_allele_registry(variant)
+
+    assert evidence.status == "invalid_query"
+    assert "Reference allele does not match" in evidence.summary
+
+
+def test_cbioportal_found_counts_exact_protein_change(monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = DatabaseSearchService(timeout=1)
+
+    def fake_get(url, headers, timeout):
+        assert url.endswith("/api/genes/TP53")
+        return FakeResponse({"entrezGeneId": 7157})
+
+    def fake_post(url, params, json, headers, timeout):
+        assert url.endswith("/mutations/fetch")
+        assert json == {"entrezGeneIds": [7157], "sampleListId": "msk_impact_2017_all"}
+        return FakeResponse(
+            [
+                {
+                    "proteinChange": "R175H",
+                    "proteinPosStart": 175,
+                    "mutationType": "Missense_Mutation",
+                    "studyId": "msk_impact_2017",
+                },
+                {"proteinChange": "R175C", "proteinPosStart": 175, "studyId": "msk_impact_2017"},
+                {"proteinChange": "A138Cfs*27", "proteinPosStart": 138, "studyId": "msk_impact_2017"},
+            ]
+        )
+
+    monkeypatch.setattr("archer_processor.services.database_search.requests.get", fake_get)
+    monkeypatch.setattr("archer_processor.services.database_search.requests.post", fake_post)
+
+    evidence = service._search_cbioportal(variant)
+
+    assert evidence.status == "found"
+    assert evidence.accession == "TP53 Entrez:7157"
+    assert "gene_mutations=3" in evidence.summary
+    assert "exact_protein_matches=1" in evidence.summary
+    assert "same_protein_position=2" in evidence.summary
 
 
 def test_oncokb_found_includes_info_and_levels(monkeypatch):

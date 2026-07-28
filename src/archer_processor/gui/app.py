@@ -140,7 +140,19 @@ class MetricCard(QFrame):
 
 
 class MainWindow(QMainWindow):
-    databases = ["ClinVar", "gnomAD", "COSMIC", "CIViC", "MTBP", "HSMD", "OncoKB", "Franklin"]
+    databases = [
+        "ClinVar",
+        "gnomAD",
+        "COSMIC",
+        "CIViC",
+        "DGIdb",
+        "ClinGen Allele Registry",
+        "cBioPortal",
+        "MTBP",
+        "HSMD",
+        "OncoKB",
+        "Franklin",
+    ]
 
     def __init__(self) -> None:
         super().__init__()

@@ -35,6 +35,8 @@ class DatabaseSearchService:
         self.timeout = timeout
         self._gnomad_cache: dict[str, DatabaseEvidence] = {}
         self._oncokb_info_cache: dict | None = None
+        self._cbio_gene_cache: dict[str, int | None] = {}
+        self._cbio_mutation_cache: dict[int, list[dict]] = {}
 
     def database_diagnostics(self, databases: Iterable[str]) -> dict[str, str]:
         diagnostics = {}
@@ -55,6 +57,12 @@ class DatabaseSearchService:
                 diagnostics[database] = "ready (basic/public lookup)"
             elif database == "CIViC":
                 diagnostics[database] = "ready (open GraphQL)"
+            elif database == "DGIdb":
+                diagnostics[database] = "ready (open GraphQL)"
+            elif database == "ClinGen Allele Registry":
+                diagnostics[database] = "ready (open REST)"
+            elif database == "cBioPortal":
+                diagnostics[database] = "ready (public cohort context)"
             elif database in {"ClinVar", "OncoKB"}:
                 diagnostics[database] = "ready"
             else:
@@ -70,6 +78,12 @@ class DatabaseSearchService:
                 evidence.append(self._search_cosmic(variant))
             elif database == "CIViC":
                 evidence.append(self._search_civic(variant))
+            elif database == "DGIdb":
+                evidence.append(self._search_dgidb(variant))
+            elif database == "ClinGen Allele Registry":
+                evidence.append(self._search_clingen_allele_registry(variant))
+            elif database == "cBioPortal":
+                evidence.append(self._search_cbioportal(variant))
             elif database == "OncoKB":
                 evidence.append(self._search_oncokb(variant))
             elif database == "Franklin":
@@ -473,6 +487,247 @@ class DatabaseSearchService:
 
     def _absolute_civic_url(self, link: str) -> str:
         return f"https://civicdb.org{link}" if link.startswith("/") else link
+
+    def _search_dgidb(self, variant: VariantRecord) -> DatabaseEvidence:
+        if not variant.symbol:
+            return DatabaseEvidence("DGIdb", "invalid_query", "Needs gene symbol.", url=self._manual_url("DGIdb", variant))
+        try:
+            payload = self._dgidb_graphql(
+                """
+                query DgidbGene($names: [String!]) {
+                  genes(names: $names, first: 1) {
+                    nodes {
+                      name
+                      conceptId
+                      longName
+                      interactions {
+                        id
+                        interactionScore
+                        evidenceScore
+                        interactionTypes { type directionality }
+                        drug { name conceptId approved immunotherapy antiNeoplastic }
+                        sources { sourceDbName }
+                        publications { pmid }
+                      }
+                    }
+                  }
+                }
+                """,
+                {"names": [variant.symbol]},
+            )
+            genes = ((payload.get("data") or {}).get("genes") or {}).get("nodes") or []
+            gene = genes[0] if genes else {}
+            if not gene:
+                return DatabaseEvidence("DGIdb", "not_found", f"No DGIdb gene match for {variant.symbol}.", url=self._manual_url("DGIdb", variant), raw=payload)
+            return self._format_dgidb_evidence(variant, gene, payload)
+        except Exception as exc:
+            return DatabaseEvidence("DGIdb", "error", f"DGIdb lookup failed: {exc}", url=self._manual_url("DGIdb", variant))
+
+    def _format_dgidb_evidence(self, variant: VariantRecord, gene: dict, payload: dict) -> DatabaseEvidence:
+        interactions = gene.get("interactions") or []
+        approved = []
+        antineoplastic = []
+        immunotherapy = []
+        sources = []
+        top = sorted(interactions, key=lambda item: item.get("evidenceScore") or 0, reverse=True)[:5]
+        top_drugs = []
+        for item in interactions:
+            drug = item.get("drug") or {}
+            name = drug.get("name")
+            if not name:
+                continue
+            if drug.get("approved"):
+                approved.append(name)
+            if drug.get("antiNeoplastic"):
+                antineoplastic.append(name)
+            if drug.get("immunotherapy"):
+                immunotherapy.append(name)
+            for source in item.get("sources") or []:
+                if source.get("sourceDbName"):
+                    sources.append(source["sourceDbName"])
+        for item in top:
+            drug = item.get("drug") or {}
+            interaction_types = [entry.get("type") for entry in item.get("interactionTypes") or [] if entry.get("type")]
+            label = str(drug.get("name") or "")
+            if interaction_types:
+                label += f" ({', '.join(interaction_types[:2])})"
+            if item.get("evidenceScore") is not None:
+                label += f" evidence={item.get('evidenceScore')}"
+            if label:
+                top_drugs.append(label)
+        parts = [
+            f"gene={gene.get('name')}",
+            f"interactions={len(interactions)}",
+            f"approved={len(set(approved))}",
+            f"antineoplastic={len(set(antineoplastic))}",
+        ]
+        if immunotherapy:
+            parts.append(f"immunotherapy={len(set(immunotherapy))}")
+        if top_drugs:
+            parts.append("top_drugs=" + "; ".join(top_drugs))
+        if sources:
+            parts.append("sources=" + ", ".join(self._unique_text(sources)[:8]))
+        return DatabaseEvidence(
+            database="DGIdb",
+            status="found" if interactions else "not_found",
+            summary="; ".join(parts),
+            accession=str(gene.get("conceptId") or variant.symbol),
+            clinical_significance="drug-gene context" if interactions else "",
+            url=self._manual_url("DGIdb", variant),
+            raw=payload,
+        )
+
+    def _dgidb_graphql(self, query: str, variables: dict) -> dict:
+        response = requests.post(
+            "https://dgidb.org/api/graphql",
+            json={"query": query, "variables": variables},
+            headers={"Accept": "application/json"},
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("errors"):
+            message = payload["errors"][0].get("message") if isinstance(payload["errors"][0], dict) else str(payload["errors"][0])
+            raise ValueError(message)
+        return payload
+
+    def _search_clingen_allele_registry(self, variant: VariantRecord) -> DatabaseEvidence:
+        query = variant.hgvsc or variant.dbsnp_id or variant.cosmic_id
+        if not query:
+            return DatabaseEvidence("ClinGen Allele Registry", "invalid_query", "Needs HGVSc or known identifier.", url=self._manual_url("ClinGen Allele Registry", variant))
+        try:
+            response = requests.get(
+                "https://reg.clinicalgenome.org/allele",
+                params={"hgvs": query},
+                headers={"Accept": "application/json"},
+                timeout=self.timeout,
+            )
+            if response.status_code == 404:
+                return DatabaseEvidence("ClinGen Allele Registry", "not_found", f"No ClinGen Allele Registry hit for {query}.", accession=query, url=self._manual_url("ClinGen Allele Registry", variant))
+            if response.status_code == 400:
+                data = response.json()
+                return DatabaseEvidence(
+                    "ClinGen Allele Registry",
+                    "invalid_query",
+                    f"ClinGen Allele Registry rejected {query}: {data.get('message') or data.get('description') or 'invalid HGVS'}.",
+                    accession=query,
+                    url=self._manual_url("ClinGen Allele Registry", variant),
+                    raw=data,
+                )
+            response.raise_for_status()
+            data = response.json()
+            return self._format_clingen_evidence(variant, query, data)
+        except Exception as exc:
+            return DatabaseEvidence("ClinGen Allele Registry", "error", f"ClinGen Allele Registry lookup failed: {exc}", url=self._manual_url("ClinGen Allele Registry", variant))
+
+    def _format_clingen_evidence(self, variant: VariantRecord, query: str, data: dict) -> DatabaseEvidence:
+        caid = str(data.get("@id") or "").rsplit("/", 1)[-1]
+        titles = data.get("communityStandardTitle") or []
+        external = data.get("externalRecords") or {}
+        external_counts = []
+        external_ids = []
+        for source, records in external.items():
+            if isinstance(records, list) and records:
+                external_counts.append(f"{source}={len(records)}")
+                external_ids.extend(str(record.get("id")) for record in records[:3] if isinstance(record, dict) and record.get("id"))
+        summary_parts = [
+            f"CAid={caid}" if caid else "",
+            f"title={titles[0]}" if titles else "",
+        ]
+        if external_counts:
+            summary_parts.append("external_records=" + ", ".join(external_counts[:8]))
+        if external_ids:
+            summary_parts.append("ids=" + ", ".join(self._unique_text(external_ids)[:10]))
+        return DatabaseEvidence(
+            database="ClinGen Allele Registry",
+            status="found" if caid else "not_found",
+            summary="; ".join(part for part in summary_parts if part),
+            accession=caid or query,
+            clinical_significance="allele normalization",
+            url=f"https://reg.clinicalgenome.org/redmine/projects/registry/genboree_registry/by_caid?caid={urllib.parse.quote(caid)}" if caid else self._manual_url("ClinGen Allele Registry", variant),
+            raw=data,
+        )
+
+    def _search_cbioportal(self, variant: VariantRecord) -> DatabaseEvidence:
+        if not variant.symbol:
+            return DatabaseEvidence("cBioPortal", "invalid_query", "Needs gene symbol.", url=self._manual_url("cBioPortal", variant))
+        try:
+            entrez_id = self._cbio_entrez_id(variant.symbol)
+            if not entrez_id:
+                return DatabaseEvidence("cBioPortal", "not_found", f"No cBioPortal gene match for {variant.symbol}.", url=self._manual_url("cBioPortal", variant))
+            mutations = self._cbio_mutations(entrez_id)
+            return self._format_cbioportal_evidence(variant, entrez_id, mutations)
+        except Exception as exc:
+            return DatabaseEvidence("cBioPortal", "error", f"cBioPortal lookup failed: {exc}", url=self._manual_url("cBioPortal", variant))
+
+    def _format_cbioportal_evidence(self, variant: VariantRecord, entrez_id: int, mutations: list[dict]) -> DatabaseEvidence:
+        protein = self._protein_change(variant.hgvsp)
+        exact = [
+            item for item in mutations
+            if protein and str(item.get("proteinChange") or "").lower() == protein.lower()
+        ]
+        position = self._protein_position(protein)
+        same_position = [
+            item for item in mutations
+            if position is not None and item.get("proteinPosStart") == position
+        ]
+        cancer_types = self._unique_text([str(item.get("cancerType") or item.get("studyId") or "") for item in exact])[:6]
+        mutation_types = self._unique_text([str(item.get("mutationType") or "") for item in exact])[:6]
+        parts = [
+            "study=MSK-IMPACT 2017 public cohort",
+            f"gene_mutations={len(mutations)}",
+            f"exact_protein_matches={len(exact)}" if protein else "exact_protein_matches=not_available",
+        ]
+        if position is not None:
+            parts.append(f"same_protein_position={len(same_position)}")
+        if mutation_types:
+            parts.append("exact_types=" + ", ".join(mutation_types))
+        if cancer_types:
+            parts.append("exact_context=" + ", ".join(cancer_types))
+        return DatabaseEvidence(
+            database="cBioPortal",
+            status="found" if mutations else "not_found",
+            summary="; ".join(parts),
+            accession=f"{variant.symbol} Entrez:{entrez_id}",
+            clinical_significance="public cohort frequency context" if mutations else "",
+            url=self._manual_url("cBioPortal", variant),
+            raw={"entrez_id": entrez_id, "exact_matches_preview": exact[:10], "mutation_count": len(mutations)},
+        )
+
+    def _cbio_entrez_id(self, gene_symbol: str) -> int | None:
+        if gene_symbol in self._cbio_gene_cache:
+            return self._cbio_gene_cache[gene_symbol]
+        response = requests.get(
+            f"https://www.cbioportal.org/api/genes/{urllib.parse.quote(gene_symbol)}",
+            headers={"Accept": "application/json"},
+            timeout=self.timeout,
+        )
+        if response.status_code == 404:
+            self._cbio_gene_cache[gene_symbol] = None
+            return None
+        response.raise_for_status()
+        entrez_id = response.json().get("entrezGeneId")
+        self._cbio_gene_cache[gene_symbol] = int(entrez_id) if entrez_id is not None else None
+        return self._cbio_gene_cache[gene_symbol]
+
+    def _cbio_mutations(self, entrez_id: int) -> list[dict]:
+        if entrez_id in self._cbio_mutation_cache:
+            return self._cbio_mutation_cache[entrez_id]
+        response = requests.post(
+            "https://www.cbioportal.org/api/molecular-profiles/msk_impact_2017_mutations/mutations/fetch",
+            params={"projection": "DETAILED"},
+            json={"entrezGeneIds": [entrez_id], "sampleListId": "msk_impact_2017_all"},
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+            timeout=max(self.timeout, 30),
+        )
+        response.raise_for_status()
+        mutations = response.json()
+        self._cbio_mutation_cache[entrez_id] = mutations if isinstance(mutations, list) else []
+        return self._cbio_mutation_cache[entrez_id]
+
+    def _protein_position(self, protein_change: str) -> int | None:
+        digits = "".join(char for char in protein_change if char.isdigit())
+        return int(digits) if digits else None
 
     def _search_oncokb(self, variant: VariantRecord) -> DatabaseEvidence:
         alteration = self._protein_change(variant.hgvsp) or self._cdna_without_transcript(variant.hgvsc)
@@ -980,6 +1235,9 @@ class DatabaseSearchService:
             "HSMD": "https://variants.ingenuity.com/",
             "COSMIC": f"https://cancer.sanger.ac.uk/cosmic/search?q={query}",
             "CIViC": f"https://civicdb.org/search?query={query}",
+            "DGIdb": f"https://dgidb.org/results?searchType=gene&searchTerms={urllib.parse.quote(variant.symbol)}",
+            "ClinGen Allele Registry": f"https://reg.clinicalgenome.org/redmine/projects/registry/genboree_registry/landing?search={query}",
+            "cBioPortal": f"https://www.cbioportal.org/results/mutations?Action=Submit&cancer_study_list=msk_impact_2017&case_set_id=msk_impact_2017_all&gene_list={urllib.parse.quote(variant.symbol)}",
             "OncoKB": f"https://www.oncokb.org/gene/{urllib.parse.quote(variant.symbol)}",
             "Franklin": f"https://franklin.genoox.com/clinical-db/home?search={query}",
             "gnomAD": f"https://gnomad.broadinstitute.org/variant/{urllib.parse.quote(self._gnomad_variant_id(variant))}?dataset={self.settings.gnomad_dataset}",
