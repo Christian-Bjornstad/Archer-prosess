@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from math import isnan
 from pathlib import Path
+from typing import Any
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -51,11 +53,13 @@ class ExcelReportWriter:
     ) -> Path:
         workbook = Workbook()
         workbook.remove(workbook.active)
-        self._summary_sheet(workbook, result)
-        self._variant_sheet(workbook, "Variants", result.variants, result.run_date, evidence or {}, hide_excluded)
-        self._history_sheet(workbook, result.variants)
-        self._database_sheet(workbook, result.variants, evidence or {})
-        self._rules_sheet(workbook, result)
+        self._raw_variant_sheet(workbook, "With Artifacts", result.variants, evidence or {})
+        self._raw_variant_sheet(
+            workbook,
+            "Artifacts Removed",
+            [variant for variant in result.variants if variant_highlight(variant) != "artifact"],
+            evidence or {},
+        )
         output_path.parent.mkdir(parents=True, exist_ok=True)
         workbook.save(output_path)
         return output_path
@@ -251,6 +255,52 @@ class ExcelReportWriter:
 
     def _key(self, variant: VariantRecord) -> str:
         return f"{variant.sample}|{variant.hgvsc}"
+
+    def _raw_variant_sheet(
+        self,
+        workbook: Workbook,
+        title: str,
+        variants: list[VariantRecord],
+        evidence: dict[str, list[DatabaseEvidence]],
+    ) -> None:
+        ws = workbook.create_sheet(title)
+        raw_columns = self._raw_columns(variants)
+        database_columns = self._database_columns(evidence)
+        headers = raw_columns + [f"{database} Evidence" for database in database_columns]
+        self._headers(ws, headers)
+        evidence_start = len(raw_columns) + 1
+        evidence_columns = set(range(evidence_start, evidence_start + len(database_columns)))
+
+        for row_index, variant in enumerate(variants, start=2):
+            evidence_by_database = self._evidence_by_database(evidence.get(self._key(variant), []))
+            values = [
+                *[self._raw_value(variant.raw.get(column)) for column in raw_columns],
+                *[self._evidence_cell(evidence_by_database.get(database, [])) for database in database_columns],
+            ]
+            for col_index, value in enumerate(values, start=1):
+                cell = ws.cell(row_index, col_index, value)
+                cell.border = self._border()
+                cell.alignment = Alignment(vertical="top", wrap_text=col_index in evidence_columns)
+                if col_index <= len(raw_columns) and raw_columns[col_index - 1] == "AF" and value not in [None, ""]:
+                    cell.number_format = "0.0000"
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{len(variants) + 1}"
+        self._fit(ws, max_width=46)
+
+    def _raw_columns(self, variants: list[VariantRecord]) -> list[str]:
+        columns: list[str] = []
+        for variant in variants:
+            for column in variant.raw:
+                if column not in columns:
+                    columns.append(column)
+        return columns
+
+    def _raw_value(self, value: Any) -> Any:
+        if value is None:
+            return ""
+        if isinstance(value, float) and isnan(value):
+            return ""
+        return value
 
     def _database_columns(self, evidence: dict[str, list[DatabaseEvidence]]) -> list[str]:
         seen = {

@@ -476,6 +476,26 @@ def test_civic_found_uses_v2_graphql(monkeypatch):
     assert len(calls) == 2
 
 
+def test_civic_converts_three_letter_hgvsp_to_short_variant_name(monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    variant.hgvsp = "NP_000537.3:p.Arg175His"
+    service = DatabaseSearchService(timeout=1)
+    variant_names = []
+
+    def fake_post(url, json, headers, timeout):
+        if "BrowseCivicProfiles" in json["query"]:
+            variant_names.append(json["variables"]["variantName"])
+            return FakeResponse({"data": {"browseMolecularProfiles": {"filteredCount": 0, "nodes": []}}})
+        return FakeResponse({"data": {"evidenceItems": {"totalCount": 0, "nodes": []}}})
+
+    monkeypatch.setattr("archer_processor.services.database_search.requests.post", fake_post)
+
+    service._search_civic(variant)
+
+    assert variant_names[0] == "R175H"
+    assert "Arg175His" in variant_names
+
+
 def test_civic_not_found(monkeypatch):
     variant = ArcherTsvReader().read(FIXTURE)[3]
     service = DatabaseSearchService(timeout=1)

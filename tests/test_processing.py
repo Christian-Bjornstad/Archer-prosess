@@ -64,7 +64,7 @@ def test_processor_writes_excel(tmp_path):
     assert len(result.excluded) == 2
 
 
-def test_excel_export_writes_one_row_per_database_source(tmp_path):
+def test_excel_export_preserves_raw_columns_and_adds_database_columns(tmp_path):
     output = tmp_path / "review.xlsx"
     result = VariantProcessor().process(FIXTURE, "2026-07-26", output)
     variant = result.variants[3]
@@ -88,27 +88,36 @@ def test_excel_export_writes_one_row_per_database_source(tmp_path):
     ExcelReportWriter().write(result, output, evidence=evidence)
 
     workbook = openpyxl.load_workbook(output)
-    rows = list(workbook["Database Evidence"].iter_rows(min_row=2, values_only=True))
+    assert workbook.sheetnames == ["With Artifacts", "Artifacts Removed"]
+    ws = workbook["With Artifacts"]
+    headers = [cell.value for cell in ws[1]]
+    raw_headers = list(result.variants[0].raw)
+    row = next(row for row in ws.iter_rows(min_row=2, values_only=True) if row[0] == variant.sample)
     workbook.close()
-    databases = [row[3] for row in rows if row[3]]
 
-    assert databases == [
-        "ClinVar",
-        "gnomAD",
-        "COSMIC",
-        "CIViC",
-        "CancerMine",
-        "DGIdb",
-        "ClinGen Allele Registry",
-        "cBioPortal",
-        "OncoKB",
-        "Franklin",
-        "MTBP",
-        "HSMD",
+    assert headers[: len(raw_headers)] == raw_headers
+    assert headers[len(raw_headers):] == [
+        f"{database} Evidence"
+        for database in [
+            "ClinVar",
+            "gnomAD",
+            "COSMIC",
+            "CIViC",
+            "CancerMine",
+            "DGIdb",
+            "ClinGen Allele Registry",
+            "cBioPortal",
+            "OncoKB",
+            "Franklin",
+            "MTBP",
+            "HSMD",
+        ]
     ]
+    assert row[headers.index("HGVSc")] == variant.raw["HGVSc"]
+    assert row[headers.index("CIViC Evidence")] == "[found] CIViC summary"
 
 
-def test_excel_variant_sheet_writes_distinct_database_columns(tmp_path):
+def test_excel_export_writes_artifact_removed_sheet(tmp_path):
     output = tmp_path / "review.xlsx"
     result = VariantProcessor().process(FIXTURE, "2026-07-26", output)
     variant = result.variants[3]
@@ -132,30 +141,15 @@ def test_excel_variant_sheet_writes_distinct_database_columns(tmp_path):
     ExcelReportWriter().write(result, output, evidence=evidence)
 
     workbook = openpyxl.load_workbook(output)
-    ws = workbook["Variants"]
-    headers = [cell.value for cell in ws[1]]
-    row = next(row for row in ws.iter_rows(min_row=2, values_only=True) if row[0] == variant.sample)
+    with_artifacts = workbook["With Artifacts"]
+    artifacts_removed = workbook["Artifacts Removed"]
+    with_samples = [row[0] for row in with_artifacts.iter_rows(min_row=2, values_only=True)]
+    removed_samples = [row[0] for row in artifacts_removed.iter_rows(min_row=2, values_only=True)]
+    headers = [cell.value for cell in artifacts_removed[1]]
+    row = next(row for row in artifacts_removed.iter_rows(min_row=2, values_only=True) if row[0] == variant.sample)
     workbook.close()
 
-    for database in [
-        "ClinVar",
-        "gnomAD",
-        "COSMIC",
-        "CIViC",
-        "CancerMine",
-        "DGIdb",
-        "ClinGen Allele Registry",
-        "cBioPortal",
-        "OncoKB",
-        "Franklin",
-        "MTBP",
-        "HSMD",
-    ]:
-        assert f"{database} Evidence" in headers
+    assert "26OUM00001_VPM_S1_R1_001" in with_samples
+    assert "26OUM00001_VPM_S1_R1_001" not in removed_samples
     assert row[headers.index("ClinVar Evidence")] == "[found] ClinVar summary"
-    assert row[headers.index("CIViC Evidence")] == "[found] CIViC summary"
-    assert row[headers.index("CancerMine Evidence")] == "[found] CancerMine summary"
-    assert row[headers.index("DGIdb Evidence")] == "[found] DGIdb summary"
-    assert row[headers.index("ClinGen Allele Registry Evidence")] == "[found] ClinGen summary"
-    assert row[headers.index("cBioPortal Evidence")] == "[found] cBioPortal summary"
     assert row[headers.index("Franklin Evidence")] == "[unauthorized] Franklin login was rejected"

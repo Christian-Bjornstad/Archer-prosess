@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import csv
 import os
+import re
 import threading
 import time
 import urllib.parse
@@ -20,6 +21,32 @@ from archer_processor.services.settings import AppSettings
 MANUAL_DATABASES = {
     "MTBP": "Manual/licensed review. Record: classification, functional relevance/evidence category, population AF, ClinVar class, references, notes.",
     "HSMD": "Manual/licensed review. Record: classification, actionability tier, clinical review status, population frequency, references, notes.",
+}
+
+AMINO_ACID_3_TO_1 = {
+    "Ala": "A",
+    "Arg": "R",
+    "Asn": "N",
+    "Asp": "D",
+    "Cys": "C",
+    "Gln": "Q",
+    "Glu": "E",
+    "Gly": "G",
+    "His": "H",
+    "Ile": "I",
+    "Leu": "L",
+    "Lys": "K",
+    "Met": "M",
+    "Phe": "F",
+    "Pro": "P",
+    "Ser": "S",
+    "Thr": "T",
+    "Trp": "W",
+    "Tyr": "Y",
+    "Val": "V",
+    "Ter": "*",
+    "Sec": "U",
+    "Pyl": "O",
 }
 
 
@@ -528,11 +555,26 @@ class DatabaseSearchService:
     def _civic_variant_names(self, variant: VariantRecord) -> list[str]:
         candidates = []
         protein = self._protein_change(variant.hgvsp)
+        protein_short = self._protein_three_letter_to_one_letter(protein)
         cdna = self._cdna_without_transcript(variant.hgvsc)
-        for candidate in [protein, cdna]:
+        for candidate in [protein_short, protein, cdna]:
             if candidate and candidate not in candidates:
                 candidates.append(candidate)
         return candidates
+
+    def _protein_three_letter_to_one_letter(self, protein_change: str) -> str:
+        if not protein_change:
+            return ""
+        clean = protein_change.strip().replace("(", "").replace(")", "")
+        match = re.fullmatch(r"([A-Z][a-z]{2})(\d+)([A-Z][a-z]{2}|\*|Ter|=)", clean)
+        if not match:
+            return clean
+        ref, pos, alt = match.groups()
+        ref_short = AMINO_ACID_3_TO_1.get(ref)
+        alt_short = "*" if alt in {"*", "Ter"} else AMINO_ACID_3_TO_1.get(alt)
+        if not ref_short or not alt_short:
+            return clean
+        return f"{ref_short}{pos}{alt_short}"
 
     def _absolute_civic_url(self, link: str) -> str:
         return f"https://civicdb.org{link}" if link.startswith("/") else link
@@ -1360,7 +1402,7 @@ class DatabaseSearchService:
     def _protein_change(self, hgvsp: str) -> str:
         if not hgvsp:
             return ""
-        return hgvsp.split(":", 1)[-1].replace("p.", "").strip()
+        return hgvsp.split(":", 1)[-1].replace("p.", "").replace("p=", "=").strip()
 
     def _at(self, values: list, index: int) -> str:
         return str(values[index]) if index < len(values) and values[index] is not None else ""
