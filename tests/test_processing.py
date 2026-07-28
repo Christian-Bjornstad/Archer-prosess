@@ -74,6 +74,7 @@ def test_excel_export_writes_one_row_per_database_source(tmp_path):
             DatabaseEvidence("gnomAD", "found", "gnomAD summary"),
             DatabaseEvidence("COSMIC", "found", "COSMIC summary"),
             DatabaseEvidence("CIViC", "found", "CIViC summary"),
+            DatabaseEvidence("CancerMine", "found", "CancerMine summary"),
             DatabaseEvidence("DGIdb", "found", "DGIdb summary"),
             DatabaseEvidence("ClinGen Allele Registry", "found", "ClinGen summary"),
             DatabaseEvidence("cBioPortal", "found", "cBioPortal summary"),
@@ -96,6 +97,7 @@ def test_excel_export_writes_one_row_per_database_source(tmp_path):
         "gnomAD",
         "COSMIC",
         "CIViC",
+        "CancerMine",
         "DGIdb",
         "ClinGen Allele Registry",
         "cBioPortal",
@@ -116,6 +118,7 @@ def test_excel_variant_sheet_writes_distinct_database_columns(tmp_path):
             DatabaseEvidence("gnomAD", "found", "gnomAD summary"),
             DatabaseEvidence("COSMIC", "found", "COSMIC summary"),
             DatabaseEvidence("CIViC", "found", "CIViC summary"),
+            DatabaseEvidence("CancerMine", "found", "CancerMine summary"),
             DatabaseEvidence("DGIdb", "found", "DGIdb summary"),
             DatabaseEvidence("ClinGen Allele Registry", "found", "ClinGen summary"),
             DatabaseEvidence("cBioPortal", "found", "cBioPortal summary"),
@@ -139,6 +142,7 @@ def test_excel_variant_sheet_writes_distinct_database_columns(tmp_path):
         "gnomAD",
         "COSMIC",
         "CIViC",
+        "CancerMine",
         "DGIdb",
         "ClinGen Allele Registry",
         "cBioPortal",
@@ -150,6 +154,7 @@ def test_excel_variant_sheet_writes_distinct_database_columns(tmp_path):
         assert f"{database} Evidence" in headers
     assert row[headers.index("ClinVar Evidence")] == "[found] ClinVar summary"
     assert row[headers.index("CIViC Evidence")] == "[found] CIViC summary"
+    assert row[headers.index("CancerMine Evidence")] == "[found] CancerMine summary"
     assert row[headers.index("DGIdb Evidence")] == "[found] DGIdb summary"
     assert row[headers.index("ClinGen Allele Registry Evidence")] == "[found] ClinGen summary"
     assert row[headers.index("cBioPortal Evidence")] == "[found] cBioPortal summary"

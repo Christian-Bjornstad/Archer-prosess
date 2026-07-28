@@ -145,6 +145,7 @@ class MainWindow(QMainWindow):
         "gnomAD",
         "COSMIC",
         "CIViC",
+        "CancerMine",
         "DGIdb",
         "ClinGen Allele Registry",
         "cBioPortal",

@@ -16,6 +16,7 @@ DEFAULT_DATABASE_COLUMNS = [
     "gnomAD",
     "COSMIC",
     "CIViC",
+    "CancerMine",
     "DGIdb",
     "ClinGen Allele Registry",
     "cBioPortal",

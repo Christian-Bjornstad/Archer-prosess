@@ -10,6 +10,7 @@ def test_database_tab_contains_current_sources(qt_app):
         "gnomAD",
         "COSMIC",
         "CIViC",
+        "CancerMine",
         "DGIdb",
         "ClinGen Allele Registry",
         "cBioPortal",
@@ -36,7 +37,8 @@ def test_database_diagnostics_cover_token_and_manual_statuses(qt_app):
     assert diagnostics["Franklin"] in {"token required", "ready"}
     assert diagnostics["COSMIC"] == "ready (basic/public lookup)"
     assert diagnostics["CIViC"] == "ready (open GraphQL)"
-    assert diagnostics["DGIdb"] == "ready (open GraphQL)"
-    assert diagnostics["ClinGen Allele Registry"] == "ready (open REST)"
+    assert diagnostics["CancerMine"] == "ready (cached cancer gene roles)"
+    assert diagnostics["DGIdb"] == "context only (drug-gene, not MTB evidence)"
+    assert diagnostics["ClinGen Allele Registry"] == "context only (allele ID/dbSNP cross-links)"
     assert diagnostics["cBioPortal"] == "ready (public cohort context)"
     assert diagnostics["gnomAD"].startswith("ready")

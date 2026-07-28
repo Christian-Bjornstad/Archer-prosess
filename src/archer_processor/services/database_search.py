@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import csv
 import os
 import threading
 import time
@@ -29,10 +30,13 @@ class FranklinAuthenticationError(RuntimeError):
 class DatabaseSearchService:
     _gnomad_lock = threading.Lock()
     _last_gnomad_request = 0.0
+    _eutils_lock = threading.Lock()
+    _last_eutils_request = 0.0
 
     def __init__(self, settings: AppSettings | None = None, timeout: int = 12) -> None:
         self.settings = settings or AppSettings.load()
         self.timeout = timeout
+        self._clinvar_cache: dict[str, DatabaseEvidence] = {}
         self._gnomad_cache: dict[str, DatabaseEvidence] = {}
         self._oncokb_info_cache: dict | None = None
         self._cbio_gene_cache: dict[str, int | None] = {}
@@ -57,10 +61,12 @@ class DatabaseSearchService:
                 diagnostics[database] = "ready (basic/public lookup)"
             elif database == "CIViC":
                 diagnostics[database] = "ready (open GraphQL)"
+            elif database == "CancerMine":
+                diagnostics[database] = "ready (cached cancer gene roles)"
             elif database == "DGIdb":
-                diagnostics[database] = "ready (open GraphQL)"
+                diagnostics[database] = "context only (drug-gene, not MTB evidence)"
             elif database == "ClinGen Allele Registry":
-                diagnostics[database] = "ready (open REST)"
+                diagnostics[database] = "context only (allele ID/dbSNP cross-links)"
             elif database == "cBioPortal":
                 diagnostics[database] = "ready (public cohort context)"
             elif database in {"ClinVar", "OncoKB"}:
@@ -78,6 +84,8 @@ class DatabaseSearchService:
                 evidence.append(self._search_cosmic(variant))
             elif database == "CIViC":
                 evidence.append(self._search_civic(variant))
+            elif database == "CancerMine":
+                evidence.append(self._search_cancermine(variant))
             elif database == "DGIdb":
                 evidence.append(self._search_dgidb(variant))
             elif database == "ClinGen Allele Registry":
@@ -151,6 +159,9 @@ class DatabaseSearchService:
         query = variant.hgvsc
         if not query:
             return DatabaseEvidence("ClinVar", "invalid_query", "Missing HGVSc.")
+        cache_key = "|".join(self._clinvar_queries(variant))
+        if cache_key in self._clinvar_cache:
+            return self._clinvar_cache[cache_key]
         try:
             clinvar_id = ""
             used_query = query
@@ -163,10 +174,9 @@ class DatabaseSearchService:
                 }
                 if self.settings.clinvar_api_key:
                     params["api_key"] = self.settings.clinvar_api_key
-                search = requests.get(
+                search = self._eutils_get(
                     "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
                     params=params,
-                    timeout=self.timeout,
                 )
                 search.raise_for_status()
                 root = ET.fromstring(search.content)
@@ -175,12 +185,14 @@ class DatabaseSearchService:
                     used_query = candidate
                     break
             if not clinvar_id:
-                return DatabaseEvidence(
+                evidence = DatabaseEvidence(
                     database="ClinVar",
                     status="not_found",
                     summary=f"No ClinVar result for {query}.",
                     url=self._clinvar_search_url(query),
                 )
+                self._clinvar_cache[cache_key] = evidence
+                return evidence
             fetch_params = {
                 "db": "clinvar",
                 "id": clinvar_id,
@@ -190,13 +202,30 @@ class DatabaseSearchService:
             }
             if self.settings.clinvar_api_key:
                 fetch_params["api_key"] = self.settings.clinvar_api_key
-            fetch = requests.get(
+            fetch = self._eutils_get(
                 "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
                 params=fetch_params,
-                timeout=self.timeout,
             )
             fetch.raise_for_status()
-            return self._parse_clinvar(fetch.content, used_query, clinvar_id)
+            evidence = self._parse_clinvar(fetch.content, used_query, clinvar_id)
+            self._clinvar_cache[cache_key] = evidence
+            return evidence
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 429:
+                evidence = DatabaseEvidence(
+                    database="ClinVar",
+                    status="rate_limited",
+                    summary="ClinVar/NCBI rate limit reached after retries. Try again later, lower Workers to 1, or add an NCBI API key in Settings.",
+                    url=self._clinvar_search_url(query),
+                )
+                self._clinvar_cache[cache_key] = evidence
+                return evidence
+            return DatabaseEvidence(
+                database="ClinVar",
+                status="error",
+                summary=f"ClinVar lookup failed: {exc}",
+                url=self._clinvar_search_url(query),
+            )
         except Exception as exc:
             return DatabaseEvidence(
                 database="ClinVar",
@@ -204,6 +233,26 @@ class DatabaseSearchService:
                 summary=f"ClinVar lookup failed: {exc}",
                 url=self._clinvar_search_url(query),
             )
+
+    def _eutils_get(self, url: str, params: dict) -> requests.Response:
+        for attempt in range(4):
+            self._wait_for_eutils_slot()
+            response = requests.get(url, params=params, timeout=self.timeout)
+            if response.status_code != 429:
+                return response
+            retry_after = response.headers.get("Retry-After")
+            wait_seconds = float(retry_after) if retry_after and retry_after.isdigit() else 2.0 * (attempt + 1)
+            time.sleep(wait_seconds)
+        return response
+
+    def _wait_for_eutils_slot(self) -> None:
+        min_interval = 0.12 if self.settings.clinvar_api_key else 0.42
+        with self._eutils_lock:
+            elapsed = time.monotonic() - self._last_eutils_request
+            wait_seconds = max(0.0, min_interval - elapsed)
+            if wait_seconds:
+                time.sleep(wait_seconds)
+            type(self)._last_eutils_request = time.monotonic()
 
     def _parse_clinvar(self, content: bytes, query: str, clinvar_id: str) -> DatabaseEvidence:
         text = content.decode("utf-8", errors="replace")
@@ -487,6 +536,63 @@ class DatabaseSearchService:
 
     def _absolute_civic_url(self, link: str) -> str:
         return f"https://civicdb.org{link}" if link.startswith("/") else link
+
+    def _search_cancermine(self, variant: VariantRecord) -> DatabaseEvidence:
+        if not variant.symbol:
+            return DatabaseEvidence("CancerMine", "invalid_query", "Needs gene symbol.", url=self._manual_url("CancerMine", variant))
+        try:
+            rows = self._cancermine_rows(variant.symbol)
+            if not rows:
+                return DatabaseEvidence("CancerMine", "not_found", f"No CancerMine cancer-role entries for {variant.symbol}.", url=self._manual_url("CancerMine", variant))
+            return self._format_cancermine_evidence(variant, rows)
+        except Exception as exc:
+            return DatabaseEvidence("CancerMine", "error", f"CancerMine lookup failed: {exc}", url=self._manual_url("CancerMine", variant))
+
+    def _format_cancermine_evidence(self, variant: VariantRecord, rows: list[dict]) -> DatabaseEvidence:
+        sorted_rows = sorted(rows, key=lambda row: int(row.get("citation_count") or 0), reverse=True)
+        role_counts: dict[str, int] = {}
+        for row in sorted_rows:
+            role = row.get("role") or "role"
+            role_counts[role] = role_counts.get(role, 0) + int(row.get("citation_count") or 0)
+        top_context = [
+            f"{row.get('role')} in {row.get('cancer_normalized')} ({row.get('citation_count')} citations)"
+            for row in sorted_rows[:6]
+        ]
+        parts = [
+            f"gene={variant.symbol}",
+            f"entries={len(sorted_rows)}",
+            "role_citations=" + ", ".join(f"{role}:{count}" for role, count in sorted(role_counts.items())),
+        ]
+        if top_context:
+            parts.append("top_context=" + "; ".join(top_context))
+        return DatabaseEvidence(
+            database="CancerMine",
+            status="found",
+            summary="; ".join(parts),
+            accession=sorted_rows[0].get("gene_hugo_id") or variant.symbol,
+            clinical_significance="text-mined cancer gene role",
+            url=self._manual_url("CancerMine", variant),
+            raw={"rows": sorted_rows[:25]},
+        )
+
+    def _cancermine_rows(self, gene_symbol: str) -> list[dict]:
+        path = self._cancermine_cache_path()
+        if not path.exists():
+            response = requests.get(
+                "https://zenodo.org/api/records/7689627/files/cancermine_collated.tsv/content",
+                timeout=max(self.timeout, 30),
+            )
+            response.raise_for_status()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(response.text, encoding="utf-8")
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            return [
+                row for row in csv.DictReader(handle, delimiter="\t")
+                if (row.get("gene_normalized") or "").upper() == gene_symbol.upper()
+            ]
+
+    def _cancermine_cache_path(self):
+        return AppSettings.config_path().parent / "cancermine_collated.tsv"
 
     def _search_dgidb(self, variant: VariantRecord) -> DatabaseEvidence:
         if not variant.symbol:
@@ -1235,6 +1341,7 @@ class DatabaseSearchService:
             "HSMD": "https://variants.ingenuity.com/",
             "COSMIC": f"https://cancer.sanger.ac.uk/cosmic/search?q={query}",
             "CIViC": f"https://civicdb.org/search?query={query}",
+            "CancerMine": f"https://github.com/jakelever/cancermine/search?q={urllib.parse.quote(variant.symbol)}",
             "DGIdb": f"https://dgidb.org/results?searchType=gene&searchTerms={urllib.parse.quote(variant.symbol)}",
             "ClinGen Allele Registry": f"https://reg.clinicalgenome.org/redmine/projects/registry/genboree_registry/landing?search={query}",
             "cBioPortal": f"https://www.cbioportal.org/results/mutations?Action=Submit&cancer_study_list=msk_impact_2017&case_set_id=msk_impact_2017_all&gene_list={urllib.parse.quote(variant.symbol)}",

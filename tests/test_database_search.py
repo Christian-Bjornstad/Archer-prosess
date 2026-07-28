@@ -49,6 +49,7 @@ def test_database_diagnostics_reports_ready_token_and_manual_sources():
         "gnomAD",
         "COSMIC",
         "CIViC",
+        "CancerMine",
         "DGIdb",
         "ClinGen Allele Registry",
         "cBioPortal",
@@ -62,8 +63,9 @@ def test_database_diagnostics_reports_ready_token_and_manual_sources():
     assert diagnostics["gnomAD"].startswith("ready")
     assert diagnostics["COSMIC"] == "ready (basic/public lookup)"
     assert diagnostics["CIViC"] == "ready (open GraphQL)"
-    assert diagnostics["DGIdb"] == "ready (open GraphQL)"
-    assert diagnostics["ClinGen Allele Registry"] == "ready (open REST)"
+    assert diagnostics["CancerMine"] == "ready (cached cancer gene roles)"
+    assert diagnostics["DGIdb"] == "context only (drug-gene, not MTB evidence)"
+    assert diagnostics["ClinGen Allele Registry"] == "context only (allele ID/dbSNP cross-links)"
     assert diagnostics["cBioPortal"] == "ready (public cohort context)"
     assert diagnostics["OncoKB"] == "token required"
     assert diagnostics["Franklin"] == "token required"
@@ -92,6 +94,25 @@ def test_manual_sources_return_checklist_and_query():
     assert "TP53" in mtbp.accession
     assert hsmd.status == "manual"
     assert "actionability tier" in hsmd.summary
+
+
+def test_clinvar_rate_limit_is_reported_after_retries(monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = DatabaseSearchService(timeout=1)
+    calls = []
+
+    def fake_get(*args, **kwargs):
+        calls.append((args, kwargs))
+        return FakeResponse(b"", status_code=429)
+
+    monkeypatch.setattr("archer_processor.services.database_search.requests.get", fake_get)
+    monkeypatch.setattr("archer_processor.services.database_search.time.sleep", lambda seconds: None)
+
+    evidence = service._search_clinvar(variant)
+
+    assert evidence.status == "rate_limited"
+    assert "lower Workers to 1" in evidence.summary
+    assert len(calls) == 4
 
 
 def test_gnomad_formatter_reports_population_frequency_context():
@@ -484,6 +505,29 @@ def test_civic_graphql_error_is_reported(monkeypatch):
     assert "schema changed" in evidence.summary
 
 
+def test_cancermine_reads_cached_gene_roles(tmp_path):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    cache = tmp_path / "cancermine_collated.tsv"
+    cache.write_text(
+        "matching_id\trole\tcancer_id\tcancer_normalized\tgene_hugo_id\tgene_entrez_id\tgene_normalized\tcitation_count\n"
+        "a\tDriver\tDOID:1\tacute myeloid leukemia\tHGNC:11998\t7157\tTP53\t42\n"
+        "b\tTumor_Suppressor\tDOID:2\tbreast cancer\tHGNC:11998\t7157\tTP53\t37\n"
+        "c\tOncogene\tDOID:3\tlung cancer\tHGNC:11998\t7157\tTP53\t12\n",
+        encoding="utf-8",
+    )
+    service = DatabaseSearchService(timeout=1)
+    service._cancermine_cache_path = lambda: cache
+
+    evidence = service._search_cancermine(variant)
+
+    assert evidence.status == "found"
+    assert evidence.accession == "HGNC:11998"
+    assert "entries=3" in evidence.summary
+    assert "Driver:42" in evidence.summary
+    assert "Tumor_Suppressor:37" in evidence.summary
+    assert "acute myeloid leukemia" in evidence.summary
+
+
 def test_dgidb_found_uses_graphql(monkeypatch):
     variant = ArcherTsvReader().read(FIXTURE)[3]
     service = DatabaseSearchService(timeout=1)
@@ -648,11 +692,12 @@ def test_oncokb_unauthorized_is_reported(monkeypatch):
 
 
 class FakeResponse:
-    def __init__(self, payload, status_code=200, json_error=False):
+    def __init__(self, payload, status_code=200, json_error=False, headers=None):
         self.payload = payload
         self.status_code = status_code
         self.content = b""
         self._json_error = json_error
+        self.headers = headers or {}
 
     def raise_for_status(self):
         if self.status_code >= 400:
