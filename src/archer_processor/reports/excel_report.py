@@ -7,6 +7,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from archer_processor.core.highlights import variant_highlight
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
 
 
@@ -17,6 +18,7 @@ class ExcelReportWriter:
         "pale_blue": "D9EAF7",
         "green": "E2F0D9",
         "yellow": "FFF2CC",
+        "orange": "FCE4D6",
         "red": "C00000",
         "red_text": "FFFFFF",
         "gray": "F2F2F2",
@@ -199,21 +201,14 @@ class ExcelReportWriter:
         self._fit(ws)
 
     def _style_variant_row(self, ws, row_index: int, variant: VariantRecord) -> None:
-        fill = None
-        font_color = "000000"
-        if variant.decision == "excluded":
-            fill = self.colors["red"]
-            font_color = self.colors["red_text"]
-        elif variant.warnings:
-            fill = self.colors["yellow"]
-        elif variant.history_matches:
-            fill = self.colors["pale_blue"]
-        elif variant.decision == "included":
-            fill = self.colors["green"]
+        fill = {
+            "artifact": self.colors["orange"],
+            "tier": self.colors["yellow"],
+            "germline": self.colors["green"],
+        }.get(variant_highlight(variant))
         if fill:
             for cell in ws[row_index]:
                 cell.fill = PatternFill("solid", fgColor=fill)
-                cell.font = Font(color=font_color)
 
     def _headers(self, ws, headers: list[str]) -> None:
         for col_index, header in enumerate(headers, start=1):

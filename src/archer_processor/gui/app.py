@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
 )
 
 from archer_processor.core import ProcessingResult, VariantProcessor
+from archer_processor.core.highlights import variant_highlight
 from archer_processor.io import ArcherTsvReader
 from archer_processor.knowledge import VariantHistoryRepository
 from archer_processor.reports import ExcelReportWriter
@@ -51,6 +52,7 @@ class Palette:
     yellow = "#B98100"
     pale_blue = "#EAF3FA"
     pale_green = "#EAF5ED"
+    pale_orange = "#FCE4D6"
     pale_red = "#F8E8E8"
     pale_yellow = "#FFF5D6"
 
@@ -500,12 +502,13 @@ class MainWindow(QMainWindow):
             ]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
-                if variant.decision == "excluded":
-                    item.setBackground(QColor(Palette.pale_red))
-                elif variant.warnings:
+                highlight = variant_highlight(variant)
+                if highlight == "artifact":
+                    item.setBackground(QColor(Palette.pale_orange))
+                elif highlight == "tier":
                     item.setBackground(QColor(Palette.pale_yellow))
-                elif variant.history_matches:
-                    item.setBackground(QColor(Palette.pale_blue))
+                elif highlight == "germline":
+                    item.setBackground(QColor(Palette.pale_green))
                 self.variant_table.setItem(row, col, item)
 
     def _refresh_evidence_table(self) -> None:
