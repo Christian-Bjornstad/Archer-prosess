@@ -22,6 +22,10 @@ MANUAL_DATABASES = {
 }
 
 
+class FranklinAuthenticationError(RuntimeError):
+    pass
+
+
 class DatabaseSearchService:
     _gnomad_lock = threading.Lock()
     _last_gnomad_request = 0.0
@@ -386,16 +390,16 @@ class DatabaseSearchService:
         query = self._franklin_search_text(variant)
         if not query:
             return DatabaseEvidence("Franklin", "invalid_query", "Needs genomic position/ref/alt, HGVSc, or gene alteration.", url=self._manual_url("Franklin", variant))
-        token = self._franklin_token()
-        if not token:
-            return DatabaseEvidence(
-                database="Franklin",
-                status="token_required",
-                summary=f"Franklin API requires a token or runtime email/password login. Query prepared: {query}.",
-                accession=query,
-                url=self._manual_url("Franklin", variant),
-            )
         try:
+            token = self._franklin_token()
+            if not token:
+                return DatabaseEvidence(
+                    database="Franklin",
+                    status="token_required",
+                    summary=f"Franklin API requires a token or runtime email/password login. Query prepared: {query}.",
+                    accession=query,
+                    url=self._manual_url("Franklin", variant),
+                )
             response = requests.get(
                 "https://api.genoox.com/v2/search/snp/",
                 params={"search_text": query},
@@ -408,6 +412,8 @@ class DatabaseSearchService:
             response.raise_for_status()
             data = response.json()
             return self._format_franklin_evidence(variant, query, data)
+        except FranklinAuthenticationError as exc:
+            return DatabaseEvidence("Franklin", "unauthorized", str(exc), accession=query, url=self._manual_url("Franklin", variant))
         except requests.HTTPError as exc:
             status = "unauthorized" if exc.response is not None and exc.response.status_code in {401, 403} else "error"
             return DatabaseEvidence("Franklin", status, f"Franklin lookup failed: {exc}", url=self._manual_url("Franklin", variant))
@@ -427,7 +433,15 @@ class DatabaseSearchService:
             headers={"Authorization": password, "Accept": "application/json"},
             timeout=self.timeout,
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            if response.status_code in {401, 403}:
+                raise FranklinAuthenticationError(
+                    "Franklin login was rejected. Check the email/password, confirm API access is enabled for the account, "
+                    "or use a Franklin API token in Settings."
+                ) from exc
+            raise
         token = self._token_from_payload(response.json())
         if not token:
             raise ValueError("Franklin login did not return an API token.")

@@ -227,6 +227,25 @@ def test_franklin_unauthorized_is_reported(monkeypatch):
     assert evidence.status == "unauthorized"
 
 
+def test_franklin_login_unauthorized_is_reported_clearly(monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[0]
+    service = DatabaseSearchService(
+        AppSettings(franklin_api_key="", franklin_email="user@example.org", franklin_password="bad-secret"),
+        timeout=1,
+    )
+
+    def fake_get(*args, **kwargs):
+        return FakeResponse({"detail": "bad credentials"}, status_code=401)
+
+    monkeypatch.setattr("archer_processor.services.database_search.requests.get", fake_get)
+
+    evidence = service._search_franklin(variant)
+
+    assert evidence.status == "unauthorized"
+    assert "Franklin login was rejected" in evidence.summary
+    assert "API token in Settings" in evidence.summary
+
+
 def test_franklin_malformed_response_is_error(monkeypatch):
     variant = ArcherTsvReader().read(FIXTURE)[0]
     service = DatabaseSearchService(AppSettings(franklin_api_key="token"), timeout=1)

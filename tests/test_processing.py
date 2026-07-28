@@ -88,3 +88,33 @@ def test_excel_export_writes_one_row_per_database_source(tmp_path):
     databases = [row[3] for row in rows if row[3]]
 
     assert databases == ["ClinVar", "gnomAD", "COSMIC", "OncoKB", "Franklin", "MTBP", "HSMD"]
+
+
+def test_excel_variant_sheet_writes_distinct_database_columns(tmp_path):
+    output = tmp_path / "review.xlsx"
+    result = VariantProcessor().process(FIXTURE, "2026-07-26", output)
+    variant = result.variants[3]
+    evidence = {
+        DatabaseSearchService().variant_key(variant): [
+            DatabaseEvidence("ClinVar", "found", "ClinVar summary"),
+            DatabaseEvidence("gnomAD", "found", "gnomAD summary"),
+            DatabaseEvidence("COSMIC", "found", "COSMIC summary"),
+            DatabaseEvidence("OncoKB", "token_required", "OncoKB token required"),
+            DatabaseEvidence("Franklin", "unauthorized", "Franklin login was rejected"),
+            DatabaseEvidence("MTBP", "manual", "MTBP manual"),
+            DatabaseEvidence("HSMD", "manual", "HSMD manual"),
+        ]
+    }
+
+    ExcelReportWriter().write(result, output, evidence=evidence)
+
+    workbook = openpyxl.load_workbook(output)
+    ws = workbook["Variants"]
+    headers = [cell.value for cell in ws[1]]
+    row = next(row for row in ws.iter_rows(min_row=2, values_only=True) if row[0] == variant.sample)
+    workbook.close()
+
+    for database in ["ClinVar", "gnomAD", "COSMIC", "OncoKB", "Franklin", "MTBP", "HSMD"]:
+        assert f"{database} Evidence" in headers
+    assert row[headers.index("ClinVar Evidence")] == "[found] ClinVar summary"
+    assert row[headers.index("Franklin Evidence")] == "[unauthorized] Franklin login was rejected"

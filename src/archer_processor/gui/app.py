@@ -295,8 +295,8 @@ class MainWindow(QMainWindow):
         actions.addStretch()
         layout.addLayout(actions)
 
-        self.evidence_table = QTableWidget(0, 6)
-        self.evidence_table.setHorizontalHeaderLabels(["Sample", "Gene", "HGVSc", "Database", "Status", "Summary"])
+        self.evidence_table = QTableWidget(0, 3 + len(self.databases))
+        self.evidence_table.setHorizontalHeaderLabels(["Sample", "Gene", "HGVSc", *self.databases])
         self.evidence_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.evidence_table.setAlternatingRowColors(True)
         layout.addWidget(self.evidence_table, 1)
@@ -580,17 +580,25 @@ class MainWindow(QMainWindow):
         self.evidence_table.setRowCount(0)
         if not self.result:
             return
-        by_key = {f"{variant.sample}|{variant.hgvsc}": variant for variant in self.result.variants}
-        for key, evidence_items in self.evidence.items():
-            variant = by_key.get(key)
-            if not variant:
-                continue
+        evidence_by_key = self.evidence or {}
+        variants = self.result.included if evidence_by_key else []
+        for variant in variants:
+            row = self.evidence_table.rowCount()
+            self.evidence_table.insertRow(row)
+            evidence_items = evidence_by_key.get(f"{variant.sample}|{variant.hgvsc}", [])
+            by_database: dict[str, list] = {}
             for evidence in evidence_items:
-                row = self.evidence_table.rowCount()
-                self.evidence_table.insertRow(row)
-                values = [variant.sample, variant.symbol, variant.hgvsc, evidence.database, evidence.status, evidence.summary]
-                for col, value in enumerate(values):
-                    self.evidence_table.setItem(row, col, QTableWidgetItem(value))
+                by_database.setdefault(evidence.database, []).append(evidence)
+            values = [
+                variant.sample,
+                variant.symbol,
+                variant.hgvsc,
+                *[self._database_cell(by_database.get(database, [])) for database in self.databases],
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setToolTip(value)
+                self.evidence_table.setItem(row, col, item)
 
     def _set_busy(self, label: str) -> None:
         self.status_badge.setText(label)
@@ -616,6 +624,9 @@ class MainWindow(QMainWindow):
     def _table_text(self, table: QTableWidget, row: int, col: int) -> str:
         item = table.item(row, col)
         return item.text().strip() if item else ""
+
+    def _database_cell(self, evidence_items: list) -> str:
+        return "\n".join(f"[{item.status}] {item.summary}".strip() for item in evidence_items)
 
     def _apply_style(self) -> None:
         self.setStyleSheet(

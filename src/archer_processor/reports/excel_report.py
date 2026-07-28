@@ -11,6 +11,9 @@ from archer_processor.core.highlights import variant_highlight
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
 
 
+DEFAULT_DATABASE_COLUMNS = ["ClinVar", "gnomAD", "COSMIC", "OncoKB", "Franklin", "MTBP", "HSMD"]
+
+
 class ExcelReportWriter:
     colors = {
         "navy": "163B5C",
@@ -72,6 +75,7 @@ class ExcelReportWriter:
         hide_excluded: bool,
     ) -> None:
         ws = workbook.create_sheet(title)
+        database_columns = self._database_columns(evidence)
         headers = [
             "Sample",
             "Patient",
@@ -95,12 +99,12 @@ class ExcelReportWriter:
             "Artifact",
             "History",
             "Warnings",
-            "Database Evidence",
+            *[f"{database} Evidence" for database in database_columns],
             "Run Date",
         ]
         self._headers(ws, headers)
         for row_index, variant in enumerate(variants, start=2):
-            evidence_text = "; ".join(item.summary for item in evidence.get(self._key(variant), []))
+            evidence_by_database = self._evidence_by_database(evidence.get(self._key(variant), []))
             values = [
                 variant.sample,
                 variant.patient_id,
@@ -124,13 +128,18 @@ class ExcelReportWriter:
                 variant.artifact_status,
                 f"{len(variant.history_matches)} previous match(es)",
                 "; ".join(variant.warnings),
-                evidence_text,
+                *[self._evidence_cell(evidence_by_database.get(database, [])) for database in database_columns],
                 run_date,
             ]
+            evidence_start = headers.index(f"{database_columns[0]} Evidence") + 1 if database_columns else 0
+            evidence_columns = set(range(evidence_start, evidence_start + len(database_columns)))
             for col_index, value in enumerate(values, start=1):
                 cell = ws.cell(row_index, col_index, value)
                 cell.border = self._border()
-                cell.alignment = Alignment(vertical="top", wrap_text=col_index in {4, 14, 21, 22, 23})
+                cell.alignment = Alignment(
+                    vertical="top",
+                    wrap_text=col_index in {4, 14, 21, 22} or col_index in evidence_columns,
+                )
                 if col_index == 9 and value is not None:
                     cell.number_format = "0.00%"
             self._style_variant_row(ws, row_index, variant)
@@ -229,3 +238,24 @@ class ExcelReportWriter:
 
     def _key(self, variant: VariantRecord) -> str:
         return f"{variant.sample}|{variant.hgvsc}"
+
+    def _database_columns(self, evidence: dict[str, list[DatabaseEvidence]]) -> list[str]:
+        seen = {
+            item.database
+            for items in evidence.values()
+            for item in items
+            if item.database
+        }
+        return DEFAULT_DATABASE_COLUMNS + sorted(seen.difference(DEFAULT_DATABASE_COLUMNS))
+
+    def _evidence_by_database(self, evidence_items: list[DatabaseEvidence]) -> dict[str, list[DatabaseEvidence]]:
+        grouped: dict[str, list[DatabaseEvidence]] = defaultdict(list)
+        for item in evidence_items:
+            grouped[item.database].append(item)
+        return grouped
+
+    def _evidence_cell(self, evidence_items: list[DatabaseEvidence]) -> str:
+        return "\n".join(
+            f"[{item.status}] {item.summary}".strip()
+            for item in evidence_items
+        )

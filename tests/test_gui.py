@@ -7,6 +7,11 @@ def test_database_tab_contains_current_sources(qt_app):
 
     assert window.databases == ["ClinVar", "MTBP", "HSMD", "COSMIC", "OncoKB", "Franklin", "gnomAD"]
     assert set(window.db_checks) == set(window.databases)
+    headers = [
+        window.evidence_table.horizontalHeaderItem(index).text()
+        for index in range(window.evidence_table.columnCount())
+    ]
+    assert headers == ["Sample", "Gene", "HGVSc", *window.databases]
 
 
 def test_database_diagnostics_cover_token_and_manual_statuses(qt_app):
