@@ -153,3 +153,31 @@ def test_excel_export_writes_artifact_removed_sheet(tmp_path):
     assert "26OUM00001_VPM_S1_R1_001" not in removed_samples
     assert row[headers.index("ClinVar Evidence")] == "[found] ClinVar summary"
     assert row[headers.index("Franklin Evidence")] == "[unauthorized] Franklin login was rejected"
+
+
+def test_excel_export_keeps_row_coloring_on_raw_sheets(tmp_path):
+    output = tmp_path / "review.xlsx"
+    result = VariantProcessor().process(FIXTURE, "2026-07-26", output)
+    by_patient = {variant.patient_id: variant for variant in result.variants}
+    by_patient["26OUM00004"].history_matches = [{"Tier I": 2, "Tier II": 3}]
+    by_patient["26OUM00005"].history_matches = [{"Germ": 10}]
+
+    ExcelReportWriter().write(result, output)
+
+    workbook = openpyxl.load_workbook(output)
+    with_artifacts = workbook["With Artifacts"]
+    artifacts_removed = workbook["Artifacts Removed"]
+    by_sample = {
+        row[0].value: row[0].fill.fgColor.rgb
+        for row in with_artifacts.iter_rows(min_row=2)
+    }
+    removed_by_sample = {
+        row[0].value: row[0].fill.fgColor.rgb
+        for row in artifacts_removed.iter_rows(min_row=2)
+    }
+    workbook.close()
+
+    assert by_sample["26OUM00001_VPM_S1_R1_001"] == "00FCE4D6"
+    assert by_sample["26OUM00002_VPM_S2_R1_001"] == "00000000"
+    assert removed_by_sample["26OUM00004_VPM_S4_R1_001"] == "00FFF2CC"
+    assert removed_by_sample["26OUM00005_VPM_S5_R1_001"] == "00E2F0D9"

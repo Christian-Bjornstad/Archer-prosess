@@ -283,6 +283,7 @@ class ExcelReportWriter:
                 cell.alignment = Alignment(vertical="top", wrap_text=col_index in evidence_columns)
                 if col_index <= len(raw_columns) and raw_columns[col_index - 1] == "AF" and value not in [None, ""]:
                     cell.number_format = "0.0000"
+            self._style_variant_row(ws, row_index, variant)
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{len(variants) + 1}"
         self._fit(ws, max_width=46)
