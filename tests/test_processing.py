@@ -1,8 +1,12 @@
 from pathlib import Path
 
+import openpyxl
+
 from archer_processor.core import FilterEngine, VariantProcessor, production_rules
+from archer_processor.core.models import DatabaseEvidence
 from archer_processor.io import ArcherTsvReader
 from archer_processor.reports import ExcelReportWriter
+from archer_processor.services import DatabaseSearchService
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
@@ -58,3 +62,29 @@ def test_processor_writes_excel(tmp_path):
     assert result.total_count == 5
     assert len(result.included) == 3
     assert len(result.excluded) == 2
+
+
+def test_excel_export_writes_one_row_per_database_source(tmp_path):
+    output = tmp_path / "review.xlsx"
+    result = VariantProcessor().process(FIXTURE, "2026-07-26", output)
+    variant = result.variants[3]
+    evidence = {
+        DatabaseSearchService().variant_key(variant): [
+            DatabaseEvidence("ClinVar", "found", "ClinVar summary"),
+            DatabaseEvidence("gnomAD", "found", "gnomAD summary"),
+            DatabaseEvidence("COSMIC", "found", "COSMIC summary"),
+            DatabaseEvidence("OncoKB", "token_required", "OncoKB token required"),
+            DatabaseEvidence("Franklin", "token_required", "Franklin token required"),
+            DatabaseEvidence("MTBP", "manual", "MTBP manual"),
+            DatabaseEvidence("HSMD", "manual", "HSMD manual"),
+        ]
+    }
+
+    ExcelReportWriter().write(result, output, evidence=evidence)
+
+    workbook = openpyxl.load_workbook(output)
+    rows = list(workbook["Database Evidence"].iter_rows(min_row=2, values_only=True))
+    workbook.close()
+    databases = [row[3] for row in rows if row[3]]
+
+    assert databases == ["ClinVar", "gnomAD", "COSMIC", "OncoKB", "Franklin", "MTBP", "HSMD"]

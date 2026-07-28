@@ -16,8 +16,8 @@ from archer_processor.services.settings import AppSettings
 
 
 MANUAL_DATABASES = {
-    "MTBP": "Licensed/manual workflow. Capture functional relevance category, population AF, ClinVar class, and evidence notes.",
-    "HSMD": "Licensed/manual workflow. Capture actionability tier, clinical review status, population frequency, and references.",
+    "MTBP": "Manual/licensed review. Record: classification, functional relevance/evidence category, population AF, ClinVar class, references, notes.",
+    "HSMD": "Manual/licensed review. Record: classification, actionability tier, clinical review status, population frequency, references, notes.",
 }
 
 
@@ -29,6 +29,26 @@ class DatabaseSearchService:
         self.settings = settings or AppSettings.load()
         self.timeout = timeout
         self._gnomad_cache: dict[str, DatabaseEvidence] = {}
+        self._oncokb_info_cache: dict | None = None
+
+    def database_diagnostics(self, databases: Iterable[str]) -> dict[str, str]:
+        diagnostics = {}
+        for database in databases:
+            if database in MANUAL_DATABASES:
+                diagnostics[database] = "manual"
+            elif database == "OncoKB" and not self.settings.oncokb_api_key:
+                diagnostics[database] = "token required"
+            elif database == "Franklin" and not self.settings.franklin_api_key:
+                diagnostics[database] = "token required"
+            elif database == "gnomAD":
+                diagnostics[database] = f"ready ({self.settings.gnomad_dataset}, rate limited)"
+            elif database == "COSMIC":
+                diagnostics[database] = "ready (basic/public lookup)"
+            elif database in {"ClinVar", "OncoKB", "Franklin"}:
+                diagnostics[database] = "ready"
+            else:
+                diagnostics[database] = "manual"
+        return diagnostics
 
     def search_variant(self, variant: VariantRecord, databases: Iterable[str]) -> list[DatabaseEvidence]:
         evidence: list[DatabaseEvidence] = []
@@ -90,12 +110,14 @@ class DatabaseSearchService:
         return f"{variant.sample}|{variant.hgvsc}"
 
     def _manual_evidence(self, database: str, variant: VariantRecord) -> DatabaseEvidence:
-        query = variant.hgvsc or variant.genomic_location or variant.display_name
+        query = self._review_query(variant)
         return DatabaseEvidence(
             database=database,
-            status="manual_required",
+            status="manual",
             summary=f"{MANUAL_DATABASES.get(database, 'Manual database check required')} Query: {query}",
+            accession=query,
             url=self._manual_url(database, variant),
+            raw={"query": query, "checklist": MANUAL_DATABASES.get(database, "Manual database check required")},
         )
 
     def _search_clinvar(self, variant: VariantRecord) -> DatabaseEvidence:
@@ -224,61 +246,90 @@ class DatabaseSearchService:
         return unique
 
     def _search_cosmic(self, variant: VariantRecord) -> DatabaseEvidence:
-        terms = " ".join(part for part in [variant.symbol, self._cdna_without_transcript(variant.hgvsc), variant.hgvsp] if part)
-        if not terms:
+        queries = self._cosmic_queries(variant)
+        if not queries:
             return DatabaseEvidence("COSMIC", "invalid_query", "Missing gene/HGVS fields.")
         fields = [
             "MutationID",
+            "LegacyMutationID",
+            "GenomicMutationID",
             "GeneName",
             "MutationCDS",
             "MutationAA",
             "MutationDescription",
             "MutationGenomePosition",
+            "GRChVer",
             "PrimarySite",
             "PrimaryHistology",
             "PubmedPMID",
         ]
         try:
-            response = requests.get(
-                "https://clinicaltables.nlm.nih.gov/api/cosmic/v3/search",
-                params={
-                    "terms": terms,
+            last_data = None
+            for cosmic_query in queries:
+                params = {
+                    "terms": cosmic_query["terms"],
                     "maxList": 8,
+                    "grchv": "37",
                     "ef": ",".join(fields),
-                },
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            data = response.json()
-            total = int(data[0]) if data else 0
-            extras = data[2] or {}
-            if total == 0:
-                return DatabaseEvidence("COSMIC", "not_found", f"No COSMIC hit for {terms}.", url=self._manual_url("COSMIC", variant))
-            ids = extras.get("MutationID", [])
-            genes = extras.get("GeneName", [])
-            cds = extras.get("MutationCDS", [])
-            aa = extras.get("MutationAA", [])
-            sites = extras.get("PrimarySite", [])
-            first = []
-            for index, mutation_id in enumerate(ids[:3]):
-                bits = [
-                    mutation_id,
-                    self._at(genes, index),
-                    self._at(cds, index),
-                    self._at(aa, index),
-                    self._at(sites, index),
-                ]
-                first.append(" ".join(bit for bit in bits if bit))
+                }
+                if cosmic_query.get("q"):
+                    params["q"] = cosmic_query["q"]
+                response = requests.get(
+                    "https://clinicaltables.nlm.nih.gov/api/cosmic/v4/search",
+                    params=params,
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+                data = response.json()
+                last_data = data
+                total = int(data[0]) if data else 0
+                if total:
+                    return self._format_cosmic_evidence(variant, cosmic_query["label"], data)
             return DatabaseEvidence(
-                database="COSMIC",
-                status="found",
-                summary=f"{total} COSMIC match(es). " + "; ".join(first),
-                accession=", ".join(ids[:5]),
+                "COSMIC",
+                "not_found",
+                f"No COSMIC basic/public hit for {'; '.join(query['label'] for query in queries)}.",
                 url=self._manual_url("COSMIC", variant),
-                raw={"query": terms, "extra": extras},
+                raw={"queries": queries, "last_response": last_data},
             )
         except Exception as exc:
             return DatabaseEvidence("COSMIC", "error", f"COSMIC lookup failed: {exc}", url=self._manual_url("COSMIC", variant))
+
+    def _format_cosmic_evidence(self, variant: VariantRecord, query: str, data: list) -> DatabaseEvidence:
+        total = int(data[0]) if data else 0
+        extras = data[2] or {}
+        ids = extras.get("MutationID", []) or data[1] or []
+        legacy_ids = extras.get("LegacyMutationID", [])
+        genes = extras.get("GeneName", [])
+        cds = extras.get("MutationCDS", [])
+        aa = extras.get("MutationAA", [])
+        descriptions = extras.get("MutationDescription", [])
+        positions = extras.get("MutationGenomePosition", [])
+        grch = extras.get("GRChVer", [])
+        sites = extras.get("PrimarySite", [])
+        first = []
+        for index, mutation_id in enumerate(ids[:3]):
+            bits = [
+                mutation_id,
+                self._at(legacy_ids, index),
+                self._at(genes, index),
+                self._at(cds, index),
+                self._at(aa, index),
+                self._at(descriptions, index),
+                self._at(positions, index),
+                self._at(grch, index),
+                self._at(sites, index),
+            ]
+            first.append(" ".join(bit for bit in bits if bit))
+        summary = f"COSMIC basic/public lookup: {total} match(es) for {query}. " + "; ".join(first)
+        return DatabaseEvidence(
+            database="COSMIC",
+            status="found",
+            summary=summary.strip(),
+            accession=", ".join(self._unique_text(ids)[:5]),
+            url=self._manual_url("COSMIC", variant),
+            raw={"query": query, "extra": extras},
+        )
 
     def _search_oncokb(self, variant: VariantRecord) -> DatabaseEvidence:
         alteration = self._protein_change(variant.hgvsp) or self._cdna_without_transcript(variant.hgvsc)
@@ -289,9 +340,11 @@ class DatabaseSearchService:
                 database="OncoKB",
                 status="token_required",
                 summary=f"OncoKB API requires a token. Query prepared: {variant.symbol} {alteration}.",
+                accession=f"{variant.symbol} {alteration}",
                 url=self._manual_url("OncoKB", variant),
             )
         try:
+            info = self._oncokb_info()
             response = requests.get(
                 "https://www.oncokb.org/api/v1/annotate/mutations/byProteinChange",
                 params={"hugoSymbol": variant.symbol, "alteration": alteration},
@@ -304,17 +357,22 @@ class DatabaseSearchService:
                 f"oncogenic={data.get('oncogenic', '')}",
                 f"mutation_effect={data.get('mutationEffect', {}).get('knownEffect', '')}",
                 f"highest_sensitive_level={data.get('highestSensitiveLevel', '')}",
+                f"highest_resistance_level={data.get('highestResistanceLevel', '')}",
+                f"highest_diagnostic_level={data.get('highestDiagnosticImplicationLevel', '')}",
+                f"highest_prognostic_level={data.get('highestPrognosticImplicationLevel', '')}",
+                f"data_version={self._oncokb_info_value(info)}",
             ]
             return DatabaseEvidence(
                 database="OncoKB",
                 status="found",
                 summary="; ".join(part for part in summary_parts if not part.endswith("=")),
+                accession=f"{variant.symbol} {alteration}",
                 clinical_significance=data.get("oncogenic", ""),
                 url=self._manual_url("OncoKB", variant),
-                raw=data,
+                raw={"info": info, "annotation": data},
             )
         except requests.HTTPError as exc:
-            status = "unauthorized" if exc.response is not None and exc.response.status_code == 401 else "error"
+            status = "unauthorized" if exc.response is not None and exc.response.status_code in {401, 403} else "error"
             return DatabaseEvidence("OncoKB", status, f"OncoKB lookup failed: {exc}", url=self._manual_url("OncoKB", variant))
         except Exception as exc:
             return DatabaseEvidence("OncoKB", "error", f"OncoKB lookup failed: {exc}", url=self._manual_url("OncoKB", variant))
@@ -441,18 +499,22 @@ class DatabaseSearchService:
                     "gnomAD",
                     "rate_limited",
                     "gnomAD rate limit reached: 10 requests per IP per 60 seconds. Try again later or lower Workers to 1.",
+                    accession=variant_id,
                     url=self._manual_url("gnomAD", variant),
                 )
                 self._gnomad_cache[variant_id] = evidence
                 return evidence
             response.raise_for_status()
             payload = response.json()
+            graphql_errors = payload.get("errors") or []
             data = (payload.get("data") or {}).get("variant")
             if not data:
+                message = graphql_errors[0].get("message") if graphql_errors and isinstance(graphql_errors[0], dict) else ""
                 evidence = DatabaseEvidence(
                     "gnomAD",
                     "not_found",
-                    f"No {self.settings.gnomad_dataset} hit for {variant_id}.",
+                    f"No {self.settings.gnomad_dataset} hit for {variant_id}." + (f" API message: {message}" if message else ""),
+                    accession=variant_id,
                     url=self._manual_url("gnomAD", variant),
                     raw=payload,
                 )
@@ -505,6 +567,24 @@ class DatabaseSearchService:
                 url=self._manual_url("gnomAD", variant),
                 raw=data,
             )
+
+    def _oncokb_info(self) -> dict:
+        if self._oncokb_info_cache is not None:
+            return self._oncokb_info_cache
+        response = requests.get(
+            "https://www.oncokb.org/api/v1/info",
+            headers={"Authorization": f"Bearer {self.settings.oncokb_api_key}"},
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        self._oncokb_info_cache = response.json()
+        return self._oncokb_info_cache
+
+    def _oncokb_info_value(self, info: dict) -> str:
+        for key in ["dataVersion", "data_version", "version", "apiVersion"]:
+            if info.get(key):
+                return str(info[key])
+        return ""
 
     def _wait_for_gnomad_slot(self) -> None:
         with self._gnomad_lock:
@@ -560,6 +640,32 @@ class DatabaseSearchService:
             return f"{chrom}-{pos}-{variant.ref_allele}-{variant.alt_allele}"
         except ValueError:
             return ""
+
+    def _cosmic_queries(self, variant: VariantRecord) -> list[dict[str, str]]:
+        queries = []
+        if variant.cosmic_id:
+            digits = "".join(char for char in variant.cosmic_id if char.isdigit())
+            exact_parts = [f'LegacyMutationID:"{variant.cosmic_id}"']
+            if digits:
+                exact_parts.append(f'MutationID:"{digits}"')
+            queries.append(
+                {
+                    "terms": variant.symbol or variant.cosmic_id,
+                    "q": " OR ".join(exact_parts),
+                    "label": variant.cosmic_id,
+                }
+            )
+        cdna = self._cdna_without_transcript(variant.hgvsc)
+        protein = self._protein_change(variant.hgvsp)
+        for query in [
+            " ".join(part for part in [variant.symbol, cdna] if part),
+            " ".join(part for part in [variant.symbol, protein] if part),
+            " ".join(part for part in [variant.symbol, variant.genomic_location] if part),
+            variant.symbol,
+        ]:
+            if query and query not in [item["label"] for item in queries]:
+                queries.append({"terms": query, "label": query})
+        return queries
 
     def _franklin_search_text(self, variant: VariantRecord) -> str:
         if variant.genomic_location and variant.ref_allele and variant.alt_allele:
@@ -674,7 +780,7 @@ class DatabaseSearchService:
         return self._manual_url("Franklin", variant)
 
     def _manual_url(self, database: str, variant: VariantRecord) -> str:
-        query = urllib.parse.quote(" ".join(part for part in [variant.symbol, variant.hgvsc, variant.hgvsp, variant.genomic_location] if part))
+        query = urllib.parse.quote(self._review_query(variant))
         urls = {
             "MTBP": "https://mtbp.herokuapp.com/",
             "HSMD": "https://variants.ingenuity.com/",
@@ -684,6 +790,9 @@ class DatabaseSearchService:
             "gnomAD": f"https://gnomad.broadinstitute.org/variant/{urllib.parse.quote(self._gnomad_variant_id(variant))}?dataset={self.settings.gnomad_dataset}",
         }
         return urls.get(database, "")
+
+    def _review_query(self, variant: VariantRecord) -> str:
+        return " ".join(part for part in [variant.symbol, variant.hgvsc, variant.hgvsp, variant.genomic_location] if part)
 
     def _cdna_without_transcript(self, hgvsc: str) -> str:
         return hgvsc.split(":", 1)[1] if ":" in hgvsc else hgvsc
@@ -695,3 +804,11 @@ class DatabaseSearchService:
 
     def _at(self, values: list, index: int) -> str:
         return str(values[index]) if index < len(values) and values[index] is not None else ""
+
+    def _unique_text(self, values: list) -> list[str]:
+        unique = []
+        for value in values:
+            text = str(value)
+            if text and text not in unique:
+                unique.append(text)
+        return unique

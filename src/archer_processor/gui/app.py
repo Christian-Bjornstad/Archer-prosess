@@ -100,6 +100,8 @@ class DatabaseWorker(QObject):
     def run(self) -> None:
         try:
             service = DatabaseSearchService(self.settings)
+            for database, status in service.database_diagnostics(self.databases).items():
+                self.status.emit(f"{database}: {status}")
             self.status.emit(
                 f"Parallel search started: {len(self.variants)} variants, "
                 f"{len(self.databases)} sources, {self.max_workers} workers"
