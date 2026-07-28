@@ -11,7 +11,7 @@ from archer_processor.core.highlights import variant_highlight
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
 
 
-DEFAULT_DATABASE_COLUMNS = ["ClinVar", "gnomAD", "COSMIC", "OncoKB", "Franklin", "MTBP", "HSMD"]
+DEFAULT_DATABASE_COLUMNS = ["ClinVar", "gnomAD", "COSMIC", "CIViC", "OncoKB", "Franklin", "MTBP", "HSMD"]
 
 
 class ExcelReportWriter:

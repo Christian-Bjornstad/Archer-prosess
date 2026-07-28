@@ -73,6 +73,7 @@ def test_excel_export_writes_one_row_per_database_source(tmp_path):
             DatabaseEvidence("ClinVar", "found", "ClinVar summary"),
             DatabaseEvidence("gnomAD", "found", "gnomAD summary"),
             DatabaseEvidence("COSMIC", "found", "COSMIC summary"),
+            DatabaseEvidence("CIViC", "found", "CIViC summary"),
             DatabaseEvidence("OncoKB", "token_required", "OncoKB token required"),
             DatabaseEvidence("Franklin", "token_required", "Franklin token required"),
             DatabaseEvidence("MTBP", "manual", "MTBP manual"),
@@ -87,7 +88,7 @@ def test_excel_export_writes_one_row_per_database_source(tmp_path):
     workbook.close()
     databases = [row[3] for row in rows if row[3]]
 
-    assert databases == ["ClinVar", "gnomAD", "COSMIC", "OncoKB", "Franklin", "MTBP", "HSMD"]
+    assert databases == ["ClinVar", "gnomAD", "COSMIC", "CIViC", "OncoKB", "Franklin", "MTBP", "HSMD"]
 
 
 def test_excel_variant_sheet_writes_distinct_database_columns(tmp_path):
@@ -99,6 +100,7 @@ def test_excel_variant_sheet_writes_distinct_database_columns(tmp_path):
             DatabaseEvidence("ClinVar", "found", "ClinVar summary"),
             DatabaseEvidence("gnomAD", "found", "gnomAD summary"),
             DatabaseEvidence("COSMIC", "found", "COSMIC summary"),
+            DatabaseEvidence("CIViC", "found", "CIViC summary"),
             DatabaseEvidence("OncoKB", "token_required", "OncoKB token required"),
             DatabaseEvidence("Franklin", "unauthorized", "Franklin login was rejected"),
             DatabaseEvidence("MTBP", "manual", "MTBP manual"),
@@ -114,7 +116,8 @@ def test_excel_variant_sheet_writes_distinct_database_columns(tmp_path):
     row = next(row for row in ws.iter_rows(min_row=2, values_only=True) if row[0] == variant.sample)
     workbook.close()
 
-    for database in ["ClinVar", "gnomAD", "COSMIC", "OncoKB", "Franklin", "MTBP", "HSMD"]:
+    for database in ["ClinVar", "gnomAD", "COSMIC", "CIViC", "OncoKB", "Franklin", "MTBP", "HSMD"]:
         assert f"{database} Evidence" in headers
     assert row[headers.index("ClinVar Evidence")] == "[found] ClinVar summary"
+    assert row[headers.index("CIViC Evidence")] == "[found] CIViC summary"
     assert row[headers.index("Franklin Evidence")] == "[unauthorized] Franklin login was rejected"

@@ -53,6 +53,8 @@ class DatabaseSearchService:
                 diagnostics[database] = f"ready ({self.settings.gnomad_dataset}, rate limited)"
             elif database == "COSMIC":
                 diagnostics[database] = "ready (basic/public lookup)"
+            elif database == "CIViC":
+                diagnostics[database] = "ready (open GraphQL)"
             elif database in {"ClinVar", "OncoKB"}:
                 diagnostics[database] = "ready"
             else:
@@ -66,6 +68,8 @@ class DatabaseSearchService:
                 evidence.append(self._search_clinvar(variant))
             elif database == "COSMIC":
                 evidence.append(self._search_cosmic(variant))
+            elif database == "CIViC":
+                evidence.append(self._search_civic(variant))
             elif database == "OncoKB":
                 evidence.append(self._search_oncokb(variant))
             elif database == "Franklin":
@@ -339,6 +343,136 @@ class DatabaseSearchService:
             url=self._manual_url("COSMIC", variant),
             raw={"query": query, "extra": extras},
         )
+
+    def _search_civic(self, variant: VariantRecord) -> DatabaseEvidence:
+        if not variant.symbol:
+            return DatabaseEvidence("CIViC", "invalid_query", "Needs gene plus variant name.", url=self._manual_url("CIViC", variant))
+        variant_names = self._civic_variant_names(variant)
+        if not variant_names:
+            return DatabaseEvidence("CIViC", "invalid_query", "Needs HGVSp or HGVSc to build a CIViC variant query.", url=self._manual_url("CIViC", variant))
+        try:
+            last_payload = None
+            for variant_name in variant_names:
+                payload = self._civic_graphql(
+                    """
+                    query BrowseCivicProfiles($featureName: String!, $variantName: String!, $first: Int) {
+                      browseMolecularProfiles(featureName: $featureName, variantName: $variantName, first: $first) {
+                        filteredCount
+                        nodes {
+                          id
+                          name
+                          link
+                          evidenceItemCount
+                          assertionCount
+                          diseases { name link }
+                          therapies { name link }
+                          variants { name link }
+                        }
+                      }
+                    }
+                    """,
+                    {"featureName": variant.symbol, "variantName": variant_name, "first": 5},
+                )
+                last_payload = payload
+                profiles = ((payload.get("data") or {}).get("browseMolecularProfiles") or {}).get("nodes") or []
+                if profiles:
+                    return self._format_civic_evidence(variant, variant_name, profiles[0], payload)
+            return DatabaseEvidence(
+                "CIViC",
+                "not_found",
+                f"No accepted CIViC molecular profile hit for {variant.symbol} {'; '.join(variant_names)}.",
+                url=self._manual_url("CIViC", variant),
+                raw={"variant_names": variant_names, "last_response": last_payload},
+            )
+        except Exception as exc:
+            return DatabaseEvidence("CIViC", "error", f"CIViC lookup failed: {exc}", url=self._manual_url("CIViC", variant))
+
+    def _format_civic_evidence(self, variant: VariantRecord, query: str, profile: dict, profile_payload: dict) -> DatabaseEvidence:
+        evidence_payload = self._civic_graphql(
+            """
+            query CivicEvidence($molecularProfileId: Int, $first: Int) {
+              evidenceItems(molecularProfileId: $molecularProfileId, status: ACCEPTED, first: $first) {
+                totalCount
+                nodes {
+                  id
+                  name
+                  evidenceType
+                  evidenceLevel
+                  significance
+                  evidenceDirection
+                  status
+                  variantOrigin
+                  description
+                  disease { name link }
+                  therapies { name link }
+                  source { citationId sourceType }
+                }
+              }
+            }
+            """,
+            {"molecularProfileId": profile.get("id"), "first": 5},
+        )
+        evidence_items = ((evidence_payload.get("data") or {}).get("evidenceItems") or {}).get("nodes") or []
+        total_evidence = ((evidence_payload.get("data") or {}).get("evidenceItems") or {}).get("totalCount")
+        diseases = self._names(profile.get("diseases") or [])[:4]
+        therapies = self._names(profile.get("therapies") or [])[:4]
+        top = evidence_items[0] if evidence_items else {}
+        source = top.get("source") or {}
+        top_parts = [
+            top.get("name"),
+            top.get("evidenceType"),
+            top.get("evidenceLevel"),
+            top.get("significance"),
+            top.get("evidenceDirection"),
+            self._name(top.get("disease") or {}),
+            f"{source.get('sourceType')}:{source.get('citationId')}" if source.get("citationId") else "",
+        ]
+        parts = [
+            f"profile={profile.get('name')}",
+            f"accepted_evidence={total_evidence if total_evidence is not None else profile.get('evidenceItemCount', 0)}",
+            f"assertions={profile.get('assertionCount', 0)}",
+        ]
+        if diseases:
+            parts.append("diseases=" + ", ".join(diseases))
+        if therapies:
+            parts.append("therapies=" + ", ".join(therapies))
+        if top:
+            parts.append("top_evidence=" + " ".join(str(part) for part in top_parts if part))
+        return DatabaseEvidence(
+            database="CIViC",
+            status="found",
+            summary="; ".join(parts),
+            accession=f"CIViC MP{profile.get('id')} ({query})",
+            clinical_significance=str(top.get("significance") or ""),
+            url=self._absolute_civic_url(profile.get("link") or ""),
+            raw={"profile_query": profile_payload, "evidence": evidence_payload},
+        )
+
+    def _civic_graphql(self, query: str, variables: dict) -> dict:
+        response = requests.post(
+            "https://civicdb.org/api/graphql",
+            json={"query": query, "variables": variables},
+            headers={"Accept": "application/json"},
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("errors"):
+            message = payload["errors"][0].get("message") if isinstance(payload["errors"][0], dict) else str(payload["errors"][0])
+            raise ValueError(message)
+        return payload
+
+    def _civic_variant_names(self, variant: VariantRecord) -> list[str]:
+        candidates = []
+        protein = self._protein_change(variant.hgvsp)
+        cdna = self._cdna_without_transcript(variant.hgvsc)
+        for candidate in [protein, cdna]:
+            if candidate and candidate not in candidates:
+                candidates.append(candidate)
+        return candidates
+
+    def _absolute_civic_url(self, link: str) -> str:
+        return f"https://civicdb.org{link}" if link.startswith("/") else link
 
     def _search_oncokb(self, variant: VariantRecord) -> DatabaseEvidence:
         alteration = self._protein_change(variant.hgvsp) or self._cdna_without_transcript(variant.hgvsc)
@@ -845,6 +979,7 @@ class DatabaseSearchService:
             "MTBP": "https://mtbp.herokuapp.com/",
             "HSMD": "https://variants.ingenuity.com/",
             "COSMIC": f"https://cancer.sanger.ac.uk/cosmic/search?q={query}",
+            "CIViC": f"https://civicdb.org/search?query={query}",
             "OncoKB": f"https://www.oncokb.org/gene/{urllib.parse.quote(variant.symbol)}",
             "Franklin": f"https://franklin.genoox.com/clinical-db/home?search={query}",
             "gnomAD": f"https://gnomad.broadinstitute.org/variant/{urllib.parse.quote(self._gnomad_variant_id(variant))}?dataset={self.settings.gnomad_dataset}",
@@ -872,3 +1007,9 @@ class DatabaseSearchService:
             if text and text not in unique:
                 unique.append(text)
         return unique
+
+    def _name(self, value: dict) -> str:
+        return str(value.get("name") or "")
+
+    def _names(self, values: list[dict]) -> list[str]:
+        return [name for item in values if (name := self._name(item))]

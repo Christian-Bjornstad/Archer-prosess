@@ -5,7 +5,7 @@ from archer_processor.services import DatabaseSearchService
 def test_database_tab_contains_current_sources(qt_app):
     window = MainWindow()
 
-    assert window.databases == ["ClinVar", "MTBP", "HSMD", "COSMIC", "OncoKB", "Franklin", "gnomAD"]
+    assert window.databases == ["ClinVar", "gnomAD", "COSMIC", "CIViC", "MTBP", "HSMD", "OncoKB", "Franklin"]
     assert set(window.db_checks) == set(window.databases)
     headers = [
         window.evidence_table.horizontalHeaderItem(index).text()
@@ -23,4 +23,5 @@ def test_database_diagnostics_cover_token_and_manual_statuses(qt_app):
     assert diagnostics["OncoKB"] in {"token required", "ready"}
     assert diagnostics["Franklin"] in {"token required", "ready"}
     assert diagnostics["COSMIC"] == "ready (basic/public lookup)"
+    assert diagnostics["CIViC"] == "ready (open GraphQL)"
     assert diagnostics["gnomAD"].startswith("ready")

@@ -44,11 +44,12 @@ def test_database_diagnostics_reports_ready_token_and_manual_sources():
     settings = AppSettings(enabled_databases=["ClinVar"], oncokb_api_key="", franklin_api_key="")
     service = DatabaseSearchService(settings)
 
-    diagnostics = service.database_diagnostics(["ClinVar", "gnomAD", "COSMIC", "OncoKB", "Franklin", "MTBP", "HSMD"])
+    diagnostics = service.database_diagnostics(["ClinVar", "gnomAD", "COSMIC", "CIViC", "OncoKB", "Franklin", "MTBP", "HSMD"])
 
     assert diagnostics["ClinVar"] == "ready"
     assert diagnostics["gnomAD"].startswith("ready")
     assert diagnostics["COSMIC"] == "ready (basic/public lookup)"
+    assert diagnostics["CIViC"] == "ready (open GraphQL)"
     assert diagnostics["OncoKB"] == "token required"
     assert diagnostics["Franklin"] == "token required"
     assert diagnostics["MTBP"] == "manual"
@@ -371,6 +372,101 @@ def test_oncokb_without_token_prepares_query():
 
     assert evidence.status == "token_required"
     assert evidence.accession == "TP53 R175H"
+
+
+def test_civic_found_uses_v2_graphql(monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = DatabaseSearchService(timeout=1)
+    calls = []
+
+    def fake_post(url, json, headers, timeout):
+        calls.append((url, json))
+        if "BrowseCivicProfiles" in json["query"]:
+            assert json["variables"]["featureName"] == "TP53"
+            assert json["variables"]["variantName"] == "R175H"
+            return FakeResponse(
+                {
+                    "data": {
+                        "browseMolecularProfiles": {
+                            "filteredCount": 1,
+                            "nodes": [
+                                {
+                                    "id": 116,
+                                    "name": "TP53 R175H",
+                                    "link": "/molecular-profiles/116",
+                                    "evidenceItemCount": 12,
+                                    "assertionCount": 0,
+                                    "diseases": [{"name": "Breast Cancer"}],
+                                    "therapies": [{"name": "Doxorubicin"}],
+                                    "variants": [{"name": "R175H"}],
+                                }
+                            ],
+                        }
+                    }
+                }
+            )
+        return FakeResponse(
+            {
+                "data": {
+                    "evidenceItems": {
+                        "totalCount": 6,
+                        "nodes": [
+                            {
+                                "name": "EID389",
+                                "evidenceType": "PROGNOSTIC",
+                                "evidenceLevel": "B",
+                                "significance": "POOR_OUTCOME",
+                                "evidenceDirection": "SUPPORTS",
+                                "disease": {"name": "Breast Cancer"},
+                                "therapies": [],
+                                "source": {"citationId": "16489069", "sourceType": "PUBMED"},
+                            }
+                        ],
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr("archer_processor.services.database_search.requests.post", fake_post)
+
+    evidence = service._search_civic(variant)
+
+    assert evidence.status == "found"
+    assert evidence.accession == "CIViC MP116 (R175H)"
+    assert evidence.clinical_significance == "POOR_OUTCOME"
+    assert evidence.url == "https://civicdb.org/molecular-profiles/116"
+    assert "accepted_evidence=6" in evidence.summary
+    assert "therapies=Doxorubicin" in evidence.summary
+    assert len(calls) == 2
+
+
+def test_civic_not_found(monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = DatabaseSearchService(timeout=1)
+
+    def fake_post(*args, **kwargs):
+        return FakeResponse({"data": {"browseMolecularProfiles": {"filteredCount": 0, "nodes": []}}})
+
+    monkeypatch.setattr("archer_processor.services.database_search.requests.post", fake_post)
+
+    evidence = service._search_civic(variant)
+
+    assert evidence.status == "not_found"
+
+
+def test_civic_graphql_error_is_reported(monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = DatabaseSearchService(timeout=1)
+
+    def fake_post(*args, **kwargs):
+        return FakeResponse({"errors": [{"message": "schema changed"}]})
+
+    monkeypatch.setattr("archer_processor.services.database_search.requests.post", fake_post)
+
+    evidence = service._search_civic(variant)
+
+    assert evidence.status == "error"
+    assert "schema changed" in evidence.summary
 
 
 def test_oncokb_found_includes_info_and_levels(monkeypatch):
