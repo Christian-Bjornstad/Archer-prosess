@@ -38,7 +38,7 @@ Database evidence sources:
 - gnomAD evidence should be interpreted as population-frequency context: aggregated AF, exome AF, genome AF, max population AF, homozygote/hemizygote counts, filters, and direct browser URL.
 - gnomAD requests are rate-limited by the app to respect the public limit of 10 requests per IP per 60 seconds.
 - OncoKB is token-based. Add the API token in Settings to enable live annotation; without a token the app records a prepared query and direct review link.
-- Franklin is token-based. Add the API token in Settings to enable live SNP search through Genoox; without a token the app records a prepared query and direct review link.
+- Franklin is token-based. Add the API token in Settings, or enter Franklin email plus runtime password for login during the current app session. The password is not saved to config. Without credentials the app records a prepared query and direct review link.
 - Franklin evidence should be reviewed for computed ACMG classification, ACMG rule triggers, population frequency, REVEL/aggregated prediction data, ClinVar evidence, and transcript match.
 - MTBP and HSMD currently require login/license/manual review. The app records prepared queries and direct review links. The 26OUM10350 manual report suggests recording classification, MTBP functional relevance/evidence category, HSMD actionability tier, clinical review status, population frequency, references, and notes.
 - Evidence must be presented as support for human interpretation, not as automatic final classification.

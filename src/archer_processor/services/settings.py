@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +15,8 @@ class AppSettings:
     clinvar_api_key: str = ""
     oncokb_api_key: str = ""
     franklin_api_key: str = ""
+    franklin_email: str = ""
+    franklin_password: str = field(default="", repr=False, metadata={"persist": False})
     database_workers: int = 3
     gnomad_dataset: str = "gnomad_r2_1"
     artifact_rules: list[dict[str, str]] = field(default_factory=default_artifact_rules)
@@ -31,11 +33,20 @@ class AppSettings:
             return cls()
         try:
             data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
-            return cls(**{key: value for key, value in data.items() if key in cls.__dataclass_fields__})
+            persisted_fields = {
+                item.name
+                for item in fields(cls)
+                if item.metadata.get("persist") is not False
+            }
+            return cls(**{key: value for key, value in data.items() if key in persisted_fields})
         except Exception:
             return cls()
 
     def save(self) -> None:
         path = self.config_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
+        data = asdict(self)
+        for item in fields(self):
+            if item.metadata.get("persist") is False:
+                data.pop(item.name, None)
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")

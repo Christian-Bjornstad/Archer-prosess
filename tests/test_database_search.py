@@ -55,6 +55,15 @@ def test_database_diagnostics_reports_ready_token_and_manual_sources():
     assert diagnostics["HSMD"] == "manual"
 
 
+def test_database_diagnostics_reports_franklin_login_ready():
+    settings = AppSettings(franklin_api_key="", franklin_email="user@example.org", franklin_password="secret")
+    service = DatabaseSearchService(settings)
+
+    diagnostics = service.database_diagnostics(["Franklin"])
+
+    assert diagnostics["Franklin"] == "ready (login on search)"
+
+
 def test_manual_sources_return_checklist_and_query():
     variant = ArcherTsvReader().read(FIXTURE)[3]
     service = DatabaseSearchService()
@@ -155,6 +164,53 @@ def test_franklin_without_token_prepares_search_query():
 
     assert evidence.status == "token_required"
     assert "Query prepared: chr13-28608215-C-CT" in evidence.summary
+
+
+def test_franklin_login_fetches_token_and_searches(monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[0]
+    service = DatabaseSearchService(
+        AppSettings(franklin_api_key="", franklin_email="user@example.org", franklin_password="secret"),
+        timeout=1,
+    )
+    calls = []
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        calls.append((url, params or {}, headers or {}))
+        if url.endswith("/v1/auth/login"):
+            assert params["email"] == "user@example.org"
+            assert headers["Authorization"] == "secret"
+            return FakeResponse({"data": {"token": "session-token"}})
+        assert url.endswith("/v2/search/snp/")
+        assert headers["Authorization"] == "Bearer session-token"
+        return FakeResponse(
+            {
+                "variants": [
+                    {
+                        "classification": {"acmg_classification": "uncertain significance"},
+                        "annotations": {},
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr("archer_processor.services.database_search.requests.get", fake_get)
+
+    evidence = service._search_franklin(variant)
+
+    assert evidence.status == "found"
+    assert evidence.clinical_significance == "uncertain significance"
+    assert [call[0] for call in calls] == [
+        "https://api.genoox.com/v1/auth/login",
+        "https://api.genoox.com/v2/search/snp/",
+    ]
+
+
+def test_franklin_token_parser_accepts_common_shapes():
+    service = DatabaseSearchService()
+
+    assert service._token_from_payload("plain-token") == "plain-token"
+    assert service._token_from_payload({"apiToken": "api-token"}) == "api-token"
+    assert service._token_from_payload({"data": {"access_token": "access-token"}}) == "access-token"
 
 
 def test_franklin_unauthorized_is_reported(monkeypatch):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import os
 import threading
 import time
 import urllib.parse
@@ -38,13 +39,17 @@ class DatabaseSearchService:
                 diagnostics[database] = "manual"
             elif database == "OncoKB" and not self.settings.oncokb_api_key:
                 diagnostics[database] = "token required"
-            elif database == "Franklin" and not self.settings.franklin_api_key:
+            elif database == "Franklin" and self.settings.franklin_api_key:
+                diagnostics[database] = "ready"
+            elif database == "Franklin" and self._has_franklin_login_credentials():
+                diagnostics[database] = "ready (login on search)"
+            elif database == "Franklin":
                 diagnostics[database] = "token required"
             elif database == "gnomAD":
                 diagnostics[database] = f"ready ({self.settings.gnomad_dataset}, rate limited)"
             elif database == "COSMIC":
                 diagnostics[database] = "ready (basic/public lookup)"
-            elif database in {"ClinVar", "OncoKB", "Franklin"}:
+            elif database in {"ClinVar", "OncoKB"}:
                 diagnostics[database] = "ready"
             else:
                 diagnostics[database] = "manual"
@@ -381,11 +386,13 @@ class DatabaseSearchService:
         query = self._franklin_search_text(variant)
         if not query:
             return DatabaseEvidence("Franklin", "invalid_query", "Needs genomic position/ref/alt, HGVSc, or gene alteration.", url=self._manual_url("Franklin", variant))
-        if not self.settings.franklin_api_key:
+        token = self._franklin_token()
+        if not token:
             return DatabaseEvidence(
                 database="Franklin",
                 status="token_required",
-                summary=f"Franklin API requires a token. Query prepared: {query}.",
+                summary=f"Franklin API requires a token or runtime email/password login. Query prepared: {query}.",
+                accession=query,
                 url=self._manual_url("Franklin", variant),
             )
         try:
@@ -393,7 +400,7 @@ class DatabaseSearchService:
                 "https://api.genoox.com/v2/search/snp/",
                 params={"search_text": query},
                 headers={
-                    "Authorization": f"Bearer {self.settings.franklin_api_key}",
+                    "Authorization": f"Bearer {token}",
                     "Accept": "application/json",
                 },
                 timeout=self.timeout,
@@ -406,6 +413,45 @@ class DatabaseSearchService:
             return DatabaseEvidence("Franklin", status, f"Franklin lookup failed: {exc}", url=self._manual_url("Franklin", variant))
         except Exception as exc:
             return DatabaseEvidence("Franklin", "error", f"Franklin lookup failed: {exc}", url=self._manual_url("Franklin", variant))
+
+    def _franklin_token(self) -> str:
+        if self.settings.franklin_api_key:
+            return self.settings.franklin_api_key
+        email = self.settings.franklin_email or os.environ.get("FRANKLIN_EMAIL", "")
+        password = self.settings.franklin_password or os.environ.get("FRANKLIN_PASSWORD", "")
+        if not email or not password:
+            return ""
+        response = requests.get(
+            "https://api.genoox.com/v1/auth/login",
+            params={"email": email},
+            headers={"Authorization": password, "Accept": "application/json"},
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        token = self._token_from_payload(response.json())
+        if not token:
+            raise ValueError("Franklin login did not return an API token.")
+        self.settings.franklin_api_key = token
+        return token
+
+    def _has_franklin_login_credentials(self) -> bool:
+        email = self.settings.franklin_email or os.environ.get("FRANKLIN_EMAIL", "")
+        password = self.settings.franklin_password or os.environ.get("FRANKLIN_PASSWORD", "")
+        return bool(email and password)
+
+    def _token_from_payload(self, payload) -> str:
+        if isinstance(payload, str):
+            return payload
+        if not isinstance(payload, dict):
+            return ""
+        for key in ["token", "api_token", "apiToken", "user_api_token", "userApiToken", "access_token", "accessToken"]:
+            if payload.get(key):
+                return str(payload[key])
+        for key in ["data", "user", "result"]:
+            token = self._token_from_payload(payload.get(key))
+            if token:
+                return token
+        return ""
 
     def _format_franklin_evidence(self, variant: VariantRecord, query: str, data: dict) -> DatabaseEvidence:
         record = self._first_franklin_record(data)
