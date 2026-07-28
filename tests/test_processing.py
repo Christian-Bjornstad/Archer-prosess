@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from archer_processor.core import FilterEngine, VariantProcessor
+from archer_processor.core import FilterEngine, VariantProcessor, production_rules
 from archer_processor.io import ArcherTsvReader
 from archer_processor.reports import ExcelReportWriter
 
@@ -28,6 +28,25 @@ def test_production_rules_and_boundaries():
     assert by_sample["26OUM00003"].decision == "included"
     assert by_sample["26OUM00004"].warnings
     assert by_sample["26OUM00005"].warnings
+
+
+def test_custom_artifact_rules_replace_default_artifact_list():
+    variants = ArcherTsvReader().read(FIXTURE)
+    rules = production_rules(
+        [
+            {
+                "gene": "TP53",
+                "hgvsc": "NM_000546.6:c.524G>A",
+                "reason": "Temporary local artifact for testing.",
+            }
+        ]
+    )
+    FilterEngine(rules).apply(variants)
+
+    by_sample = {variant.patient_id: variant for variant in variants}
+    assert by_sample["26OUM00001"].decision == "included"
+    assert by_sample["26OUM00004"].decision == "excluded"
+    assert "artifact" in by_sample["26OUM00004"].matched_rules[0]
 
 
 def test_processor_writes_excel(tmp_path):

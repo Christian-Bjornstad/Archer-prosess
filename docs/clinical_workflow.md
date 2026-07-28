@@ -14,11 +14,10 @@ Core workflow:
 
 Initial production rules:
 
-- Exclude `NM_004119.2:c.1419-4dup`.
-- Exclude `NM_004119.2:c.1419-4del`.
-- Exclude `NM_004972.3:c.3291+16dup`.
-- Exclude `NM_004972.3:c.3291+16del`.
+- Exclude configured artifact variants. The default artifact list contains `NM_004119.2:c.1419-4dup`, `NM_004119.2:c.1419-4del`, `NM_004972.3:c.3291+16dup`, and `NM_004972.3:c.3291+16del`.
 - Exclude `NM_015338.5:c.1934dup` only when AF is below 4.5%.
+
+The artifact list can be reviewed and edited in Settings. Use Reset Defaults to restore the current default artifact list.
 
 Special review flags from the current clinical notes:
 

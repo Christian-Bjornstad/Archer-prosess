@@ -1,38 +1,38 @@
 from __future__ import annotations
 
+import re
+
 from .models import FilterRule, VariantRecord
 
 
-def production_rules() -> list[FilterRule]:
+def default_artifact_rules() -> list[dict[str, str]]:
     return [
-        FilterRule(
-            rule_id="flt3_1419_4dup_artifact",
-            name="FLT3 c.1419-4dup artifact",
-            gene="FLT3",
-            hgvsc="NM_004119.2:c.1419-4dup",
-            reason="Known recurrent FLT3 artifact; excluded regardless of AF.",
-        ),
-        FilterRule(
-            rule_id="flt3_1419_4del_artifact",
-            name="FLT3 c.1419-4del artifact",
-            gene="FLT3",
-            hgvsc="NM_004119.2:c.1419-4del",
-            reason="Known recurrent FLT3 artifact; excluded regardless of AF.",
-        ),
-        FilterRule(
-            rule_id="jak2_3291_16dup_artifact",
-            name="JAK2 c.3291+16dup artifact",
-            gene="JAK2",
-            hgvsc="NM_004972.3:c.3291+16dup",
-            reason="Known recurrent JAK2 artifact; excluded regardless of AF.",
-        ),
-        FilterRule(
-            rule_id="jak2_3291_16del_artifact",
-            name="JAK2 c.3291+16del artifact",
-            gene="JAK2",
-            hgvsc="NM_004972.3:c.3291+16del",
-            reason="Known recurrent JAK2 artifact; excluded regardless of AF.",
-        ),
+        {
+            "gene": "FLT3",
+            "hgvsc": "NM_004119.2:c.1419-4dup",
+            "reason": "Known recurrent FLT3 artifact; excluded regardless of AF.",
+        },
+        {
+            "gene": "FLT3",
+            "hgvsc": "NM_004119.2:c.1419-4del",
+            "reason": "Known recurrent FLT3 artifact; excluded regardless of AF.",
+        },
+        {
+            "gene": "JAK2",
+            "hgvsc": "NM_004972.3:c.3291+16dup",
+            "reason": "Known recurrent JAK2 artifact; excluded regardless of AF.",
+        },
+        {
+            "gene": "JAK2",
+            "hgvsc": "NM_004972.3:c.3291+16del",
+            "reason": "Known recurrent JAK2 artifact; excluded regardless of AF.",
+        },
+    ]
+
+
+def production_rules(artifact_rules: list[dict[str, str]] | None = None) -> list[FilterRule]:
+    rules = artifact_filter_rules(default_artifact_rules() if artifact_rules is None else artifact_rules)
+    rules.append(
         FilterRule(
             rule_id="asxl1_1934dup_low_af",
             name="ASXL1 c.1934dup low AF",
@@ -41,7 +41,29 @@ def production_rules() -> list[FilterRule]:
             max_af_exclusive=0.045,
             reason="ASXL1 c.1934dup below 4.5% AF threshold.",
         ),
-    ]
+    )
+    return rules
+
+
+def artifact_filter_rules(entries: list[dict[str, str]]) -> list[FilterRule]:
+    rules = []
+    for entry in entries:
+        gene = str(entry.get("gene") or "").strip().upper()
+        hgvsc = str(entry.get("hgvsc") or "").strip()
+        if not hgvsc:
+            continue
+        reason = str(entry.get("reason") or "").strip() or "Configured artifact; excluded regardless of AF."
+        name = f"{gene + ' ' if gene else ''}{_cdna_label(hgvsc)} artifact".strip()
+        rules.append(
+            FilterRule(
+                rule_id=f"{_slug(gene or 'variant')}_{_slug(_cdna_label(hgvsc))}_artifact",
+                name=name,
+                gene=gene,
+                hgvsc=hgvsc,
+                reason=reason,
+            )
+        )
+    return rules
 
 
 class FilterEngine:
@@ -63,6 +85,8 @@ class FilterEngine:
         return variants
 
     def _matches(self, rule: FilterRule, variant: VariantRecord) -> bool:
+        if rule.gene and variant.symbol.upper() != rule.gene.upper():
+            return False
         if variant.hgvsc != rule.hgvsc:
             return False
         if rule.max_af_exclusive is None:
@@ -80,3 +104,11 @@ class FilterEngine:
             variant.warnings.append("TP53 AF may require multihit/germline assessment.")
         if "yes" in variant.has_seq_dir_bias.lower() or "yes" in variant.has_sample_strand_bias.lower():
             variant.warnings.append("Strand/direction bias present; review read support.")
+
+
+def _cdna_label(hgvsc: str) -> str:
+    return hgvsc.split(":", 1)[-1]
+
+
+def _slug(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")

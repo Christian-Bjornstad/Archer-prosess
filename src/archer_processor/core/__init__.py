@@ -1,6 +1,6 @@
 from .models import DatabaseEvidence, ProcessingResult, VariantRecord
 from .processor import VariantProcessor
-from .rules import FilterEngine, production_rules
+from .rules import FilterEngine, default_artifact_rules, production_rules
 
 __all__ = [
     "DatabaseEvidence",
@@ -8,5 +8,6 @@ __all__ = [
     "ProcessingResult",
     "VariantProcessor",
     "VariantRecord",
+    "default_artifact_rules",
     "production_rules",
 ]

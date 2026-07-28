@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from archer_processor.core import ProcessingResult, VariantProcessor
+from archer_processor.core import FilterEngine, ProcessingResult, VariantProcessor, default_artifact_rules, production_rules
 from archer_processor.core.highlights import variant_highlight
 from archer_processor.io import ArcherTsvReader
 from archer_processor.knowledge import VariantHistoryRepository
@@ -75,7 +75,8 @@ class ProcessingWorker(QObject):
             self.status.emit("Reading Archer TSV")
             history_path = Path(self.settings.history_workbook)
             history = VariantHistoryRepository(history_path) if history_path.exists() else None
-            processor = VariantProcessor(history=history)
+            filter_engine = FilterEngine(production_rules(self.settings.artifact_rules))
+            processor = VariantProcessor(history=history, filter_engine=filter_engine)
             result = processor.process(self.input_path, self.run_date, self.output_path)
             self.status.emit("Writing review workbook")
             ExcelReportWriter().write(result, self.output_path, hide_excluded=self.hide_excluded)
@@ -320,6 +321,21 @@ class MainWindow(QMainWindow):
         self.gnomad_dataset_combo = QComboBox()
         self.gnomad_dataset_combo.addItems(["gnomad_r2_1", "gnomad_r3", "gnomad_r4"])
         self.gnomad_dataset_combo.setCurrentText(self.settings.gnomad_dataset)
+        self.artifact_table = QTableWidget(0, 3)
+        self.artifact_table.setHorizontalHeaderLabels(["Gene", "HGVSc", "Reason"])
+        self.artifact_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._load_artifact_table(self.settings.artifact_rules)
+        artifact_actions = QHBoxLayout()
+        add_artifact_btn = QPushButton("Add Artifact")
+        add_artifact_btn.clicked.connect(self._add_artifact_row)
+        remove_artifact_btn = QPushButton("Remove Selected")
+        remove_artifact_btn.clicked.connect(self._remove_selected_artifact)
+        reset_artifact_btn = QPushButton("Reset Defaults")
+        reset_artifact_btn.clicked.connect(self._reset_default_artifacts)
+        artifact_actions.addWidget(add_artifact_btn)
+        artifact_actions.addWidget(remove_artifact_btn)
+        artifact_actions.addWidget(reset_artifact_btn)
+        artifact_actions.addStretch()
         save_btn = QPushButton("Save Settings")
         save_btn.setObjectName("PrimaryButton")
         save_btn.clicked.connect(self._save_settings)
@@ -337,7 +353,10 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.franklin_key_edit, 4, 1)
         grid.addWidget(QLabel("gnomAD dataset"), 5, 0)
         grid.addWidget(self.gnomad_dataset_combo, 5, 1)
-        grid.addWidget(save_btn, 6, 2)
+        grid.addWidget(QLabel("Artifact list"), 6, 0)
+        grid.addWidget(self.artifact_table, 6, 1, 1, 2)
+        grid.addLayout(artifact_actions, 7, 1, 1, 2)
+        grid.addWidget(save_btn, 8, 2)
         layout.addWidget(group)
         layout.addStretch()
         return page
@@ -363,6 +382,39 @@ class MainWindow(QMainWindow):
         path = QFileDialog.getExistingDirectory(self, "Select Default Output Folder", self.output_dir_edit.text())
         if path:
             self.output_dir_edit.setText(path)
+
+    def _load_artifact_table(self, artifacts: list[dict[str, str]]) -> None:
+        self.artifact_table.setRowCount(0)
+        for artifact in artifacts:
+            row = self.artifact_table.rowCount()
+            self.artifact_table.insertRow(row)
+            for col, key in enumerate(["gene", "hgvsc", "reason"]):
+                self.artifact_table.setItem(row, col, QTableWidgetItem(str(artifact.get(key) or "")))
+
+    def _artifact_rules_from_table(self) -> list[dict[str, str]]:
+        artifacts = []
+        for row in range(self.artifact_table.rowCount()):
+            gene = self._table_text(self.artifact_table, row, 0).upper()
+            hgvsc = self._table_text(self.artifact_table, row, 1)
+            reason = self._table_text(self.artifact_table, row, 2)
+            if hgvsc:
+                artifacts.append({"gene": gene, "hgvsc": hgvsc, "reason": reason})
+        return artifacts
+
+    def _add_artifact_row(self) -> None:
+        row = self.artifact_table.rowCount()
+        self.artifact_table.insertRow(row)
+        for col in range(3):
+            self.artifact_table.setItem(row, col, QTableWidgetItem(""))
+        self.artifact_table.setCurrentCell(row, 0)
+
+    def _remove_selected_artifact(self) -> None:
+        rows = sorted({index.row() for index in self.artifact_table.selectedIndexes()}, reverse=True)
+        for row in rows:
+            self.artifact_table.removeRow(row)
+
+    def _reset_default_artifacts(self) -> None:
+        self._load_artifact_table(default_artifact_rules())
 
     def _validate_input(self) -> None:
         path = Path(self.input_edit.text())
@@ -470,6 +522,7 @@ class MainWindow(QMainWindow):
         self.settings.franklin_api_key = self.franklin_key_edit.text()
         self.settings.database_workers = self.worker_count.value()
         self.settings.gnomad_dataset = self.gnomad_dataset_combo.currentText()
+        self.settings.artifact_rules = self._artifact_rules_from_table()
         self.settings.enabled_databases = [name for name, check in self.db_checks.items() if check.isChecked()]
         self.settings.save()
         if not silent:
@@ -547,6 +600,10 @@ class MainWindow(QMainWindow):
     def _log(self, message: str) -> None:
         self.log.appendPlainText(message)
         self.status_bar.showMessage(message, 5000)
+
+    def _table_text(self, table: QTableWidget, row: int, col: int) -> str:
+        item = table.item(row, col)
+        return item.text().strip() if item else ""
 
     def _apply_style(self) -> None:
         self.setStyleSheet(

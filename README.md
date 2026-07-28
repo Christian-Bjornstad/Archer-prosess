@@ -6,6 +6,7 @@ The app is being rebuilt as a clean PyQt6 project with a stable processing core:
 
 - validate and read Archer variant TSV exports
 - apply local production filtering rules
+- edit the saved artifact list from Settings
 - compare variants with the yearly VPM history workbook
 - prepare review-ready Excel workbooks
 - support database evidence workflows from ClinVar, COSMIC, gnomAD, OncoKB, MTBP, HSMD, Franklin and related manual sources

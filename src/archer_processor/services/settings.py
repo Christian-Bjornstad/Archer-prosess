@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from archer_processor.core import default_artifact_rules
+
 
 @dataclass(slots=True)
 class AppSettings:
@@ -15,6 +17,7 @@ class AppSettings:
     franklin_api_key: str = ""
     database_workers: int = 3
     gnomad_dataset: str = "gnomad_r2_1"
+    artifact_rules: list[dict[str, str]] = field(default_factory=default_artifact_rules)
     enabled_databases: list[str] = field(default_factory=lambda: ["ClinVar"])
 
     @classmethod
