@@ -36,7 +36,12 @@ from archer_processor.core.highlights import variant_highlight
 from archer_processor.io import ArcherTsvReader
 from archer_processor.knowledge import VariantHistoryRepository
 from archer_processor.reports import ExcelReportWriter
-from archer_processor.services import AppSettings, DatabaseSearchService
+from archer_processor.services import (
+    AppSettings,
+    BROWSER_DATABASES,
+    BrowserReviewService,
+    DatabaseSearchService,
+)
 
 
 class Palette:
@@ -121,6 +126,51 @@ class DatabaseWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class BrowserLoginWorker(QObject):
+    finished = pyqtSignal(str)
+    failed = pyqtSignal(str)
+    status = pyqtSignal(str)
+
+    def __init__(self, database: str):
+        super().__init__()
+        self.database = database
+
+    def run(self) -> None:
+        try:
+            self.status.emit(
+                f"{self.database}: sign in in the Edge window, then close Edge to save the session"
+            )
+            self.finished.emit(BrowserReviewService().open_login(self.database))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class BrowserReviewWorker(QObject):
+    finished = pyqtSignal(object)
+    failed = pyqtSignal(str)
+    status = pyqtSignal(str)
+
+    def __init__(self, variants, databases: list[str], artifact_root: Path, mtbp_cancer_type: str):
+        super().__init__()
+        self.variants = variants
+        self.databases = databases
+        self.artifact_root = artifact_root
+        self.mtbp_cancer_type = mtbp_cancer_type
+
+    def run(self) -> None:
+        try:
+            service = BrowserReviewService(mtbp_cancer_type=self.mtbp_cancer_type)
+            evidence = service.search_variants(
+                self.variants,
+                self.databases,
+                self.artifact_root,
+                progress=self.status.emit,
+            )
+            self.finished.emit(evidence)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class MetricCard(QFrame):
     def __init__(self, label: str, value: str = "0", accent: str = Palette.blue):
         super().__init__()
@@ -162,8 +212,10 @@ class MainWindow(QMainWindow):
         self.evidence = {}
         self.processing_thread: QThread | None = None
         self.database_thread: QThread | None = None
+        self.browser_thread: QThread | None = None
         self.processing_worker: ProcessingWorker | None = None
         self.database_worker: DatabaseWorker | None = None
+        self.browser_worker: BrowserLoginWorker | BrowserReviewWorker | None = None
         self.setWindowTitle("Archer Prosess")
         self.resize(1280, 820)
         self._build_ui()
@@ -308,6 +360,32 @@ class MainWindow(QMainWindow):
         actions.addStretch()
         layout.addLayout(actions)
 
+        browser_actions = QHBoxLayout()
+        browser_actions.addWidget(QLabel("Login-based sources"))
+        self.browser_database_combo = QComboBox()
+        self.browser_database_combo.addItems(list(BROWSER_DATABASES))
+        self.browser_signin_btn = QPushButton("Sign In / Refresh Session")
+        self.browser_signin_btn.setToolTip(
+            "Opens an isolated visible Edge profile. Enter credentials on the provider page; passwords are not saved by Archer Prosess."
+        )
+        self.browser_signin_btn.clicked.connect(self._start_browser_login)
+        self.browser_review_btn = QPushButton("Run Browser Lookups")
+        self.browser_review_btn.setEnabled(False)
+        self.browser_review_btn.setToolTip(
+            "Runs selected OncoKB/Franklin lookups and one pseudonymous MTBP batch serially in visible Edge."
+        )
+        self.browser_review_btn.clicked.connect(self._start_browser_review)
+        self.browser_security_label = QLabel(
+            "Sessions stay under your Windows profile; no patient/sample ID is submitted."
+        )
+        self.browser_security_label.setStyleSheet(f"color: {Palette.muted};")
+        browser_actions.addWidget(self.browser_database_combo)
+        browser_actions.addWidget(self.browser_signin_btn)
+        browser_actions.addWidget(self.browser_review_btn)
+        browser_actions.addWidget(self.browser_security_label)
+        browser_actions.addStretch()
+        layout.addLayout(browser_actions)
+
         self.evidence_table = QTableWidget(0, 3 + len(self.databases))
         self.evidence_table.setHorizontalHeaderLabels(["Sample", "Gene", "HGVSc", *self.databases])
         self.evidence_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -340,6 +418,8 @@ class MainWindow(QMainWindow):
         self.gnomad_dataset_combo = QComboBox()
         self.gnomad_dataset_combo.addItems(["gnomad_r2_1", "gnomad_r3", "gnomad_r4"])
         self.gnomad_dataset_combo.setCurrentText(self.settings.gnomad_dataset)
+        self.mtbp_cancer_type_edit = QLineEdit(self.settings.mtbp_cancer_type)
+        self.mtbp_cancer_type_edit.setPlaceholderText("Exact MTBP cancer type, for example Blood")
         self.artifact_table = QTableWidget(0, 3)
         self.artifact_table.setHorizontalHeaderLabels(["Gene", "HGVSc", "Reason"])
         self.artifact_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -376,10 +456,12 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.franklin_password_edit, 6, 1)
         grid.addWidget(QLabel("gnomAD dataset"), 7, 0)
         grid.addWidget(self.gnomad_dataset_combo, 7, 1)
-        grid.addWidget(QLabel("Artifact list"), 8, 0)
-        grid.addWidget(self.artifact_table, 8, 1, 1, 2)
-        grid.addLayout(artifact_actions, 9, 1, 1, 2)
-        grid.addWidget(save_btn, 10, 2)
+        grid.addWidget(QLabel("MTBP cancer type"), 8, 0)
+        grid.addWidget(self.mtbp_cancer_type_edit, 8, 1)
+        grid.addWidget(QLabel("Artifact list"), 9, 0)
+        grid.addWidget(self.artifact_table, 9, 1, 1, 2)
+        grid.addLayout(artifact_actions, 10, 1, 1, 2)
+        grid.addWidget(save_btn, 11, 2)
         layout.addWidget(group)
         layout.addStretch()
         return page
@@ -492,6 +574,7 @@ class MainWindow(QMainWindow):
         self._refresh_metrics()
         self._refresh_variant_table()
         self.search_btn.setEnabled(True)
+        self.browser_review_btn.setEnabled(True)
         self.rewrite_btn.setEnabled(True)
         self._set_ready()
         QMessageBox.information(self, "Complete", f"Workbook saved:\n{result.output_path}")
@@ -526,6 +609,83 @@ class MainWindow(QMainWindow):
         self._set_ready()
         self._log("Database evidence search complete")
 
+    def _start_browser_login(self) -> None:
+        database = self.browser_database_combo.currentText()
+        self._set_busy(f"{database} sign-in")
+        worker = BrowserLoginWorker(database)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.status.connect(self._log)
+        worker.finished.connect(self._browser_login_finished)
+        worker.failed.connect(self._worker_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self.browser_thread = thread
+        self.browser_worker = worker
+        thread.start()
+
+    def _browser_login_finished(self, message: str) -> None:
+        self._log(message)
+        self._set_ready()
+
+    def _start_browser_review(self) -> None:
+        if not self.result:
+            return
+        self._save_settings(silent=True)
+        databases = [
+            database
+            for database in BROWSER_DATABASES
+            if self.db_checks[database].isChecked()
+        ]
+        if not databases:
+            QMessageBox.warning(
+                self,
+                "No browser sources",
+                "Select at least one of OncoKB, Franklin, or MTBP.",
+            )
+            return
+        output_parent = (
+            self.result.output_path.parent
+            if self.result.output_path
+            else Path(self.settings.default_output_dir)
+        )
+        output_stem = self.result.output_path.stem if self.result.output_path else "archer"
+        artifact_root = output_parent / f"{output_stem}_browser_evidence"
+        self._set_busy("Browser lookups")
+        worker = BrowserReviewWorker(
+            self.result.included,
+            databases,
+            artifact_root,
+            self.settings.mtbp_cancer_type,
+        )
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.status.connect(self._log)
+        worker.finished.connect(self._browser_review_finished)
+        worker.failed.connect(self._worker_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self.browser_thread = thread
+        self.browser_worker = worker
+        thread.start()
+
+    def _browser_review_finished(self, browser_evidence: dict) -> None:
+        for key, new_items in browser_evidence.items():
+            by_database = {
+                item.database: item for item in self.evidence.get(key, [])
+            }
+            by_database.update({item.database: item for item in new_items})
+            self.evidence[key] = list(by_database.values())
+        self._refresh_evidence_table()
+        self._set_ready()
+        self._log("Browser evidence lookup complete")
+
     def _rewrite_workbook(self) -> None:
         if not self.result or not self.result.output_path:
             return
@@ -547,6 +707,7 @@ class MainWindow(QMainWindow):
         self.settings.franklin_password = self.franklin_password_edit.text()
         self.settings.database_workers = self.worker_count.value()
         self.settings.gnomad_dataset = self.gnomad_dataset_combo.currentText()
+        self.settings.mtbp_cancer_type = self.mtbp_cancer_type_edit.text().strip() or "Blood"
         self.settings.artifact_rules = self._artifact_rules_from_table()
         self.settings.enabled_databases = [name for name, check in self.db_checks.items() if check.isChecked()]
         self.settings.save()
@@ -617,12 +778,16 @@ class MainWindow(QMainWindow):
         self.status_badge.setText(label)
         self.process_btn.setEnabled(False)
         self.search_btn.setEnabled(False)
+        self.browser_signin_btn.setEnabled(False)
+        self.browser_review_btn.setEnabled(False)
         self.status_bar.showMessage(label)
 
     def _set_ready(self) -> None:
         self.status_badge.setText("Ready")
         self._update_process_state()
         self.search_btn.setEnabled(self.result is not None)
+        self.browser_signin_btn.setEnabled(True)
+        self.browser_review_btn.setEnabled(self.result is not None)
         self.status_bar.showMessage("Ready", 3000)
 
     def _update_process_state(self) -> None:

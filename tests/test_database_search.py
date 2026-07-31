@@ -68,8 +68,8 @@ def test_database_diagnostics_reports_ready_token_and_manual_sources():
     assert diagnostics["ClinGen Allele Registry"] == "context only (allele ID/dbSNP cross-links)"
     assert diagnostics["cBioPortal"] == "ready (public cohort context)"
     assert diagnostics["OncoKB"] == "token required"
-    assert diagnostics["Franklin"] == "token required"
-    assert diagnostics["MTBP"] == "manual"
+    assert diagnostics["Franklin"] == "public web review (Premium API required for automation)"
+    assert diagnostics["MTBP"] == "web batch (login, research-only)"
     assert diagnostics["HSMD"] == "manual"
 
 
@@ -193,14 +193,15 @@ def test_gnomad_rate_limited(monkeypatch):
     assert evidence.status == "rate_limited"
 
 
-def test_franklin_without_token_prepares_search_query():
+def test_franklin_without_token_prepares_public_review():
     variant = ArcherTsvReader().read(FIXTURE)[0]
     service = DatabaseSearchService()
 
     evidence = service._search_franklin(variant)
 
-    assert evidence.status == "token_required"
-    assert "Query prepared: chr13-28608215-C-CT" in evidence.summary
+    assert evidence.status == "web_review_required"
+    assert "query prepared: chr13-28608215-C-CT" in evidence.summary
+    assert evidence.url == "https://franklin.genoox.com/clinical-db/variant/snp/chr13-28608215-C-CT"
 
 
 def test_franklin_login_fetches_token_and_searches(monkeypatch):
@@ -695,6 +696,24 @@ def test_oncokb_found_includes_info_and_levels(monkeypatch):
     assert evidence.status == "found"
     assert evidence.clinical_significance == "Oncogenic"
     assert "data_version=v4.2" in evidence.summary
+
+
+def test_oncokb_nested_info_version_is_normalized():
+    service = DatabaseSearchService()
+
+    assert service._oncokb_info_value(
+        {"dataVersion": {"version": "v7.4", "date": "07/31/2026"}}
+    ) == "v7.4"
+
+
+def test_priority_manual_urls_use_current_portals():
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = DatabaseSearchService()
+
+    assert service._manual_url("MTBP", variant) == "https://mtbp.org/analyse/"
+    assert service._manual_url("Franklin", variant).startswith(
+        "https://franklin.genoox.com/clinical-db/variant/snp/"
+    )
 
 
 def test_oncokb_unauthorized_is_reported(monkeypatch):

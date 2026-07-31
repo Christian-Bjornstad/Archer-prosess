@@ -12,6 +12,7 @@ dependencies = [
     "PyQt6>=6.7",
     "pandas>=2.2",
     "openpyxl>=3.1",
+    "playwright>=1.55",
     "requests>=2.32",
 ]
 

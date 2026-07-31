@@ -19,6 +19,7 @@ class AppSettings:
     franklin_password: str = field(default="", repr=False, metadata={"persist": False})
     database_workers: int = 3
     gnomad_dataset: str = "gnomad_r2_1"
+    mtbp_cancer_type: str = "Blood"
     artifact_rules: list[dict[str, str]] = field(default_factory=default_artifact_rules)
     enabled_databases: list[str] = field(default_factory=lambda: ["ClinVar"])
 

@@ -19,7 +19,7 @@ from archer_processor.services.settings import AppSettings
 
 
 MANUAL_DATABASES = {
-    "MTBP": "Manual/licensed review. Record: classification, functional relevance/evidence category, population AF, ClinVar class, references, notes.",
+    "MTBP": "Login-based research portal. Submit a pseudonymized variant list or VCF and record: classification, functional relevance/evidence category, population AF, ClinVar class, references, pipeline version, and notes. The public portal is research-only.",
     "HSMD": "Manual/licensed review. Record: classification, actionability tier, clinical review status, population frequency, references, notes.",
 }
 
@@ -72,7 +72,9 @@ class DatabaseSearchService:
     def database_diagnostics(self, databases: Iterable[str]) -> dict[str, str]:
         diagnostics = {}
         for database in databases:
-            if database in MANUAL_DATABASES:
+            if database == "MTBP":
+                diagnostics[database] = "web batch (login, research-only)"
+            elif database in MANUAL_DATABASES:
                 diagnostics[database] = "manual"
             elif database == "OncoKB" and not self.settings.oncokb_api_key:
                 diagnostics[database] = "token required"
@@ -81,7 +83,7 @@ class DatabaseSearchService:
             elif database == "Franklin" and self._has_franklin_login_credentials():
                 diagnostics[database] = "ready (login on search)"
             elif database == "Franklin":
-                diagnostics[database] = "token required"
+                diagnostics[database] = "public web review (Premium API required for automation)"
             elif database == "gnomAD":
                 diagnostics[database] = f"ready ({self.settings.gnomad_dataset}, rate limited)"
             elif database == "COSMIC":
@@ -932,10 +934,14 @@ class DatabaseSearchService:
             if not token:
                 return DatabaseEvidence(
                     database="Franklin",
-                    status="token_required",
-                    summary=f"Franklin API requires a token or runtime email/password login. Query prepared: {query}.",
+                    status="web_review_required",
+                    summary=(
+                        "Franklin's public variant page is available for review. "
+                        "Supported API automation requires Franklin Premium access; "
+                        f"query prepared: {query}."
+                    ),
                     accession=query,
-                    url=self._manual_url("Franklin", variant),
+                    url=self._franklin_public_url(query),
                 )
             response = requests.get(
                 "https://api.genoox.com/v2/search/snp/",
@@ -1179,8 +1185,11 @@ class DatabaseSearchService:
 
     def _oncokb_info_value(self, info: dict) -> str:
         for key in ["dataVersion", "data_version", "version", "apiVersion"]:
-            if info.get(key):
-                return str(info[key])
+            value = info.get(key)
+            if isinstance(value, dict) and value.get("version"):
+                return str(value["version"])
+            if value:
+                return str(value)
         return ""
 
     def _wait_for_gnomad_slot(self) -> None:
@@ -1374,12 +1383,19 @@ class DatabaseSearchService:
             value = record.get(key)
             if value:
                 return str(value)
-        return self._manual_url("Franklin", variant)
+        return self._franklin_public_url(self._franklin_search_text(variant))
+
+    def _franklin_public_url(self, query: str) -> str:
+        """Return Franklin's stable public SNP result route for a normalized query."""
+        return (
+            "https://franklin.genoox.com/clinical-db/variant/snp/"
+            + urllib.parse.quote(query, safe="")
+        )
 
     def _manual_url(self, database: str, variant: VariantRecord) -> str:
         query = urllib.parse.quote(self._review_query(variant))
         urls = {
-            "MTBP": "https://mtbp.herokuapp.com/",
+            "MTBP": "https://mtbp.org/analyse/",
             "HSMD": "https://variants.ingenuity.com/",
             "COSMIC": f"https://cancer.sanger.ac.uk/cosmic/search?q={query}",
             "CIViC": f"https://civicdb.org/search?query={query}",
@@ -1388,7 +1404,7 @@ class DatabaseSearchService:
             "ClinGen Allele Registry": f"https://reg.clinicalgenome.org/redmine/projects/registry/genboree_registry/landing?search={query}",
             "cBioPortal": f"https://www.cbioportal.org/results/mutations?Action=Submit&cancer_study_list=msk_impact_2017&case_set_id=msk_impact_2017_all&gene_list={urllib.parse.quote(variant.symbol)}",
             "OncoKB": f"https://www.oncokb.org/gene/{urllib.parse.quote(variant.symbol)}",
-            "Franklin": f"https://franklin.genoox.com/clinical-db/home?search={query}",
+            "Franklin": self._franklin_public_url(self._franklin_search_text(variant)),
             "gnomAD": f"https://gnomad.broadinstitute.org/variant/{urllib.parse.quote(self._gnomad_variant_id(variant))}?dataset={self.settings.gnomad_dataset}",
         }
         return urls.get(database, "")
