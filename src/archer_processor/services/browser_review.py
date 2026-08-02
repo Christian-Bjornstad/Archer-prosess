@@ -21,6 +21,8 @@ LOGIN_URLS = {
     "MTBP": "https://mtbp.org/analyse/",
 }
 
+FRANKLIN_HOME_URL = "https://franklin.genoox.com/clinical-db/home"
+
 _AMINO_ACID_3_TO_1 = {
     "Ala": "A", "Arg": "R", "Asn": "N", "Asp": "D", "Cys": "C",
     "Gln": "Q", "Glu": "E", "Gly": "G", "His": "H", "Ile": "I",
@@ -49,14 +51,30 @@ class BrowserReviewService:
         *,
         channel: str = "msedge",
         navigation_timeout_ms: int = 45_000,
-        analysis_timeout_ms: int = 300_000,
+        analysis_timeout_ms: int = 1_200_000,
         mtbp_cancer_type: str = "Blood",
+        oncokb_email: str = "",
+        oncokb_password: str = "",
+        franklin_email: str = "",
+        franklin_password: str = "",
+        mtbp_email: str = "",
+        mtbp_password: str = "",
+        franklin_attempts: int = 3,
+        request_delay_ms: int = 15_000,
     ) -> None:
         self.profile_root = profile_root or Path.home() / ".archer-prosess" / "browser_profiles"
         self.channel = channel
         self.navigation_timeout_ms = navigation_timeout_ms
         self.analysis_timeout_ms = analysis_timeout_ms
         self.mtbp_cancer_type = mtbp_cancer_type.strip() or "Blood"
+        self.oncokb_email = oncokb_email.strip()
+        self.oncokb_password = oncokb_password
+        self.franklin_email = franklin_email.strip()
+        self.franklin_password = franklin_password
+        self.mtbp_email = mtbp_email.strip()
+        self.mtbp_password = mtbp_password
+        self.franklin_attempts = max(1, franklin_attempts)
+        self.request_delay_ms = max(0, request_delay_ms)
 
     @staticmethod
     def dependency_available() -> bool:
@@ -87,17 +105,11 @@ class BrowserReviewService:
                 f"{quote(variant.symbol, safe='')}/somatic/{quote(alteration, safe='')}"
             )
         if database == "Franklin":
-            query = _franklin_query(variant)
-            return (
-                "https://franklin.genoox.com/clinical-db/variant/snp/"
-                + quote(query, safe="")
-                if query
-                else ""
-            )
+            return FRANKLIN_HOME_URL if _franklin_search_query(variant) else ""
         return LOGIN_URLS[database]
 
     def open_login(self, database: str, *, maximum_minutes: int = 30) -> str:
-        """Open a visible login window and retain its session after it closes."""
+        """Open login and release the profile as soon as authentication succeeds."""
         sync_playwright, playwright_error, _ = self._playwright_api()
         profile = self.profile_directory(database)
         with sync_playwright() as runtime:
@@ -120,10 +132,16 @@ class BrowserReviewService:
                 timeout=self.navigation_timeout_ms,
             )
             page.bring_to_front()
+            if self._try_saved_login(database, page):
+                context.close()
+                return f"{database} signed in using Windows Credential Manager."
             deadline = datetime.now(timezone.utc).timestamp() + maximum_minutes * 60
             try:
                 while context.pages and datetime.now(timezone.utc).timestamp() < deadline:
-                    context.pages[0].wait_for_timeout(500)
+                    active_page = context.pages[0]
+                    if self._session_authenticated(database, active_page):
+                        return f"{database} sign-in confirmed; browser profile released."
+                    active_page.wait_for_timeout(500)
             except playwright_error:
                 pass
             finally:
@@ -131,7 +149,7 @@ class BrowserReviewService:
                     context.close()
                 except playwright_error:
                     pass
-        return f"{database} browser session updated."
+        return f"{database} sign-in window closed; session will be checked during lookup."
 
     def search_variants(
         self,
@@ -142,7 +160,8 @@ class BrowserReviewService:
         progress: Callable[[str], None] | None = None,
     ) -> dict[str, list[DatabaseEvidence]]:
         variant_list = list(variants)
-        database_list = [database for database in databases if database in BROWSER_DATABASES]
+        requested = set(databases)
+        database_list = [database for database in BROWSER_DATABASES if database in requested]
         results: dict[str, list[DatabaseEvidence]] = {
             self.variant_key(variant): [] for variant in variant_list
         }
@@ -175,6 +194,12 @@ class BrowserReviewService:
                 artifact_directory,
                 progress=progress,
             )
+        if database == "Franklin":
+            return self._search_franklin(
+                variants,
+                artifact_directory,
+                progress=progress,
+            )
 
         sync_playwright, playwright_error, playwright_timeout = self._playwright_api()
         artifact_directory.mkdir(parents=True, exist_ok=True)
@@ -194,6 +219,23 @@ class BrowserReviewService:
                 ) from exc
             page = context.pages[0] if context.pages else context.new_page()
             try:
+                if database == "OncoKB" and self.oncokb_email and self.oncokb_password:
+                    page.goto(
+                        self.login_url("OncoKB"),
+                        wait_until="domcontentloaded",
+                        timeout=self.navigation_timeout_ms,
+                    )
+                    if not self._try_saved_login("OncoKB", page):
+                        return {
+                            self.variant_key(variant): DatabaseEvidence(
+                                "OncoKB",
+                                "login_required",
+                                "OncoKB sign-in failed. Check the saved email/password.",
+                                accession=_review_query(variant),
+                                url=page.url,
+                            )
+                            for variant in variants
+                        }
                 for index, variant in enumerate(variants, start=1):
                     key = self.variant_key(variant)
                     query_url = self.query_url(database, variant)
@@ -213,10 +255,13 @@ class BrowserReviewService:
                             wait_until="domcontentloaded",
                             timeout=self.navigation_timeout_ms,
                         )
-                        try:
-                            page.wait_for_load_state("networkidle", timeout=12_000)
-                        except playwright_timeout:
-                            page.wait_for_timeout(1_500)
+                        if database == "OncoKB":
+                            self._wait_for_oncokb_result(page)
+                        else:
+                            try:
+                                page.wait_for_load_state("networkidle", timeout=12_000)
+                            except playwright_timeout:
+                                page.wait_for_timeout(1_500)
                         results[key] = self._capture_result(
                             database, variant, page, artifact_directory
                         )
@@ -228,12 +273,180 @@ class BrowserReviewService:
                             accession=_review_query(variant),
                             url=query_url,
                         )
+                    if index < len(variants) and self.request_delay_ms:
+                        page.wait_for_timeout(self.request_delay_ms)
             finally:
                 try:
                     context.close()
                 except playwright_error:
                     pass
         return results
+
+    def _search_franklin(
+        self,
+        variants: list[VariantRecord],
+        artifact_directory: Path,
+        *,
+        progress: Callable[[str], None] | None,
+    ) -> dict[str, DatabaseEvidence]:
+        """Resolve HGVS through Franklin search, then extract only classification."""
+        sync_playwright, playwright_error, playwright_timeout = self._playwright_api()
+        artifact_directory.mkdir(parents=True, exist_ok=True)
+        results: dict[str, DatabaseEvidence] = {}
+        context = None
+        try:
+            with sync_playwright() as runtime:
+                try:
+                    context = runtime.chromium.launch_persistent_context(
+                        str(self.profile_directory("Franklin")),
+                        channel=self.channel,
+                        headless=False,
+                        accept_downloads=True,
+                        viewport={"width": 1440, "height": 1000},
+                    )
+                except Exception as exc:
+                    raise BrowserAutomationUnavailable(
+                        "Could not start Franklin because its Edge profile is in use. "
+                        "Close any Franklin Edge window and retry."
+                    ) from exc
+                page = context.pages[0] if context.pages else context.new_page()
+                if self.franklin_email and self.franklin_password:
+                    page.goto(
+                        self.login_url("Franklin"),
+                        wait_until="domcontentloaded",
+                        timeout=self.navigation_timeout_ms,
+                    )
+                    if not self._try_saved_login("Franklin", page):
+                        return {
+                            self.variant_key(variant): DatabaseEvidence(
+                                "Franklin",
+                                "login_required",
+                                "Franklin sign-in failed. Check the saved email/password.",
+                                accession=_franklin_search_query(variant),
+                                url=page.url,
+                            )
+                            for variant in variants
+                        }
+
+                for index, variant in enumerate(variants, start=1):
+                    key = self.variant_key(variant)
+                    query = _franklin_search_query(variant)
+                    if not query:
+                        results[key] = DatabaseEvidence(
+                            "Franklin",
+                            "invalid_query",
+                            "Cannot build a Franklin HGVS or genomic query.",
+                            url=FRANKLIN_HOME_URL,
+                        )
+                        continue
+                    if progress:
+                        progress(
+                            f"Franklin browser lookup {index}/{len(variants)}: {query}"
+                        )
+                    last_text = ""
+                    last_error = ""
+                    for attempt in range(1, self.franklin_attempts + 1):
+                        try:
+                            page.goto(
+                                FRANKLIN_HOME_URL,
+                                wait_until="domcontentloaded",
+                                timeout=self.navigation_timeout_ms,
+                            )
+                            search = page.locator(
+                                "input[placeholder='Enter variant, gene or select an example above']"
+                            )
+                            search.wait_for(state="visible", timeout=self.navigation_timeout_ms)
+                            search.fill(query)
+                            search.press("Enter")
+                            self._open_franklin_resolved_variant(page, variant)
+                            for _ in range(60):
+                                last_text = page.locator("body").inner_text()
+                                if (
+                                    "Suggested classification" in last_text
+                                    or "Something went wrong" in last_text
+                                    or _franklin_quota_message(last_text)
+                                ):
+                                    break
+                                page.wait_for_timeout(1_000)
+                            if "Suggested classification" in last_text:
+                                results[key] = self._capture_result(
+                                    "Franklin", variant, page, artifact_directory
+                                )
+                                break
+                            quota = _franklin_quota_message(last_text)
+                            if quota:
+                                results[key] = DatabaseEvidence(
+                                    "Franklin",
+                                    "quota_exhausted",
+                                    quota,
+                                    accession=query,
+                                    url=page.url,
+                                )
+                                break
+                            last_error = "Franklin returned 'Something went wrong'."
+                        except playwright_timeout:
+                            last_error = "Franklin timed out while resolving the variant."
+                        except Exception as exc:
+                            last_error = str(exc)
+                        if attempt < self.franklin_attempts:
+                            if progress:
+                                progress(
+                                    f"Franklin: retrying {query} ({attempt + 1}/{self.franklin_attempts})"
+                                )
+                            page.wait_for_timeout(2_000 * attempt)
+                    if key not in results:
+                        results[key] = DatabaseEvidence(
+                            "Franklin",
+                            "error",
+                            last_error or "Franklin did not return a classification.",
+                            accession=query,
+                            url=page.url,
+                            raw={"visible_text_preview": last_text[:12_000]},
+                        )
+                    if index < len(variants) and self.request_delay_ms:
+                        page.wait_for_timeout(self.request_delay_ms)
+        finally:
+            if context is not None:
+                try:
+                    context.close()
+                except playwright_error:
+                    pass
+        return results
+
+    def _open_franklin_resolved_variant(self, page: Any, variant: VariantRecord) -> None:
+        for _ in range(40):
+            if "/clinical-db/variant/snp/" in page.url:
+                return
+            options = page.locator(".option")
+            if options.count():
+                option_texts = options.all_inner_texts()
+                transcript = (variant.transcript or variant.hgvsc.split(":", 1)[0]).split(".", 1)[0]
+                matches = [
+                    index for index, text in enumerate(option_texts)
+                    if transcript and transcript in text
+                ]
+                if len(matches) == 1:
+                    options.nth(matches[0]).click()
+                    break
+                if len(option_texts) == 1:
+                    options.first.click()
+                    break
+                canonical = [
+                    index for index, text in enumerate(option_texts)
+                    if "Includes Canonical transcript" in text
+                ]
+                if len(canonical) == 1:
+                    options.nth(canonical[0]).click()
+                    break
+                raise ValueError(
+                    f"Franklin returned {len(option_texts)} ambiguous variants for "
+                    f"{_franklin_search_query(variant)}."
+                )
+            page.wait_for_timeout(500)
+        page.wait_for_url(
+            re.compile(r"https://franklin\.genoox\.com/clinical-db/variant/snp/.+"),
+            timeout=self.navigation_timeout_ms,
+        )
 
     def _search_mtbp(
         self,
@@ -282,7 +495,8 @@ class BrowserReviewService:
                     )
                 except Exception as exc:
                     raise BrowserAutomationUnavailable(
-                        "Could not start Microsoft Edge for MTBP browser review."
+                        "Could not start MTBP because its Edge profile is in use. "
+                        "Close any MTBP Edge window and retry."
                     ) from exc
                 page = context.pages[0] if context.pages else context.new_page()
                 if progress:
@@ -292,14 +506,17 @@ class BrowserReviewService:
                     wait_until="domcontentloaded",
                     timeout=self.navigation_timeout_ms,
                 )
-                if self._login_required("MTBP", page.url) or page.locator("#variant-input").count() != 1:
+                if not self._session_authenticated("MTBP", page):
+                    self._try_saved_login("MTBP", page)
+                if not self._session_authenticated("MTBP", page):
                     return {
                         **results,
                         **{
                             self.variant_key(variant): DatabaseEvidence(
                                 "MTBP",
                                 "login_required",
-                                "Sign in to MTBP using the Browser Sign-in button, then retry.",
+                                "MTBP sign-in is required. Save the MTBP email/password "
+                                "in Settings or use the Browser Sign-in button.",
                                 accession=query,
                                 url=page.url,
                             )
@@ -307,31 +524,101 @@ class BrowserReviewService:
                         },
                     }
 
-                page.locator("#analysis-id").fill(analysis_id)
-                cancer_item = page.get_by_role(
-                    "treeitem", name=self.mtbp_cancer_type, exact=True
-                )
-                if cancer_item.count() != 1:
-                    search = page.locator("#cancer-search")
-                    search.fill(self.mtbp_cancer_type)
-                    page.wait_for_timeout(350)
-                    cancer_item = page.get_by_role(
-                        "treeitem", name=self.mtbp_cancer_type, exact=True
+                active_pairs = list(query_pairs)
+                query_attempts = {
+                    self.variant_key(variant): [query]
+                    for variant, query in query_pairs
+                }
+                validation_round = 0
+                while active_pairs:
+                    validation_round += 1
+                    submitted_queries = list(
+                        dict.fromkeys(query for _, query in active_pairs)
                     )
-                if cancer_item.count() != 1:
-                    raise ValueError(
-                        f"MTBP cancer type was not found: {self.mtbp_cancer_type!r}"
+                    run_analysis_id = (
+                        analysis_id
+                        if validation_round == 1
+                        else f"{analysis_id}-R{validation_round}"
                     )
-                cancer_item.click()
-                page.locator("#variant-input").fill("\n".join(submitted_queries))
-                page.locator("#run-analysis").click()
-                page.wait_for_url(
-                    re.compile(r"https://mtbp\.org/(?:queue/\d+/?|patients/.+/report/\d+/?)"),
-                    timeout=self.navigation_timeout_ms,
-                )
+                    self._fill_mtbp_form(
+                        page,
+                        run_analysis_id,
+                        submitted_queries,
+                    )
+                    page.locator("#run-analysis").click()
+                    validation_text = self._wait_for_mtbp_acceptance(page)
+                    if not validation_text:
+                        analysis_id = run_analysis_id
+                        break
+                    unmapped = _mtbp_unmapped_queries(validation_text)
+                    rejected_pairs = [
+                        pair for pair in active_pairs
+                        if _mtbp_query_rejected(pair[1], unmapped)
+                    ]
+                    if not rejected_pairs:
+                        raise ValueError(
+                            "MTBP rejected the batch, but the unmappable entries "
+                            "could not be matched safely to submitted variants."
+                        )
+                    replacement_by_key: dict[str, tuple[VariantRecord, str]] = {}
+                    finally_rejected: list[tuple[VariantRecord, str]] = []
+                    for variant, query in rejected_pairs:
+                        key = self.variant_key(variant)
+                        fallback = _mtbp_genomic_query(variant)
+                        if fallback and fallback not in query_attempts[key]:
+                            query_attempts[key].append(fallback)
+                            replacement_by_key[key] = (variant, fallback)
+                        else:
+                            finally_rejected.append((variant, query))
+                    for variant, query in finally_rejected:
+                        results[self.variant_key(variant)] = DatabaseEvidence(
+                            "MTBP",
+                            "invalid_query",
+                            "MTBP could not map this variant after transcript and "
+                            "GRCh37 genomic attempts; it was removed so the remaining "
+                            "batch could continue.",
+                            accession=query,
+                            url=page.url,
+                            raw={
+                                "submitted_query": query,
+                                "query_attempts": query_attempts[self.variant_key(variant)],
+                                "validation_error": validation_text[:4_000],
+                            },
+                        )
+                    rejected_keys = {
+                        self.variant_key(variant) for variant, _ in finally_rejected
+                    }
+                    active_pairs = [
+                        replacement_by_key.get(self.variant_key(pair[0]), pair)
+                        for pair in active_pairs
+                        if self.variant_key(pair[0]) not in rejected_keys
+                    ]
+                    if progress:
+                        if replacement_by_key:
+                            progress(
+                                "MTBP: transcript mapping failed for "
+                                f"{len(replacement_by_key)} variant(s); retrying with "
+                                "GRCh37 genomic HGVS"
+                            )
+                        if finally_rejected:
+                            progress(
+                                f"MTBP: removed {len(finally_rejected)} unmappable variant(s); "
+                                f"continuing with {len(active_pairs)}"
+                            )
+                    if active_pairs:
+                        page.goto(
+                            self.login_url("MTBP"),
+                            wait_until="domcontentloaded",
+                            timeout=self.navigation_timeout_ms,
+                        )
+                if not active_pairs:
+                    return results
                 if "/queue/" in page.url:
                     if progress:
-                        progress("MTBP: analysis queued; waiting for the report")
+                        progress(
+                            "MTBP: analysis queued; waiting up to "
+                            f"{self.analysis_timeout_ms // 60_000} minutes for the report"
+                        )
                     page.wait_for_url(
                         re.compile(r"https://mtbp\.org/patients/.+/report/\d+/?"),
                         timeout=self.analysis_timeout_ms,
@@ -349,12 +636,12 @@ class BrowserReviewService:
                 parsed = parse_mtbp_report(
                     body_text,
                     report_rows,
-                    [variant for variant, _ in query_pairs],
+                    [variant for variant, _ in active_pairs],
                     page.url,
                     cancer_type=self.mtbp_cancer_type,
                 )
                 captured_at = datetime.now(timezone.utc).isoformat()
-                for variant, query in query_pairs:
+                for variant, query in active_pairs:
                     key = self.variant_key(variant)
                     evidence = parsed[key]
                     evidence.accession = query
@@ -362,6 +649,7 @@ class BrowserReviewService:
                         {
                             "analysis_id": analysis_id,
                             "submitted_query": query,
+                            "query_attempts": query_attempts[key],
                             "captured_at": captured_at,
                             "screenshot": str(screenshot_path),
                             "visible_text_preview": body_text[:12_000],
@@ -375,19 +663,26 @@ class BrowserReviewService:
                         encoding="utf-8",
                     )
                     results[key] = evidence
-        except playwright_timeout:
+        except (playwright_timeout, TimeoutError):
             current_url = context.pages[0].url if context and context.pages else self.login_url("MTBP")
             for variant, query in query_pairs:
-                results[self.variant_key(variant)] = DatabaseEvidence(
+                key = self.variant_key(variant)
+                if key in results:
+                    continue
+                results[key] = DatabaseEvidence(
                     "MTBP",
                     "timeout",
-                    "MTBP did not produce a report before the five-minute timeout.",
+                    "MTBP did not produce a report before the configured "
+                    f"{self.analysis_timeout_ms // 60_000}-minute timeout.",
                     accession=query,
                     url=current_url,
                 )
         except Exception as exc:
             for variant, query in query_pairs:
-                results[self.variant_key(variant)] = DatabaseEvidence(
+                key = self.variant_key(variant)
+                if key in results:
+                    continue
+                results[key] = DatabaseEvidence(
                     "MTBP",
                     "error",
                     f"MTBP browser lookup failed: {exc}",
@@ -401,6 +696,40 @@ class BrowserReviewService:
                 except playwright_error:
                     pass
         return results
+
+    def _fill_mtbp_form(
+        self,
+        page: Any,
+        analysis_id: str,
+        submitted_queries: list[str],
+    ) -> None:
+        page.locator("#analysis-id").fill(analysis_id)
+        cancer_item = page.get_by_role(
+            "treeitem", name=self.mtbp_cancer_type, exact=True
+        )
+        if cancer_item.count() != 1:
+            search = page.locator("#cancer-search")
+            search.fill(self.mtbp_cancer_type)
+            page.wait_for_timeout(350)
+            cancer_item = page.get_by_role(
+                "treeitem", name=self.mtbp_cancer_type, exact=True
+            )
+        if cancer_item.count() != 1:
+            raise ValueError(
+                f"MTBP cancer type was not found: {self.mtbp_cancer_type!r}"
+            )
+        cancer_item.click()
+        page.locator("#variant-input").fill("\n".join(submitted_queries))
+
+    def _wait_for_mtbp_acceptance(self, page: Any) -> str:
+        for _ in range(max(1, self.navigation_timeout_ms // 500)):
+            if re.search(r"https://mtbp\.org/(?:queue/\d+/?|patients/.+/report/\d+/?)", page.url):
+                return ""
+            body_text = page.locator("body").inner_text()
+            if "cannot be mapped to genomic coordinates" in body_text:
+                return body_text
+            page.wait_for_timeout(500)
+        raise TimeoutError("MTBP did not accept the submitted batch before the navigation timeout.")
 
     @staticmethod
     def _extract_mtbp_rows(page: Any) -> list[dict[str, Any]]:
@@ -490,6 +819,86 @@ class BrowserReviewService:
             return "keycloak" in lowered or "/auth/" in lowered
         return "login" in lowered or "signin" in lowered
 
+    def _session_authenticated(self, database: str, page: Any) -> bool:
+        if database == "Franklin":
+            return not self._login_required(database, page.url) and page.locator("#email").count() == 0
+        if database == "MTBP":
+            return (
+                not self._login_required(database, page.url)
+                and page.locator("#variant-input").count() == 1
+            )
+        return not self._login_required(database, page.url)
+
+    def _try_saved_login(self, database: str, page: Any) -> bool:
+        if self._session_authenticated(database, page):
+            return True
+        if database == "OncoKB":
+            email, password = self.oncokb_email, self.oncokb_password
+            email_selector = "input[placeholder='Your institutional email address']"
+            password_selector = "input[placeholder='Your password']"
+            submit_selector = "button[type='submit']"
+        elif database == "Franklin":
+            email, password = self.franklin_email, self.franklin_password
+            email_selector, password_selector = "#email", "#password"
+            submit_selector = "button[type='submit']"
+        elif database == "MTBP":
+            email, password = self.mtbp_email, self.mtbp_password
+            email_selector, password_selector = "#username", "#password"
+            submit_selector = "#kc-login"
+        else:
+            return False
+        if not email or not password:
+            return False
+        try:
+            if database == "OncoKB":
+                reject_cookies = page.get_by_role(
+                    "button", name="Reject all", exact=True
+                )
+                if reject_cookies.count() == 1 and reject_cookies.is_visible():
+                    reject_cookies.click()
+            page.locator(email_selector).fill(email)
+            page.locator(password_selector).fill(password)
+            if database == "OncoKB":
+                page.get_by_role("button", name="Sign in", exact=True).click()
+            elif database == "Franklin":
+                page.locator(submit_selector).filter(has_text=re.compile(r"^SIGN IN$", re.I)).click()
+            else:
+                page.locator(submit_selector).click()
+            page.wait_for_url(
+                lambda url: not self._login_required(database, url),
+                timeout=60_000,
+            )
+            if database == "MTBP" and "/analyse" not in page.url:
+                page.goto(
+                    self.login_url("MTBP"),
+                    wait_until="domcontentloaded",
+                    timeout=self.navigation_timeout_ms,
+                )
+            page.wait_for_timeout(750)
+            return self._session_authenticated(database, page)
+        except Exception:
+            # SPA navigation can detach the sign-in button after the server has
+            # already accepted the login. Trust the resulting authenticated URL
+            # instead of reporting a false login failure and skipping all queries.
+            try:
+                return self._session_authenticated(database, page)
+            except Exception:
+                return False
+
+    def _wait_for_oncokb_result(self, page: Any) -> None:
+        """Wait for OncoKB's client-rendered variant evidence, not network idle."""
+        attempts = max(1, self.navigation_timeout_ms // 500)
+        for _ in range(attempts):
+            if self._login_required("OncoKB", page.url):
+                return
+            body_text = page.locator("body").inner_text()
+            if "Variant Overview" in body_text and "Mutation Effect" in body_text:
+                return
+            if "Page not found" in body_text or "An error has occurred" in body_text:
+                return
+            page.wait_for_timeout(500)
+        raise TimeoutError("OncoKB did not finish rendering the variant result.")
+
     def _playwright_api(self):
         try:
             from playwright.sync_api import (
@@ -543,27 +952,29 @@ def parse_oncokb_page(
 def parse_franklin_page(
     body_text: str, variant: VariantRecord, url: str
 ) -> DatabaseEvidence:
+    query = _franklin_search_query(variant)
+    if not _franklin_page_matches(body_text, variant):
+        return DatabaseEvidence(
+            "Franklin",
+            "identity_mismatch",
+            f"Franklin returned a different variant than {query}; result was not imported.",
+            accession=query,
+            url=url,
+        )
     classification = _after_heading(body_text, "Suggested classification")
     if not classification:
         return DatabaseEvidence(
-            "Franklin", "not_found", f"No Franklin web result for {_franklin_query(variant)}.",
-            accession=_franklin_query(variant), url=url,
+            "Franklin", "not_found", f"No Franklin web result for {query}.",
+            accession=query, url=url,
         )
-    rule_pattern = re.compile(
-        r"\b(?:PVS1|PS[1-4]|PM[1-6]|PP[1-5]|BA1|BS[1-4]|BP[1-7])\b"
-    )
-    rules = list(dict.fromkeys(rule_pattern.findall(body_text)))
-    parts = [f"classification={classification}"]
-    if rules:
-        parts.append("displayed_ACMG_rules=" + ",".join(rules))
     return DatabaseEvidence(
         database="Franklin",
         status="found",
-        summary="; ".join(parts),
-        accession=_franklin_query(variant),
+        summary=f"classification={classification};",
+        accession=query,
         clinical_significance=classification,
         url=url,
-        raw={"classification": classification, "displayed_acmg_rules": rules},
+        raw={"classification": classification},
     )
 
 
@@ -743,13 +1154,63 @@ def _franklin_query(variant: VariantRecord) -> str:
     return variant.hgvsc or variant.genomic_location
 
 
-def _mtbp_variant_query(variant: VariantRecord) -> str:
-    protein = _protein_change(variant.hgvsp)
-    if variant.symbol and protein:
-        return f"{variant.symbol}:p.{protein}"
+def _franklin_search_query(variant: VariantRecord) -> str:
     cdna = _cdna_change(variant.hgvsc)
     if variant.symbol and cdna:
         return f"{variant.symbol}:{cdna}"
+    if variant.hgvsc:
+        return variant.hgvsc
+    return _franklin_query(variant)
+
+
+def _franklin_page_matches(body_text: str, variant: VariantRecord) -> bool:
+    compact = re.sub(r"\s+", "", body_text or "").casefold()
+    if variant.symbol and variant.symbol.casefold() not in compact:
+        return False
+    cdna = _cdna_change(variant.hgvsc)
+    if cdna:
+        return cdna.casefold() in compact
+    protein = _mtbp_normalized_protein(_protein_change(variant.hgvsp))
+    if protein:
+        return protein in _mtbp_proteins(body_text)
+    return bool(variant.symbol)
+
+
+def _franklin_quota_message(body_text: str) -> str:
+    lowered = (body_text or "").casefold()
+    quota_markers = (
+        "free search limit",
+        "free searches limit",
+        "search limit reached",
+        "reached your search limit",
+        "upgrade to continue",
+    )
+    if any(marker in lowered for marker in quota_markers):
+        return (
+            "Franklin's anonymous search allowance is exhausted. "
+            "Save Franklin login credentials in Settings and retry."
+        )
+    return ""
+
+
+def _mtbp_variant_query(variant: VariantRecord) -> str:
+    cdna = _cdna_change(variant.hgvsc)
+    cdna_accession = (variant.hgvsc or "").split(":", 1)[0]
+    if cdna and ":" in (variant.hgvsc or "") and _mtbp_accession(cdna_accession):
+        return f"{cdna_accession}:{cdna}"
+    protein = _protein_change(variant.hgvsp)
+    protein_accession = (variant.hgvsp or "").split(":", 1)[0]
+    if protein and ":" in (variant.hgvsp or "") and _mtbp_accession(protein_accession):
+        return f"{protein_accession}:p.{protein}"
+    transcript = (variant.transcript or "").strip()
+    if transcript and cdna and _mtbp_accession(transcript):
+        return f"{transcript}:{cdna}"
+    if transcript and protein and _mtbp_accession(transcript):
+        return f"{transcript}:p.{protein}"
+    if variant.symbol and cdna:
+        return f"{variant.symbol}:{cdna}"
+    if variant.symbol and protein:
+        return f"{variant.symbol}:p.{protein}"
     if variant.genomic_location and variant.ref_allele and variant.alt_allele:
         try:
             chromosome, position = variant.genomic_location.split(":", 1)
@@ -760,6 +1221,92 @@ def _mtbp_variant_query(variant: VariantRecord) -> str:
         except ValueError:
             return ""
     return ""
+
+
+def _mtbp_genomic_query(variant: VariantRecord) -> str:
+    """Convert an Archer GRCh37 VCF-style allele into genomic HGVS.
+
+    Archer represents indels with an anchored reference base. MTBP expects the
+    inserted/deleted sequence itself in HGVS, so a simple ``REF>ALT`` string is
+    only correct for substitutions.
+    """
+    location = re.sub(r"\s+", "", variant.genomic_location or "")
+    match = re.fullmatch(
+        r"(?:chr)?(?P<chromosome>[0-9]{1,2}|X|Y|M|MT):(?P<position>\d+)(?:-\d+)?",
+        location,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    chromosome = match.group("chromosome").upper()
+    if chromosome == "MT":
+        chromosome = "M"
+    position = int(match.group("position"))
+    ref = re.sub(r"\s+", "", variant.ref_allele or "").upper()
+    alt = re.sub(r"\s+", "", variant.alt_allele or "").upper()
+    if (
+        not ref
+        or not alt
+        or ref == alt
+        or not re.fullmatch(r"[ACGTN]+", ref)
+        or not re.fullmatch(r"[ACGTN]+", alt)
+    ):
+        return ""
+
+    prefix = f"chr{chromosome}:g."
+    if len(ref) == len(alt) == 1:
+        return f"{prefix}{position}{ref}>{alt}"
+    if alt.startswith(ref):
+        inserted = alt[len(ref):]
+        left = position + len(ref) - 1
+        return f"{prefix}{left}_{left + 1}ins{inserted}"
+    if ref.startswith(alt):
+        start = position + len(alt)
+        end = position + len(ref) - 1
+        coordinate = str(start) if start == end else f"{start}_{end}"
+        return f"{prefix}{coordinate}del"
+
+    end = position + len(ref) - 1
+    coordinate = str(position) if position == end else f"{position}_{end}"
+    return f"{prefix}{coordinate}delins{alt}"
+
+
+def _mtbp_accession(value: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"(?:NM|NR|NP|XM|XR|XP)_\d+(?:\.\d+)?|ENS(?:T|P)\d+(?:\.\d+)?",
+            (value or "").strip(),
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _mtbp_unmapped_queries(body_text: str) -> list[str]:
+    match = re.search(
+        r"following mutation\(s\) cannot be mapped to genomic coordinates:\s*"
+        r"(.*?)\s*(?:Please check|--Please correct)",
+        body_text or "",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not match:
+        return []
+    return [
+        item.strip().rstrip(".")
+        for item in re.split(r",\s*(?=[A-Za-z0-9_.-]+:)", match.group(1).strip())
+        if item.strip()
+    ]
+
+
+def _mtbp_query_rejected(query: str, rejected: list[str]) -> bool:
+    normalized = re.sub(r"\s+", "", query).casefold()
+    coordinate = normalized.split(":", 1)[-1]
+    for item in rejected:
+        rejected_normalized = re.sub(r"\s+", "", item).casefold()
+        if normalized == rejected_normalized:
+            return True
+        if coordinate and coordinate == rejected_normalized.split(":", 1)[-1]:
+            return True
+    return False
 
 
 def _mtbp_normalized_protein(value: str) -> str:
@@ -774,10 +1321,7 @@ def _mtbp_normalized_protein(value: str) -> str:
 
 
 def _mtbp_proteins(text: str) -> set[str]:
-    tokens = re.findall(
-        r"p\.([A-Z][a-z]{2}\d+(?:[A-Z][a-z]{2}|Ter|\*)|[A-Z*]\d+[A-Z*])",
-        text or "",
-    )
+    tokens = re.findall(r"p\.\(?([A-Za-z0-9_*?]+)\)?", text or "")
     return {_mtbp_normalized_protein(token) for token in tokens}
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections import defaultdict
 from math import isnan
 from pathlib import Path
@@ -51,36 +52,152 @@ class ExcelReportWriter:
         evidence: dict[str, list[DatabaseEvidence]] | None = None,
         hide_excluded: bool = True,
     ) -> Path:
+        evidence = evidence or {}
         workbook = Workbook()
         workbook.remove(workbook.active)
-        self._raw_variant_sheet(workbook, "With Artifacts", result.variants, evidence or {})
+        self._summary_sheet(workbook, result, evidence)
+        self._included_sheet(workbook, result.included, evidence)
+        self._database_sheet(
+            workbook, result.variants, evidence, output_path.parent
+        )
+        self._raw_variant_sheet(
+            workbook, "With Artifacts", result.variants, evidence, hide_excluded
+        )
         self._raw_variant_sheet(
             workbook,
             "Artifacts Removed",
             [variant for variant in result.variants if variant_highlight(variant) != "artifact"],
-            evidence or {},
+            evidence,
+            hide_excluded,
         )
+        if any(variant.history_matches for variant in result.variants):
+            self._history_sheet(workbook, result.variants)
+        self._rules_sheet(workbook, result)
+        for ws in workbook.worksheets:
+            ws.sheet_view.showGridLines = False
         output_path.parent.mkdir(parents=True, exist_ok=True)
         workbook.save(output_path)
         return output_path
 
-    def _summary_sheet(self, workbook: Workbook, result: ProcessingResult) -> None:
+    def _summary_sheet(
+        self,
+        workbook: Workbook,
+        result: ProcessingResult,
+        evidence: dict[str, list[DatabaseEvidence]],
+    ) -> None:
         ws = workbook.create_sheet("Summary")
-        ws["A1"] = "Archer VPM Processing Summary"
-        ws["A1"].font = Font(size=16, bold=True, color=self.colors["navy"])
-        rows = [
-            ("Input", str(result.input_path)),
-            ("Run date", result.run_date),
-            ("Total variants", result.total_count),
-            ("Included", len(result.included)),
-            ("Excluded", len(result.excluded)),
-            ("Flagged", len(result.flagged)),
-            ("Processing time", f"{result.duration_seconds:.2f} s"),
+        ws.sheet_properties.tabColor = self.colors["navy"]
+        ws.merge_cells("A1:H2")
+        ws["A1"] = "Archer VPM Variant Review"
+        ws["A1"].font = Font(size=22, bold=True, color=self.colors["white"])
+        ws["A1"].fill = PatternFill("solid", fgColor=self.colors["navy"])
+        ws["A1"].alignment = Alignment(vertical="center", horizontal="left")
+        ws.merge_cells("A3:H3")
+        ws["A3"] = (
+            "Decision overview and database evidence • verify source pages before "
+            "clinical use • MTBP public output is research-only"
+        )
+        ws["A3"].font = Font(italic=True, color="5E6A73")
+        ws["A3"].alignment = Alignment(wrap_text=True)
+
+        evidence_items = [item for items in evidence.values() for item in items]
+        cards = [
+            ("A5:B5", "A6:B7", "Total variants", result.total_count, self.colors["pale_blue"]),
+            ("C5:D5", "C6:D7", "Included", len(result.included), self.colors["green"]),
+            ("E5:F5", "E6:F7", "Excluded", len(result.excluded), self.colors["orange"]),
+            ("G5:H5", "G6:H7", "Evidence records", len(evidence_items), self.colors["yellow"]),
         ]
-        for row_index, (label, value) in enumerate(rows, start=3):
-            ws.cell(row_index, 1, label).font = Font(bold=True)
+        for label_range, value_range, label, value, fill in cards:
+            ws.merge_cells(label_range)
+            ws.merge_cells(value_range)
+            label_cell = ws[label_range.split(":", 1)[0]]
+            value_cell = ws[value_range.split(":", 1)[0]]
+            label_cell.value = label
+            value_cell.value = value
+            for cell in (label_cell, value_cell):
+                cell.fill = PatternFill("solid", fgColor=fill)
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            label_cell.font = Font(bold=True, color=self.colors["navy"])
+            value_cell.font = Font(size=20, bold=True, color=self.colors["navy"])
+
+        ws["A10"] = "Run information"
+        ws["A10"].font = Font(size=13, bold=True, color=self.colors["navy"])
+        rows = [
+            ("Input file", str(result.input_path)),
+            ("Run date", result.run_date),
+            ("Processing time", f"{result.duration_seconds:.2f} s"),
+            ("Review flags", len(result.flagged)),
+            (
+                "Sources queried",
+                ", ".join(dict.fromkeys(item.database for item in evidence_items))
+                if evidence_items else "None yet",
+            ),
+        ]
+        for row_index, (label, value) in enumerate(rows, start=11):
+            ws.cell(row_index, 1, label).font = Font(bold=True, color=self.colors["navy"])
             ws.cell(row_index, 2, value)
-        self._fit(ws)
+            ws.merge_cells(start_row=row_index, start_column=2, end_row=row_index, end_column=8)
+            ws.cell(row_index, 2).alignment = Alignment(
+                wrap_text=True, vertical="top", horizontal="left"
+            )
+
+        ws["A18"] = "Evidence status legend"
+        ws["A18"].font = Font(size=13, bold=True, color=self.colors["navy"])
+        legend = [
+            ("Found", "Provider returned a matching result", self.colors["green"]),
+            ("Not found", "No matching evidence was returned", self.colors["gray"]),
+            ("Review needed", "Login, timeout, ambiguity, or provider error", self.colors["orange"]),
+        ]
+        for row_index, (label, meaning, fill) in enumerate(legend, start=19):
+            ws.cell(row_index, 1, label)
+            ws.cell(row_index, 1).font = Font(bold=True)
+            ws.cell(row_index, 1).fill = PatternFill("solid", fgColor=fill)
+            ws.cell(row_index, 2, meaning)
+            ws.merge_cells(start_row=row_index, start_column=2, end_row=row_index, end_column=5)
+        ws.column_dimensions["A"].width = 22
+        for column in "BCDEFGH":
+            ws.column_dimensions[column].width = 15
+        ws.row_dimensions[1].height = 28
+        ws.row_dimensions[2].height = 18
+        ws.freeze_panes = "A10"
+
+    def _included_sheet(
+        self,
+        workbook: Workbook,
+        variants: list[VariantRecord],
+        evidence: dict[str, list[DatabaseEvidence]],
+    ) -> None:
+        ws = workbook.create_sheet("Included Variants")
+        ws.sheet_properties.tabColor = "4F8A5B"
+        headers = [
+            "Sample", "Gene", "HGVSc", "HGVSp", "Transcript", "AF", "Depth",
+            "Decision", "Classification", "Evidence Sources", "Evidence Summary",
+        ]
+        self._headers(ws, headers)
+        for row_index, variant in enumerate(variants, start=2):
+            items = evidence.get(self._key(variant), [])
+            sources = ", ".join(dict.fromkeys(item.database for item in items))
+            findings = "\n".join(
+                f"{item.database} [{item.status.replace('_', ' ')}]: "
+                f"{item.clinical_significance or item.summary}".strip()
+                for item in items
+            )
+            values = [
+                variant.sample, variant.symbol, variant.hgvsc, variant.hgvsp,
+                variant.transcript, variant.af, variant.depth, variant.decision,
+                variant.classification, sources, findings,
+            ]
+            for col_index, value in enumerate(values, start=1):
+                cell = ws.cell(row_index, col_index, value)
+                cell.border = self._border()
+                cell.alignment = Alignment(vertical="top", wrap_text=col_index in {9, 10, 11})
+                if col_index == 6 and value is not None:
+                    cell.number_format = "0.00%"
+            if findings:
+                ws.row_dimensions[row_index].height = min(90, 20 + findings.count("\n") * 16)
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = f"A1:K{max(1, len(variants) + 1)}"
+        self._fit(ws, max_width=55)
 
     def _variant_sheet(
         self,
@@ -194,9 +311,14 @@ class ExcelReportWriter:
         workbook: Workbook,
         variants: list[VariantRecord],
         evidence: dict[str, list[DatabaseEvidence]],
+        report_directory: Path,
     ) -> None:
         ws = workbook.create_sheet("Database Evidence")
-        headers = ["Sample", "Gene", "HGVSc", "Database", "Status", "Significance", "Accession", "Summary", "URL"]
+        ws.sheet_properties.tabColor = self.colors["blue"]
+        headers = [
+            "Sample", "Gene", "HGVSc", "Database", "Status", "Significance",
+            "Accession", "Summary", "Source Page", "Screenshot", "Captured At",
+        ]
         self._headers(ws, headers)
         row_index = 2
         for variant in variants:
@@ -206,17 +328,41 @@ class ExcelReportWriter:
                     variant.symbol,
                     variant.hgvsc,
                     item.database,
-                    item.status,
+                    item.status.replace("_", " ").title(),
                     item.clinical_significance,
                     item.accession,
                     item.summary,
-                    item.url,
+                    "Open source" if item.url else "",
+                    "Open screenshot" if item.raw.get("screenshot") else "",
+                    item.raw.get("captured_at", ""),
                 ]
                 for col_index, value in enumerate(values, start=1):
                     cell = ws.cell(row_index, col_index, value)
                     cell.border = self._border()
-                    cell.alignment = Alignment(vertical="top", wrap_text=col_index in {8, 9})
+                    cell.alignment = Alignment(vertical="top", wrap_text=col_index in {6, 8})
+                if item.url:
+                    ws.cell(row_index, 9).hyperlink = item.url
+                    ws.cell(row_index, 9).style = "Hyperlink"
+                screenshot = str(item.raw.get("screenshot") or "")
+                if screenshot and Path(screenshot).exists():
+                    try:
+                        screenshot_target = os.path.relpath(
+                            Path(screenshot).resolve(), report_directory.resolve()
+                        )
+                    except ValueError:
+                        screenshot_target = Path(screenshot).resolve().as_uri()
+                    ws.cell(row_index, 10).hyperlink = screenshot_target
+                    ws.cell(row_index, 10).style = "Hyperlink"
+                status_fill = {
+                    "found": self.colors["green"],
+                    "not_found": self.colors["gray"],
+                }.get(item.status, self.colors["orange"])
+                ws.cell(row_index, 5).fill = PatternFill("solid", fgColor=status_fill)
+                ws.cell(row_index, 5).font = Font(bold=True, color=self.colors["navy"])
+                ws.row_dimensions[row_index].height = 32
                 row_index += 1
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = f"A1:K{max(1, row_index - 1)}"
         self._fit(ws, max_width=60)
 
     def _rules_sheet(self, workbook: Workbook, result: ProcessingResult) -> None:
@@ -262,6 +408,7 @@ class ExcelReportWriter:
         title: str,
         variants: list[VariantRecord],
         evidence: dict[str, list[DatabaseEvidence]],
+        hide_excluded: bool = False,
     ) -> None:
         ws = workbook.create_sheet(title)
         raw_columns = self._raw_columns(variants)
@@ -284,6 +431,8 @@ class ExcelReportWriter:
                 if col_index <= len(raw_columns) and raw_columns[col_index - 1] == "AF" and value not in [None, ""]:
                     cell.number_format = "0.0000"
             self._style_variant_row(ws, row_index, variant)
+            if hide_excluded and variant.decision == "excluded":
+                ws.row_dimensions[row_index].hidden = True
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{len(variants) + 1}"
         self._fit(ws, max_width=46)

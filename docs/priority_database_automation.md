@@ -39,7 +39,9 @@ Implementation notes:
 
 - Prefer the supported API for automated extraction.
 - Treat the public page as a review surface, not a supported API contract.
-- If browser automation is approved, extract a small versioned schema: normalized variant, transcript, suggested classification, met/unmet ACMG rules, population frequencies, ClinVar summary, somatic evidence, and page URL.
+- The current browser adapter searches by gene plus transcript HGVS, selects the matching/canonical transcript result, and verifies returned HGVSc/protein identity. It deliberately imports only the suggested classification; ACMG rule lists are retained neither in the summary nor structured evidence.
+- Direct genomic result URLs are not constructed from Archer `Ref/Alt Allele`: TP53 testing showed these values can be transcript-oriented and produce the wrong reverse-strand genomic allele.
+- Anonymous Franklin use is limited (the current user observed 15 searches). Saved browser credentials avoid relying on that anonymous allowance.
 - Fail closed when a required section or normalized variant identity changes.
 
 ### MTBP
@@ -52,12 +54,13 @@ Implementation notes:
 Validated login-assisted workflow:
 
 1. Export only gene/variant data; exclude sample and patient identifiers.
-2. Log in interactively and retain the authenticated session in an OS-protected location.
-3. Submit one pseudonymized batch.
-4. Poll the run while respecting provider rate limits.
-5. Capture the report URL, screenshot and structured audit JSON.
-6. Verify every returned alteration against the submitted normalized variants.
-7. Import functional class, evidence category, actionability tier, source links and pipeline/database versions.
+2. Store the login password in Windows Credential Manager or log in interactively; never store it in application JSON.
+3. Submit one pseudonymized batch using transcript-qualified HGVS first.
+4. When MTBP rejects transcript mapping, retry only those entries as GRCh37 genomic HGVS derived from the Archer position/ref/alt; remove only entries rejected in both forms.
+5. Run MTBP after all other browser databases and wait up to the configurable report timeout (20 minutes by default).
+6. Capture the report URL, screenshot and structured audit JSON.
+7. Verify every returned alteration against the submitted normalized variants.
+8. Import functional class, evidence category, actionability tier, source links and pipeline/database versions.
 
 ## Required provider questions
 
@@ -91,15 +94,31 @@ Validated login-assisted workflow:
 ## Implemented browser foundation
 
 The application now includes a serial visible-Edge workflow with isolated,
-persistent provider profiles. OncoKB and Franklin web lookups have been tested
-end to end with synthetic BRAF V600E data. Both returned the expected core
-classification, and the workflow saved a screenshot plus JSON audit evidence.
+persistent provider profiles and optional passwords encrypted by Windows
+Credential Manager. OncoKB and Franklin web lookups have been tested end to end
+with synthetic data. Franklin resolves transcript HGVS through its search UI,
+checks returned identity, and saves only the classification plus screenshot/JSON
+audit evidence.
 
-MTBP was validated with synthetic `TP53:p.R175H` data using an authorized
-account. The portal accepted a pseudonymous batch, queued the job, redirected to
-the report, and exposed pipeline version, GRCh37/hg19 provenance, functional
-relevance, curated evidence, actionability tiers and source links. The adapter
-now validates each returned gene/protein identity before importing evidence.
+OncoKB browser credentials can also be saved in Windows Credential Manager.
+Database and browser searches expose an **Included variants only** option,
+enabled by default, so filtered records are not submitted unnecessarily. The
+report workbook provides a compact included-variant view and one normalized row
+per database result, with source-page and captured-screenshot links.
+
+The application can also create one patient-level PDF per validated DIT
+(`YYOUM#####`) using only included variants. The PDF keeps source links,
+classification/significance, capture timestamps, MTBP pipeline/cancer-type
+provenance, review flags, and a physician conclusion/sign-off area. It is a
+decision-support summary and does not generate a diagnosis or treatment
+recommendation.
+
+MTBP was validated with synthetic `TP53:p.R175H` data and with the rejected
+`CEBPA`/`EZH2` transcript cases using an authorized account. For the latter, the
+portal accepted the automatic GRCh37 genomic fallbacks, queued the job, and
+returned both variants. The adapter recognizes duplication protein notation,
+validates each returned gene/variant identity before importing evidence, and
+retains every attempted query in the audit JSON.
 
 HSMD has been removed from the active login-based browser workflow for now. It
 remains available only as a manual evidence source while institutional access is
@@ -107,7 +126,9 @@ clarified.
 
 ## Next implementation gate
 
-The MTBP integration remains manually triggered and uses the provider's own
-interactive login/MFA session. Do not add password capture or unattended login.
-Use only non-identifying variant data and retain the portal's research-only
-warning with every imported audit record.
+The MTBP integration supports either an interactive login/MFA session or saved
+credentials protected by Windows Credential Manager. The normal database-search
+button automatically continues into selected login-based sources after the API
+phase, while the dedicated browser button remains available for reruns. Use only
+non-identifying variant data and retain the portal's research-only warning with
+every imported audit record.

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import html
 import csv
-import os
 import re
 import threading
 import time
@@ -80,10 +79,8 @@ class DatabaseSearchService:
                 diagnostics[database] = "token required"
             elif database == "Franklin" and self.settings.franklin_api_key:
                 diagnostics[database] = "ready"
-            elif database == "Franklin" and self._has_franklin_login_credentials():
-                diagnostics[database] = "ready (login on search)"
             elif database == "Franklin":
-                diagnostics[database] = "public web review (Premium API required for automation)"
+                diagnostics[database] = "browser login/public review (Premium API not configured)"
             elif database == "gnomAD":
                 diagnostics[database] = f"ready ({self.settings.gnomad_dataset}, rate limited)"
             elif database == "COSMIC":
@@ -964,37 +961,7 @@ class DatabaseSearchService:
             return DatabaseEvidence("Franklin", "error", f"Franklin lookup failed: {exc}", url=self._manual_url("Franklin", variant))
 
     def _franklin_token(self) -> str:
-        if self.settings.franklin_api_key:
-            return self.settings.franklin_api_key
-        email = self.settings.franklin_email or os.environ.get("FRANKLIN_EMAIL", "")
-        password = self.settings.franklin_password or os.environ.get("FRANKLIN_PASSWORD", "")
-        if not email or not password:
-            return ""
-        response = requests.get(
-            "https://api.genoox.com/v1/auth/login",
-            params={"email": email},
-            headers={"Authorization": password, "Accept": "application/json"},
-            timeout=self.timeout,
-        )
-        try:
-            response.raise_for_status()
-        except requests.HTTPError as exc:
-            if response.status_code in {401, 403}:
-                raise FranklinAuthenticationError(
-                    "Franklin login was rejected. Check the email/password, confirm API access is enabled for the account, "
-                    "or use a Franklin API token in Settings."
-                ) from exc
-            raise
-        token = self._token_from_payload(response.json())
-        if not token:
-            raise ValueError("Franklin login did not return an API token.")
-        self.settings.franklin_api_key = token
-        return token
-
-    def _has_franklin_login_credentials(self) -> bool:
-        email = self.settings.franklin_email or os.environ.get("FRANKLIN_EMAIL", "")
-        password = self.settings.franklin_password or os.environ.get("FRANKLIN_PASSWORD", "")
-        return bool(email and password)
+        return self.settings.franklin_api_key
 
     def _token_from_payload(self, payload) -> str:
         if isinstance(payload, str):
@@ -1274,6 +1241,9 @@ class DatabaseSearchService:
         return queries
 
     def _franklin_search_text(self, variant: VariantRecord) -> str:
+        cdna = self._cdna_without_transcript(variant.hgvsc)
+        if variant.symbol and cdna:
+            return f"{variant.symbol}:{cdna}"
         if variant.genomic_location and variant.ref_allele and variant.alt_allele:
             try:
                 chrom, pos = variant.genomic_location.split(":", 1)
@@ -1283,9 +1253,6 @@ class DatabaseSearchService:
                 return f"{chrom}-{pos}-{variant.ref_allele}-{variant.alt_allele}"
             except ValueError:
                 pass
-        cdna = self._cdna_without_transcript(variant.hgvsc)
-        if variant.symbol and cdna:
-            return f"{variant.symbol}:{cdna}"
         return variant.hgvsc or variant.genomic_location or variant.display_name
 
     def _first_franklin_record(self, data: dict) -> dict:
@@ -1386,11 +1353,8 @@ class DatabaseSearchService:
         return self._franklin_public_url(self._franklin_search_text(variant))
 
     def _franklin_public_url(self, query: str) -> str:
-        """Return Franklin's stable public SNP result route for a normalized query."""
-        return (
-            "https://franklin.genoox.com/clinical-db/variant/snp/"
-            + urllib.parse.quote(query, safe="")
-        )
+        """Return Franklin search; direct genomic routes can mis-handle strand orientation."""
+        return "https://franklin.genoox.com/clinical-db/home"
 
     def _manual_url(self, database: str, variant: VariantRecord) -> str:
         query = urllib.parse.quote(self._review_query(variant))

@@ -10,14 +10,17 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "PyQt6>=6.7",
+    "keyring>=25.6",
     "pandas>=2.2",
     "openpyxl>=3.1",
     "playwright>=1.55",
+    "reportlab>=4.2",
     "requests>=2.32",
 ]
 
 [project.optional-dependencies]
 dev = [
+    "pypdf>=5.0",
     "pytest>=8.2",
 ]
 

@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QStatusBar,
     QTableWidget,
@@ -31,11 +32,11 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from archer_processor.core import FilterEngine, ProcessingResult, VariantProcessor, default_artifact_rules, production_rules
+from archer_processor.core import DatabaseEvidence, FilterEngine, ProcessingResult, VariantProcessor, default_artifact_rules, production_rules
 from archer_processor.core.highlights import variant_highlight
 from archer_processor.io import ArcherTsvReader
 from archer_processor.knowledge import VariantHistoryRepository
-from archer_processor.reports import ExcelReportWriter
+from archer_processor.reports import ExcelReportWriter, PatientPdfReportWriter
 from archer_processor.services import (
     AppSettings,
     BROWSER_DATABASES,
@@ -131,16 +132,28 @@ class BrowserLoginWorker(QObject):
     failed = pyqtSignal(str)
     status = pyqtSignal(str)
 
-    def __init__(self, database: str):
+    def __init__(self, database: str, settings: AppSettings):
         super().__init__()
         self.database = database
+        self.settings = settings
 
     def run(self) -> None:
         try:
             self.status.emit(
-                f"{self.database}: sign in in the Edge window, then close Edge to save the session"
+                f"{self.database}: checking saved credentials/session"
             )
-            self.finished.emit(BrowserReviewService().open_login(self.database))
+            service = BrowserReviewService(
+                mtbp_cancer_type=self.settings.mtbp_cancer_type,
+                analysis_timeout_ms=self.settings.mtbp_timeout_minutes * 60_000,
+                request_delay_ms=self.settings.browser_delay_seconds * 1_000,
+                oncokb_email=self.settings.oncokb_email,
+                oncokb_password=self.settings.oncokb_password,
+                franklin_email=self.settings.franklin_email,
+                franklin_password=self.settings.franklin_password,
+                mtbp_email=self.settings.mtbp_email,
+                mtbp_password=self.settings.mtbp_password,
+            )
+            self.finished.emit(service.open_login(self.database))
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -150,16 +163,26 @@ class BrowserReviewWorker(QObject):
     failed = pyqtSignal(str)
     status = pyqtSignal(str)
 
-    def __init__(self, variants, databases: list[str], artifact_root: Path, mtbp_cancer_type: str):
+    def __init__(self, variants, databases: list[str], artifact_root: Path, settings: AppSettings):
         super().__init__()
         self.variants = variants
         self.databases = databases
         self.artifact_root = artifact_root
-        self.mtbp_cancer_type = mtbp_cancer_type
+        self.settings = settings
 
     def run(self) -> None:
         try:
-            service = BrowserReviewService(mtbp_cancer_type=self.mtbp_cancer_type)
+            service = BrowserReviewService(
+                mtbp_cancer_type=self.settings.mtbp_cancer_type,
+                analysis_timeout_ms=self.settings.mtbp_timeout_minutes * 60_000,
+                request_delay_ms=self.settings.browser_delay_seconds * 1_000,
+                oncokb_email=self.settings.oncokb_email,
+                oncokb_password=self.settings.oncokb_password,
+                franklin_email=self.settings.franklin_email,
+                franklin_password=self.settings.franklin_password,
+                mtbp_email=self.settings.mtbp_email,
+                mtbp_password=self.settings.mtbp_password,
+            )
             evidence = service.search_variants(
                 self.variants,
                 self.databases,
@@ -349,14 +372,27 @@ class MainWindow(QMainWindow):
         self.worker_count.setValue(self.settings.database_workers)
         self.worker_count.setToolTip("Parallel variant searches. Use 2-3 for public APIs without API keys.")
         actions.addWidget(self.worker_count)
+        self.included_only_check = QCheckBox("Included variants only")
+        self.included_only_check.setChecked(self.settings.search_included_only)
+        self.included_only_check.setToolTip(
+            "When enabled, excluded and flagged variants are not sent to any database website."
+        )
+        actions.addWidget(self.included_only_check)
         self.search_btn = QPushButton("Search Selected Sources")
         self.search_btn.setEnabled(False)
         self.search_btn.clicked.connect(self._start_database_search)
         self.rewrite_btn = QPushButton("Rewrite Workbook With Evidence")
         self.rewrite_btn.setEnabled(False)
         self.rewrite_btn.clicked.connect(self._rewrite_workbook)
+        self.patient_pdf_btn = QPushButton("Export Patient PDFs")
+        self.patient_pdf_btn.setEnabled(False)
+        self.patient_pdf_btn.setToolTip(
+            "Creates one clinical review PDF per DIT containing included variants and captured evidence."
+        )
+        self.patient_pdf_btn.clicked.connect(self._export_patient_pdfs)
         actions.addWidget(self.search_btn)
         actions.addWidget(self.rewrite_btn)
+        actions.addWidget(self.patient_pdf_btn)
         actions.addStretch()
         layout.addLayout(actions)
 
@@ -366,7 +402,7 @@ class MainWindow(QMainWindow):
         self.browser_database_combo.addItems(list(BROWSER_DATABASES))
         self.browser_signin_btn = QPushButton("Sign In / Refresh Session")
         self.browser_signin_btn.setToolTip(
-            "Opens an isolated visible Edge profile. Enter credentials on the provider page; passwords are not saved by Archer Prosess."
+            "Uses credentials stored by Windows Credential Manager, or opens Edge for manual sign-in. The profile is released automatically after success."
         )
         self.browser_signin_btn.clicked.connect(self._start_browser_login)
         self.browser_review_btn = QPushButton("Run Browser Lookups")
@@ -376,7 +412,7 @@ class MainWindow(QMainWindow):
         )
         self.browser_review_btn.clicked.connect(self._start_browser_review)
         self.browser_security_label = QLabel(
-            "Sessions stay under your Windows profile; no patient/sample ID is submitted."
+            "Passwords stay in Windows Credential Manager; no patient/sample ID is submitted."
         )
         self.browser_security_label.setStyleSheet(f"color: {Palette.muted};")
         browser_actions.addWidget(self.browser_database_combo)
@@ -395,7 +431,13 @@ class MainWindow(QMainWindow):
 
     def _settings_tab(self) -> QWidget:
         page = QWidget()
-        layout = QVBoxLayout(page)
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        self.settings_scroll = QScrollArea()
+        self.settings_scroll.setWidgetResizable(True)
+        self.settings_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        settings_content = QWidget()
+        layout = QVBoxLayout(settings_content)
         group = QGroupBox("Local Configuration")
         grid = QGridLayout(group)
         grid.setColumnStretch(1, 1)
@@ -409,17 +451,39 @@ class MainWindow(QMainWindow):
         self.clinvar_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.oncokb_key_edit = QLineEdit(self.settings.oncokb_api_key)
         self.oncokb_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.oncokb_email_edit = QLineEdit(self.settings.oncokb_email)
+        self.oncokb_password_edit = QLineEdit()
+        self.oncokb_password_edit.setText(self.settings.oncokb_password)
+        self.oncokb_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.oncokb_password_edit.setPlaceholderText("Stored in Windows Credential Manager")
         self.franklin_key_edit = QLineEdit(self.settings.franklin_api_key)
         self.franklin_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.franklin_email_edit = QLineEdit(self.settings.franklin_email)
         self.franklin_password_edit = QLineEdit()
+        self.franklin_password_edit.setText(self.settings.franklin_password)
         self.franklin_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.franklin_password_edit.setPlaceholderText("Used for login during this session; not saved")
+        self.franklin_password_edit.setPlaceholderText("Stored in Windows Credential Manager")
+        self.mtbp_email_edit = QLineEdit(self.settings.mtbp_email)
+        self.mtbp_password_edit = QLineEdit()
+        self.mtbp_password_edit.setText(self.settings.mtbp_password)
+        self.mtbp_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.mtbp_password_edit.setPlaceholderText("Stored in Windows Credential Manager")
         self.gnomad_dataset_combo = QComboBox()
         self.gnomad_dataset_combo.addItems(["gnomad_r2_1", "gnomad_r3", "gnomad_r4"])
         self.gnomad_dataset_combo.setCurrentText(self.settings.gnomad_dataset)
         self.mtbp_cancer_type_edit = QLineEdit(self.settings.mtbp_cancer_type)
         self.mtbp_cancer_type_edit.setPlaceholderText("Exact MTBP cancer type, for example Blood")
+        self.browser_delay_spin = QSpinBox()
+        self.browser_delay_spin.setRange(0, 120)
+        self.browser_delay_spin.setSuffix(" s")
+        self.browser_delay_spin.setValue(self.settings.browser_delay_seconds)
+        self.browser_delay_spin.setToolTip(
+            "Pause between Franklin and OncoKB variants to reduce throttling/session issues."
+        )
+        self.mtbp_timeout_spin = QSpinBox()
+        self.mtbp_timeout_spin.setRange(5, 60)
+        self.mtbp_timeout_spin.setSuffix(" min")
+        self.mtbp_timeout_spin.setValue(self.settings.mtbp_timeout_minutes)
         self.artifact_table = QTableWidget(0, 3)
         self.artifact_table.setHorizontalHeaderLabels(["Gene", "HGVSc", "Reason"])
         self.artifact_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -448,22 +512,36 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.clinvar_key_edit, 2, 1)
         grid.addWidget(QLabel("OncoKB API token"), 3, 0)
         grid.addWidget(self.oncokb_key_edit, 3, 1)
-        grid.addWidget(QLabel("Franklin API token"), 4, 0)
-        grid.addWidget(self.franklin_key_edit, 4, 1)
-        grid.addWidget(QLabel("Franklin email"), 5, 0)
-        grid.addWidget(self.franklin_email_edit, 5, 1)
-        grid.addWidget(QLabel("Franklin password"), 6, 0)
-        grid.addWidget(self.franklin_password_edit, 6, 1)
-        grid.addWidget(QLabel("gnomAD dataset"), 7, 0)
-        grid.addWidget(self.gnomad_dataset_combo, 7, 1)
-        grid.addWidget(QLabel("MTBP cancer type"), 8, 0)
-        grid.addWidget(self.mtbp_cancer_type_edit, 8, 1)
-        grid.addWidget(QLabel("Artifact list"), 9, 0)
-        grid.addWidget(self.artifact_table, 9, 1, 1, 2)
-        grid.addLayout(artifact_actions, 10, 1, 1, 2)
-        grid.addWidget(save_btn, 11, 2)
+        grid.addWidget(QLabel("OncoKB email"), 4, 0)
+        grid.addWidget(self.oncokb_email_edit, 4, 1)
+        grid.addWidget(QLabel("OncoKB password"), 5, 0)
+        grid.addWidget(self.oncokb_password_edit, 5, 1)
+        grid.addWidget(QLabel("Franklin API token"), 6, 0)
+        grid.addWidget(self.franklin_key_edit, 6, 1)
+        grid.addWidget(QLabel("Franklin email"), 7, 0)
+        grid.addWidget(self.franklin_email_edit, 7, 1)
+        grid.addWidget(QLabel("Franklin password"), 8, 0)
+        grid.addWidget(self.franklin_password_edit, 8, 1)
+        grid.addWidget(QLabel("MTBP email"), 9, 0)
+        grid.addWidget(self.mtbp_email_edit, 9, 1)
+        grid.addWidget(QLabel("MTBP password"), 10, 0)
+        grid.addWidget(self.mtbp_password_edit, 10, 1)
+        grid.addWidget(QLabel("gnomAD dataset"), 11, 0)
+        grid.addWidget(self.gnomad_dataset_combo, 11, 1)
+        grid.addWidget(QLabel("MTBP cancer type"), 12, 0)
+        grid.addWidget(self.mtbp_cancer_type_edit, 12, 1)
+        grid.addWidget(QLabel("Browser delay"), 13, 0)
+        grid.addWidget(self.browser_delay_spin, 13, 1)
+        grid.addWidget(QLabel("MTBP report timeout"), 14, 0)
+        grid.addWidget(self.mtbp_timeout_spin, 14, 1)
+        grid.addWidget(QLabel("Artifact list"), 15, 0)
+        grid.addWidget(self.artifact_table, 15, 1, 1, 2)
+        grid.addLayout(artifact_actions, 16, 1, 1, 2)
+        grid.addWidget(save_btn, 17, 2)
         layout.addWidget(group)
         layout.addStretch()
+        self.settings_scroll.setWidget(settings_content)
+        page_layout.addWidget(self.settings_scroll)
         return page
 
     def _browse_input(self) -> None:
@@ -576,6 +654,7 @@ class MainWindow(QMainWindow):
         self.search_btn.setEnabled(True)
         self.browser_review_btn.setEnabled(True)
         self.rewrite_btn.setEnabled(True)
+        self.patient_pdf_btn.setEnabled(True)
         self._set_ready()
         QMessageBox.information(self, "Complete", f"Workbook saved:\n{result.output_path}")
 
@@ -588,7 +667,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No sources", "Select at least one evidence source.")
             return
         self._set_busy("Searching")
-        worker = DatabaseWorker(self.result.included, databases, self.settings, self.worker_count.value())
+        variants = self._variants_for_search()
+        self._log(f"Search scope: {len(variants)}/{self.result.total_count} variants")
+        worker = DatabaseWorker(variants, databases, self.settings, self.worker_count.value())
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -606,13 +687,23 @@ class MainWindow(QMainWindow):
     def _database_finished(self, evidence: dict) -> None:
         self.evidence = evidence
         self._refresh_evidence_table()
+        browser_databases = self._selected_browser_databases(api_fallback_only=True)
+        if browser_databases:
+            self._log(
+                "API/database phase complete; continuing with login-based sources: "
+                + ", ".join(browser_databases)
+            )
+            self._launch_browser_review(browser_databases)
+            return
+        self._auto_rewrite_workbook()
         self._set_ready()
         self._log("Database evidence search complete")
 
     def _start_browser_login(self) -> None:
         database = self.browser_database_combo.currentText()
+        self._save_settings(silent=True)
         self._set_busy(f"{database} sign-in")
-        worker = BrowserLoginWorker(database)
+        worker = BrowserLoginWorker(database, self.settings)
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -635,17 +726,34 @@ class MainWindow(QMainWindow):
         if not self.result:
             return
         self._save_settings(silent=True)
-        databases = [
-            database
-            for database in BROWSER_DATABASES
-            if self.db_checks[database].isChecked()
-        ]
+        databases = self._selected_browser_databases()
         if not databases:
             QMessageBox.warning(
                 self,
                 "No browser sources",
                 "Select at least one of OncoKB, Franklin, or MTBP.",
             )
+            return
+        self._launch_browser_review(databases)
+
+    def _selected_browser_databases(self, *, api_fallback_only: bool = False) -> list[str]:
+        databases = [
+            database
+            for database in BROWSER_DATABASES
+            if self.db_checks[database].isChecked()
+        ]
+        if not api_fallback_only:
+            return databases
+        return [
+            database for database in databases
+            if not (
+                (database == "OncoKB" and self.settings.oncokb_api_key)
+                or (database == "Franklin" and self.settings.franklin_api_key)
+            )
+        ]
+
+    def _launch_browser_review(self, databases: list[str]) -> None:
+        if not self.result:
             return
         output_parent = (
             self.result.output_path.parent
@@ -656,17 +764,17 @@ class MainWindow(QMainWindow):
         artifact_root = output_parent / f"{output_stem}_browser_evidence"
         self._set_busy("Browser lookups")
         worker = BrowserReviewWorker(
-            self.result.included,
+            self._variants_for_search(),
             databases,
             artifact_root,
-            self.settings.mtbp_cancer_type,
+            self.settings,
         )
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.status.connect(self._log)
         worker.finished.connect(self._browser_review_finished)
-        worker.failed.connect(self._worker_failed)
+        worker.failed.connect(self._browser_review_failed)
         worker.finished.connect(thread.quit)
         worker.failed.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
@@ -675,22 +783,114 @@ class MainWindow(QMainWindow):
         self.browser_worker = worker
         thread.start()
 
+    def _variants_for_search(self):
+        if not self.result:
+            return []
+        if self.included_only_check.isChecked():
+            return self.result.included
+        return self.result.variants
+
     def _browser_review_finished(self, browser_evidence: dict) -> None:
+        self._merge_browser_evidence(browser_evidence)
+        self._refresh_evidence_table()
+        self._auto_rewrite_workbook()
+        self._set_ready()
+        self._log("Browser evidence lookup complete")
+
+    def _merge_browser_evidence(self, browser_evidence: dict) -> None:
         for key, new_items in browser_evidence.items():
             by_database = {
                 item.database: item for item in self.evidence.get(key, [])
             }
             by_database.update({item.database: item for item in new_items})
             self.evidence[key] = list(by_database.values())
+
+    def _browser_review_failed(self, message: str) -> None:
+        worker = self.browser_worker
+        if isinstance(worker, BrowserReviewWorker):
+            failed_evidence = {}
+            for variant in worker.variants:
+                key = BrowserReviewService.variant_key(variant)
+                failed_evidence[key] = [
+                    DatabaseEvidence(
+                        database,
+                        "error",
+                        "Login-based lookup failed before a final result was captured. "
+                        f"Details: {message}",
+                    )
+                    for database in worker.databases
+                ]
+            self._merge_browser_evidence(failed_evidence)
         self._refresh_evidence_table()
-        self._set_ready()
-        self._log("Browser evidence lookup complete")
+        self._auto_rewrite_workbook()
+        self._worker_failed(message)
 
     def _rewrite_workbook(self) -> None:
         if not self.result or not self.result.output_path:
             return
-        ExcelReportWriter().write(self.result, self.result.output_path, self.evidence, self.hide_excluded.isChecked())
+        self._write_evidence_workbook()
         QMessageBox.information(self, "Workbook Updated", f"Evidence written to:\n{self.result.output_path}")
+
+    def _export_patient_pdfs(self) -> None:
+        if not self.result:
+            return
+        default_parent = (
+            self.result.output_path.parent
+            if self.result.output_path
+            else Path(self.settings.default_output_dir)
+        )
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Select folder for patient PDF reports",
+            str(default_parent),
+        )
+        if not selected:
+            return
+        output_stem = self.result.output_path.stem if self.result.output_path else "archer"
+        report_directory = Path(selected) / f"{output_stem}_patient_reports"
+        try:
+            outputs = PatientPdfReportWriter().write_all(
+                self.result,
+                report_directory,
+                self.evidence,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Patient PDF export failed", str(exc))
+            return
+        if not outputs:
+            QMessageBox.warning(
+                self,
+                "No patient PDFs created",
+                "No patients had variants with decision 'included'.",
+            )
+            return
+        self._log(f"Created {len(outputs)} patient PDF report(s) in {report_directory}")
+        QMessageBox.information(
+            self,
+            "Patient PDFs created",
+            f"Created {len(outputs)} report(s):\n{report_directory}",
+        )
+
+    def _write_evidence_workbook(self) -> None:
+        if not self.result or not self.result.output_path:
+            return
+        ExcelReportWriter().write(
+            self.result,
+            self.result.output_path,
+            self.evidence,
+            self.hide_excluded.isChecked(),
+        )
+
+    def _auto_rewrite_workbook(self) -> None:
+        try:
+            self._write_evidence_workbook()
+            if self.result and self.result.output_path:
+                self._log(f"Evidence workbook updated: {self.result.output_path}")
+        except Exception as exc:
+            self._log(
+                "Could not update the workbook automatically. Close it in Excel "
+                f"and use Rewrite Workbook With Evidence. ({exc})"
+            )
 
     def _worker_failed(self, message: str) -> None:
         self._set_ready()
@@ -702,10 +902,17 @@ class MainWindow(QMainWindow):
         self.settings.default_output_dir = self.output_dir_edit.text()
         self.settings.clinvar_api_key = self.clinvar_key_edit.text()
         self.settings.oncokb_api_key = self.oncokb_key_edit.text()
+        self.settings.oncokb_email = self.oncokb_email_edit.text()
+        self.settings.oncokb_password = self.oncokb_password_edit.text()
         self.settings.franklin_api_key = self.franklin_key_edit.text()
         self.settings.franklin_email = self.franklin_email_edit.text()
         self.settings.franklin_password = self.franklin_password_edit.text()
+        self.settings.mtbp_email = self.mtbp_email_edit.text()
+        self.settings.mtbp_password = self.mtbp_password_edit.text()
         self.settings.database_workers = self.worker_count.value()
+        self.settings.browser_delay_seconds = self.browser_delay_spin.value()
+        self.settings.mtbp_timeout_minutes = self.mtbp_timeout_spin.value()
+        self.settings.search_included_only = self.included_only_check.isChecked()
         self.settings.gnomad_dataset = self.gnomad_dataset_combo.currentText()
         self.settings.mtbp_cancer_type = self.mtbp_cancer_type_edit.text().strip() or "Blood"
         self.settings.artifact_rules = self._artifact_rules_from_table()
@@ -755,7 +962,11 @@ class MainWindow(QMainWindow):
         if not self.result:
             return
         evidence_by_key = self.evidence or {}
-        variants = self.result.included if evidence_by_key else []
+        variants = [
+            variant
+            for variant in self.result.variants
+            if f"{variant.sample}|{variant.hgvsc}" in evidence_by_key
+        ]
         for variant in variants:
             row = self.evidence_table.rowCount()
             self.evidence_table.insertRow(row)
@@ -780,6 +991,8 @@ class MainWindow(QMainWindow):
         self.search_btn.setEnabled(False)
         self.browser_signin_btn.setEnabled(False)
         self.browser_review_btn.setEnabled(False)
+        self.rewrite_btn.setEnabled(False)
+        self.patient_pdf_btn.setEnabled(False)
         self.status_bar.showMessage(label)
 
     def _set_ready(self) -> None:
@@ -788,6 +1001,8 @@ class MainWindow(QMainWindow):
         self.search_btn.setEnabled(self.result is not None)
         self.browser_signin_btn.setEnabled(True)
         self.browser_review_btn.setEnabled(self.result is not None)
+        self.rewrite_btn.setEnabled(self.result is not None)
+        self.patient_pdf_btn.setEnabled(self.result is not None)
         self.status_bar.showMessage("Ready", 3000)
 
     def _update_process_state(self) -> None:

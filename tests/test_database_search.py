@@ -68,18 +68,18 @@ def test_database_diagnostics_reports_ready_token_and_manual_sources():
     assert diagnostics["ClinGen Allele Registry"] == "context only (allele ID/dbSNP cross-links)"
     assert diagnostics["cBioPortal"] == "ready (public cohort context)"
     assert diagnostics["OncoKB"] == "token required"
-    assert diagnostics["Franklin"] == "public web review (Premium API required for automation)"
+    assert diagnostics["Franklin"] == "browser login/public review (Premium API not configured)"
     assert diagnostics["MTBP"] == "web batch (login, research-only)"
     assert diagnostics["HSMD"] == "manual"
 
 
-def test_database_diagnostics_reports_franklin_login_ready():
+def test_database_diagnostics_keeps_browser_password_separate_from_api_access():
     settings = AppSettings(franklin_api_key="", franklin_email="user@example.org", franklin_password="secret")
     service = DatabaseSearchService(settings)
 
     diagnostics = service.database_diagnostics(["Franklin"])
 
-    assert diagnostics["Franklin"] == "ready (login on search)"
+    assert diagnostics["Franklin"] == "browser login/public review (Premium API not configured)"
 
 
 def test_manual_sources_return_checklist_and_query():
@@ -200,47 +200,24 @@ def test_franklin_without_token_prepares_public_review():
     evidence = service._search_franklin(variant)
 
     assert evidence.status == "web_review_required"
-    assert "query prepared: chr13-28608215-C-CT" in evidence.summary
-    assert evidence.url == "https://franklin.genoox.com/clinical-db/variant/snp/chr13-28608215-C-CT"
+    assert "query prepared: FLT3:c.1419-4dup" in evidence.summary
+    assert evidence.url == "https://franklin.genoox.com/clinical-db/home"
 
 
-def test_franklin_login_fetches_token_and_searches(monkeypatch):
+def test_franklin_browser_password_does_not_attempt_api_login(monkeypatch):
     variant = ArcherTsvReader().read(FIXTURE)[0]
     service = DatabaseSearchService(
         AppSettings(franklin_api_key="", franklin_email="user@example.org", franklin_password="secret"),
         timeout=1,
     )
-    calls = []
-
-    def fake_get(url, params=None, headers=None, timeout=None):
-        calls.append((url, params or {}, headers or {}))
-        if url.endswith("/v1/auth/login"):
-            assert params["email"] == "user@example.org"
-            assert headers["Authorization"] == "secret"
-            return FakeResponse({"data": {"token": "session-token"}})
-        assert url.endswith("/v2/search/snp/")
-        assert headers["Authorization"] == "Bearer session-token"
-        return FakeResponse(
-            {
-                "variants": [
-                    {
-                        "classification": {"acmg_classification": "uncertain significance"},
-                        "annotations": {},
-                    }
-                ]
-            }
-        )
-
-    monkeypatch.setattr("archer_processor.services.database_search.requests.get", fake_get)
+    monkeypatch.setattr(
+        "archer_processor.services.database_search.requests.get",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("API must not be called")),
+    )
 
     evidence = service._search_franklin(variant)
 
-    assert evidence.status == "found"
-    assert evidence.clinical_significance == "uncertain significance"
-    assert [call[0] for call in calls] == [
-        "https://api.genoox.com/v1/auth/login",
-        "https://api.genoox.com/v2/search/snp/",
-    ]
+    assert evidence.status == "web_review_required"
 
 
 def test_franklin_token_parser_accepts_common_shapes():
@@ -263,25 +240,6 @@ def test_franklin_unauthorized_is_reported(monkeypatch):
     evidence = service._search_franklin(variant)
 
     assert evidence.status == "unauthorized"
-
-
-def test_franklin_login_unauthorized_is_reported_clearly(monkeypatch):
-    variant = ArcherTsvReader().read(FIXTURE)[0]
-    service = DatabaseSearchService(
-        AppSettings(franklin_api_key="", franklin_email="user@example.org", franklin_password="bad-secret"),
-        timeout=1,
-    )
-
-    def fake_get(*args, **kwargs):
-        return FakeResponse({"detail": "bad credentials"}, status_code=401)
-
-    monkeypatch.setattr("archer_processor.services.database_search.requests.get", fake_get)
-
-    evidence = service._search_franklin(variant)
-
-    assert evidence.status == "unauthorized"
-    assert "Franklin login was rejected" in evidence.summary
-    assert "API token in Settings" in evidence.summary
 
 
 def test_franklin_malformed_response_is_error(monkeypatch):
@@ -711,8 +669,8 @@ def test_priority_manual_urls_use_current_portals():
     service = DatabaseSearchService()
 
     assert service._manual_url("MTBP", variant) == "https://mtbp.org/analyse/"
-    assert service._manual_url("Franklin", variant).startswith(
-        "https://franklin.genoox.com/clinical-db/variant/snp/"
+    assert service._manual_url("Franklin", variant) == (
+        "https://franklin.genoox.com/clinical-db/home"
     )
 
 

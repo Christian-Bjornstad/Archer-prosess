@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from archer_processor.core import default_artifact_rules
+from archer_processor.services import credentials
 
 
 @dataclass(slots=True)
@@ -14,10 +15,17 @@ class AppSettings:
     default_output_dir: str = str(Path.home() / "Desktop")
     clinvar_api_key: str = ""
     oncokb_api_key: str = ""
+    oncokb_email: str = ""
+    oncokb_password: str = field(default="", repr=False, metadata={"persist": False})
     franklin_api_key: str = ""
     franklin_email: str = ""
     franklin_password: str = field(default="", repr=False, metadata={"persist": False})
+    mtbp_email: str = ""
+    mtbp_password: str = field(default="", repr=False, metadata={"persist": False})
     database_workers: int = 3
+    browser_delay_seconds: int = 15
+    mtbp_timeout_minutes: int = 20
+    search_included_only: bool = True
     gnomad_dataset: str = "gnomad_r2_1"
     mtbp_cancer_type: str = "Blood"
     artifact_rules: list[dict[str, str]] = field(default_factory=default_artifact_rules)
@@ -39,9 +47,22 @@ class AppSettings:
                 for item in fields(cls)
                 if item.metadata.get("persist") is not False
             }
-            return cls(**{key: value for key, value in data.items() if key in persisted_fields})
+            settings = cls(**{key: value for key, value in data.items() if key in persisted_fields})
         except Exception:
             return cls()
+        try:
+            settings.oncokb_password = credentials.get_saved_password(
+                "OncoKB", settings.oncokb_email
+            )
+            settings.franklin_password = credentials.get_saved_password(
+                "Franklin", settings.franklin_email
+            )
+            settings.mtbp_password = credentials.get_saved_password(
+                "MTBP", settings.mtbp_email
+            )
+        except Exception:
+            pass
+        return settings
 
     def save(self) -> None:
         path = self.config_path()
@@ -51,3 +72,6 @@ class AppSettings:
             if item.metadata.get("persist") is False:
                 data.pop(item.name, None)
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        credentials.save_password("OncoKB", self.oncokb_email, self.oncokb_password)
+        credentials.save_password("Franklin", self.franklin_email, self.franklin_password)
+        credentials.save_password("MTBP", self.mtbp_email, self.mtbp_password)

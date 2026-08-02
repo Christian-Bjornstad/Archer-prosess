@@ -88,7 +88,14 @@ def test_excel_export_preserves_raw_columns_and_adds_database_columns(tmp_path):
     ExcelReportWriter().write(result, output, evidence=evidence)
 
     workbook = openpyxl.load_workbook(output)
-    assert workbook.sheetnames == ["With Artifacts", "Artifacts Removed"]
+    assert workbook.sheetnames == [
+        "Summary",
+        "Included Variants",
+        "Database Evidence",
+        "With Artifacts",
+        "Artifacts Removed",
+        "Rules",
+    ]
     ws = workbook["With Artifacts"]
     headers = [cell.value for cell in ws[1]]
     raw_headers = list(result.variants[0].raw)
@@ -181,3 +188,38 @@ def test_excel_export_keeps_row_coloring_on_raw_sheets(tmp_path):
     assert by_sample["26OUM00002_VPM_S2_R1_001"] == "00000000"
     assert removed_by_sample["26OUM00004_VPM_S4_R1_001"] == "00FFF2CC"
     assert removed_by_sample["26OUM00005_VPM_S5_R1_001"] == "00E2F0D9"
+
+
+def test_excel_evidence_sheet_links_source_and_browser_screenshot(tmp_path):
+    output = tmp_path / "review.xlsx"
+    screenshot = tmp_path / "browser-evidence.png"
+    screenshot.write_bytes(b"placeholder")
+    result = VariantProcessor().process(FIXTURE, "2026-07-26", output)
+    variant = result.variants[3]
+    evidence = {
+        DatabaseSearchService().variant_key(variant): [
+            DatabaseEvidence(
+                "OncoKB",
+                "found",
+                "oncogenic=Oncogenic",
+                clinical_significance="Oncogenic",
+                url="https://www.oncokb.org/example",
+                raw={
+                    "screenshot": str(screenshot),
+                    "captured_at": "2026-08-01T12:00:00+00:00",
+                },
+            )
+        ]
+    }
+
+    ExcelReportWriter().write(result, output, evidence=evidence)
+
+    workbook = openpyxl.load_workbook(output)
+    ws = workbook["Database Evidence"]
+    headers = [cell.value for cell in ws[1]]
+    source_cell = ws.cell(2, headers.index("Source Page") + 1)
+    screenshot_cell = ws.cell(2, headers.index("Screenshot") + 1)
+    workbook.close()
+
+    assert source_cell.hyperlink.target == "https://www.oncokb.org/example"
+    assert screenshot_cell.hyperlink.target == "browser-evidence.png"
