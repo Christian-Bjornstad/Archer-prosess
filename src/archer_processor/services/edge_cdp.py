@@ -90,11 +90,31 @@ class EdgeCdpLauncher:
             raise EdgeCdpError(f"Unsupported CDP browser channel: {channel}")
         if headless:
             raise EdgeCdpError("Archer browser evidence requires visible Edge.")
-        context = EdgeCdpContext.launch(
-            Path(user_data_dir),
-            viewport=viewport or {"width": 1440, "height": 1000},
-            accept_downloads=accept_downloads,
-        )
+        last_error: Exception | None = None
+        context: EdgeCdpContext | None = None
+        for attempt in range(1, 4):
+            try:
+                context = EdgeCdpContext.launch(
+                    Path(user_data_dir),
+                    viewport=viewport or {"width": 1440, "height": 1000},
+                    accept_downloads=accept_downloads,
+                )
+                break
+            except EdgeCdpTimeout:
+                raise
+            except EdgeCdpError as exc:
+                last_error = exc
+                if attempt < 3:
+                    # Managed Edge can briefly retain its process broker after
+                    # the previous provider closes. Backing off prevents the
+                    # next provider launch from being redirected to that stale
+                    # broker without a DevTools endpoint.
+                    time.sleep(attempt * 1.5)
+        if context is None:
+            raise EdgeCdpError(
+                "Microsoft Edge could not open its dedicated evidence profile "
+                f"after 3 attempts. Last error: {last_error}"
+            ) from last_error
         self.runtime._contexts.append(context)
         return context
 
@@ -136,6 +156,9 @@ class EdgeCdpContext:
             f"--window-size={int(viewport['width'])},{int(viewport['height'])}",
             "--no-first-run",
             "--no-default-browser-check",
+            "--new-window",
+            "--disable-background-mode",
+            "--disable-features=msEdgeStartupBoost",
             "--disable-session-crashed-bubble",
             "about:blank",
         ]

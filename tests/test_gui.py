@@ -39,7 +39,10 @@ def test_database_tab_contains_current_sources(qt_app):
     assert window.browser_signin_btn.isEnabled()
     assert not window.browser_review_btn.isEnabled()
     assert not window.patient_excel_btn.isEnabled()
-    assert not window.patient_pdf_btn.isEnabled()
+    assert not hasattr(window, "patient_pdf_btn")
+    assert not hasattr(window, "clinvar_key_edit")
+    assert not hasattr(window, "oncokb_key_edit")
+    assert not hasattr(window, "franklin_key_edit")
     headers = [
         window.evidence_table.horizontalHeaderItem(index).text()
         for index in range(window.evidence_table.columnCount())
@@ -69,6 +72,9 @@ def test_review_filters_and_search_progress_are_visible(qt_app, tmp_path):
         fixture, "2026-08-01", tmp_path / "review.xlsx"
     )
     window._refresh_variant_table()
+
+    assert "manual attention" in window.review_flag_note.text()
+    assert "not automatically excluded" in window.review_flag_note.text()
 
     window.review_filter_edit.setText(window.result.variants[0].symbol)
     assert "Showing" in window.review_count_label.text()
@@ -167,6 +173,8 @@ def test_normal_search_routes_non_api_login_sources_to_browser_phase(qt_app):
     window.settings.franklin_api_key = "franklin-token"
     assert window._selected_browser_databases(api_fallback_only=True) == [
         "COSMIC",
+        "OncoKB",
+        "Franklin",
         "ClinVar",
         "MTBP",
     ]

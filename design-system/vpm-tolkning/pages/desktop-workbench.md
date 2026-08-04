@@ -8,7 +8,8 @@ the master design system.
 - Present the application as a clinical variant interpretation console, not an
   Archer processing utility or a step-by-step workflow wizard.
 - Use VPM Tolkning branding and analysis language throughout the interface.
-- The fixed reference profile is always visible as `Somatic · hg19 / GRCh37`.
+- Somatic and hg19 / GRCh37 remain implementation requirements, but are not
+  repeated as decorative profile labels in the interface.
 - Evidence order remains MTBP, Franklin, ClinVar, OncoKB, and COSMIC.
 
 ## Layout
@@ -20,6 +21,11 @@ the master design system.
   source cards for database selection.
 - Avoid numbered instruction cards, workflow arrows, duplicated explanations,
   and oversized empty activity surfaces.
+- Keep the sidebar limited to brand and navigation; do not add workflow,
+  reference-profile, local-processing, or credential-storage footers.
+- Provider configuration is website-only. Do not expose API token controls or
+  API readiness diagnostics in the application.
+- Patient output actions are Excel workbooks only; do not show PDF export.
 
 ## Visual language
 
@@ -39,3 +45,5 @@ the master design system.
   active patient, variant count, and source count.
 - Source selection, state, and warnings are communicated by text as well as
   colour.
+- Review flags include a concise explanation that they indicate warnings or
+  incomplete information requiring manual attention, not automatic exclusion.

@@ -1,7 +1,9 @@
 from archer_processor.services.browser_review import BrowserReviewService
 from archer_processor.services.edge_cdp import (
     EdgeCdpError,
+    EdgeCdpContext,
     EdgeCdpPage,
+    EdgeCdpRuntime,
     EdgeCdpTimeout,
     _role_expression,
     _text_expression,
@@ -59,3 +61,25 @@ def test_wait_for_url_accepts_predicate():
             return self.current
 
     Page().wait_for_url(lambda url: url.endswith("/result"), timeout=1_000)
+
+
+def test_edge_launcher_retries_transient_broker_failures(tmp_path, monkeypatch):
+    attempts = []
+    sleeps = []
+    sentinel = object()
+
+    def launch(profile, *, viewport, accept_downloads):
+        attempts.append(profile)
+        if len(attempts) < 3:
+            raise EdgeCdpError("stale Edge broker")
+        return sentinel
+
+    monkeypatch.setattr(EdgeCdpContext, "launch", launch)
+    monkeypatch.setattr("archer_processor.services.edge_cdp.time.sleep", sleeps.append)
+    runtime = EdgeCdpRuntime()
+
+    context = runtime.chromium.launch_persistent_context(str(tmp_path))
+
+    assert context is sentinel
+    assert len(attempts) == 3
+    assert sleeps == [1.5, 3.0]

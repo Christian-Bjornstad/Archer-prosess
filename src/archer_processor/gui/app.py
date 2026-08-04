@@ -43,7 +43,6 @@ from archer_processor.knowledge import VariantHistoryRepository
 from archer_processor.reports import (
     ExcelReportWriter,
     PatientExcelReportWriter,
-    PatientPdfReportWriter,
 )
 from archer_processor.services import (
     AppSettings,
@@ -142,8 +141,10 @@ class DatabaseWorker(QObject):
         try:
             api_service = DatabaseSearchService(self.settings)
             browser_service = self._browser_service()
-            for database, status in api_service.database_diagnostics(self.databases).items():
+            for database, status in api_service.database_diagnostics(self.api_databases).items():
                 self.status.emit(f"{database}: {status}")
+            for database in self.browser_databases:
+                self.status.emit(f"{database}: website lookup in Microsoft Edge")
             patients = _variants_grouped_by_patient(self.variants)
             all_evidence: dict[str, list[DatabaseEvidence]] = {}
             self.status.emit(
@@ -447,11 +448,8 @@ class MainWindow(QMainWindow):
         brand_mark.setAccessibleName("VPM Tolkning application icon")
         brand = QLabel("VPM Tolkning")
         brand.setObjectName("BrandTitle")
-        brand_copy = QLabel("Variant interpretation console")
-        brand_copy.setObjectName("BrandCopy")
         sidebar_layout.addWidget(brand_mark)
         sidebar_layout.addWidget(brand)
-        sidebar_layout.addWidget(brand_copy)
         sidebar_layout.addSpacing(22)
 
         nav_label = QLabel("ANALYSIS")
@@ -480,17 +478,6 @@ class MainWindow(QMainWindow):
             sidebar_layout.addWidget(button)
         self.nav_buttons[0].setChecked(True)
         sidebar_layout.addStretch()
-
-        profile_label = QLabel("REFERENCE PROFILE")
-        profile_label.setObjectName("SidebarEyebrow")
-        sidebar_layout.addWidget(profile_label)
-        reference_profile = QLabel("SOMATIC   ·   hg19 / GRCh37")
-        reference_profile.setObjectName("ReferenceProfile")
-        sidebar_layout.addWidget(reference_profile)
-        local_note = QLabel("Local processing\nProvider credentials secured by Windows")
-        local_note.setObjectName("LocalNote")
-        local_note.setWordWrap(True)
-        sidebar_layout.addWidget(local_note)
         shell.addWidget(sidebar)
 
         content = QWidget()
@@ -578,24 +565,6 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         layout.setSpacing(14)
 
-        profile = QFrame()
-        profile.setObjectName("AnalysisProfile")
-        profile_layout = QHBoxLayout(profile)
-        profile_layout.setContentsMargins(16, 12, 16, 12)
-        profile_copy = QVBoxLayout()
-        profile_title = QLabel("Analysis profile")
-        profile_title.setObjectName("SectionTitle")
-        profile_help = QLabel("The interpretation run uses the required somatic and hg19 reference context.")
-        profile_help.setObjectName("HelperText")
-        profile_copy.addWidget(profile_title)
-        profile_copy.addWidget(profile_help)
-        profile_layout.addLayout(profile_copy, 1)
-        for text in ["SOMATIC", "hg19 / GRCh37", "5 EVIDENCE SOURCES"]:
-            chip = QLabel(text)
-            chip.setObjectName("ProfileChip")
-            profile_layout.addWidget(chip)
-        layout.addWidget(profile)
-
         files = QGroupBox("Analysis input")
         grid = QGridLayout(files)
         grid.setColumnStretch(1, 1)
@@ -676,6 +645,12 @@ class MainWindow(QMainWindow):
         toolbar_layout.addWidget(self.review_decision_combo)
         toolbar_layout.addWidget(self.review_count_label)
         layout.addWidget(toolbar)
+        self.review_flag_note = QLabel(
+            "Review flags identify variants with warnings or incomplete information that need manual attention; they are not automatically excluded."
+        )
+        self.review_flag_note.setObjectName("ReviewFlagNote")
+        self.review_flag_note.setWordWrap(True)
+        layout.addWidget(self.review_flag_note)
         self.variant_table = QTableWidget(0, 8)
         self.variant_table.setHorizontalHeaderLabels(
             ["Sample", "Gene", "HGVSc", "AF", "Depth", "Decision", "History", "Warnings"]
@@ -833,16 +808,9 @@ class MainWindow(QMainWindow):
             "Creates one image-led Excel evidence report per DIT/patient."
         )
         self.patient_excel_btn.clicked.connect(self._export_patient_excels)
-        self.patient_pdf_btn = QPushButton("Create Patient PDFs")
-        self.patient_pdf_btn.setEnabled(False)
-        self.patient_pdf_btn.setToolTip(
-            "Creates one clinical review PDF per DIT containing included variants and captured evidence."
-        )
-        self.patient_pdf_btn.clicked.connect(self._export_patient_pdfs)
         export_layout.addWidget(export_help, 1)
         export_layout.addWidget(self.rewrite_btn)
         export_layout.addWidget(self.patient_excel_btn)
-        export_layout.addWidget(self.patient_pdf_btn)
         layout.addWidget(exports)
 
         evidence_group = QGroupBox("Evidence matrix")
@@ -904,64 +872,47 @@ class MainWindow(QMainWindow):
         access_grid = QGridLayout(access_group)
         for column in range(1, 4):
             access_grid.setColumnStretch(column, 1)
-        for column, title in enumerate(["Provider", "API token", "Account email", "Password"]):
+        for column, title in enumerate(["Provider", "Web access", "Account email", "Password"]):
             header = QLabel(title)
             header.setObjectName("SettingsColumnHeader")
             access_grid.addWidget(header, 0, column)
 
-        self.clinvar_key_edit = QLineEdit(self.settings.clinvar_api_key)
-        self.clinvar_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.clinvar_key_edit.setPlaceholderText("Optional NCBI API key")
         self.cosmic_email_edit = QLineEdit(self.settings.cosmic_email)
         self.cosmic_password_edit = QLineEdit(self.settings.cosmic_password)
         self.cosmic_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.oncokb_key_edit = QLineEdit(self.settings.oncokb_api_key)
-        self.oncokb_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.oncokb_key_edit.setPlaceholderText("Optional API token")
         self.oncokb_email_edit = QLineEdit(self.settings.oncokb_email)
         self.oncokb_password_edit = QLineEdit(self.settings.oncokb_password)
         self.oncokb_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.franklin_key_edit = QLineEdit(self.settings.franklin_api_key)
-        self.franklin_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.franklin_key_edit.setPlaceholderText("Optional API token")
         self.franklin_email_edit = QLineEdit(self.settings.franklin_email)
         self.franklin_password_edit = QLineEdit(self.settings.franklin_password)
         self.franklin_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.mtbp_email_edit = QLineEdit(self.settings.mtbp_email)
         self.mtbp_password_edit = QLineEdit(self.settings.mtbp_password)
         self.mtbp_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        for password in [
-            self.cosmic_password_edit,
-            self.oncokb_password_edit,
-            self.franklin_password_edit,
-            self.mtbp_password_edit,
-        ]:
-            password.setPlaceholderText("Windows secured")
-
         def not_required() -> QLabel:
             label = QLabel("Not required")
             label.setObjectName("NotRequired")
             return label
 
+        def web_access(text: str) -> QLabel:
+            label = QLabel(text)
+            label.setObjectName("WebAccess")
+            return label
+
         provider_rows = [
-            ("ClinVar", self.clinvar_key_edit, not_required(), not_required()),
-            ("COSMIC", not_required(), self.cosmic_email_edit, self.cosmic_password_edit),
-            ("OncoKB", self.oncokb_key_edit, self.oncokb_email_edit, self.oncokb_password_edit),
-            ("Franklin", self.franklin_key_edit, self.franklin_email_edit, self.franklin_password_edit),
-            ("MTBP", not_required(), self.mtbp_email_edit, self.mtbp_password_edit),
+            ("ClinVar", web_access("Public website"), not_required(), not_required()),
+            ("COSMIC", web_access("Signed-in website"), self.cosmic_email_edit, self.cosmic_password_edit),
+            ("OncoKB", web_access("Signed-in website"), self.oncokb_email_edit, self.oncokb_password_edit),
+            ("Franklin", web_access("Signed-in website"), self.franklin_email_edit, self.franklin_password_edit),
+            ("MTBP", web_access("Signed-in website"), self.mtbp_email_edit, self.mtbp_password_edit),
         ]
-        for row, (provider, token, email, password) in enumerate(provider_rows, start=1):
+        for row, (provider, access, email, password) in enumerate(provider_rows, start=1):
             provider_label = QLabel(provider)
             provider_label.setObjectName("FieldLabel")
             access_grid.addWidget(provider_label, row, 0)
-            access_grid.addWidget(token, row, 1)
+            access_grid.addWidget(access, row, 1)
             access_grid.addWidget(email, row, 2)
             access_grid.addWidget(password, row, 3)
-        credential_note = QLabel(
-            "Passwords are stored by Windows Credential Manager and never written to patient reports."
-        )
-        credential_note.setObjectName("SecurityNote")
-        access_grid.addWidget(credential_note, 6, 1, 1, 3)
         layout.addWidget(access_group)
 
         safety_group = QGroupBox("Search safeguards")
@@ -974,14 +925,14 @@ class MainWindow(QMainWindow):
         self.browser_delay_spin.setSuffix(" s")
         self.browser_delay_spin.setValue(self.settings.browser_delay_seconds)
         self.browser_delay_spin.setToolTip(
-            "Minimum randomized pause between signed-in website searches and providers. APIs are not delayed."
+            "Minimum randomized pause between website searches and providers."
         )
         self.browser_delay_max_spin = QSpinBox()
         self.browser_delay_max_spin.setRange(0, 120)
         self.browser_delay_max_spin.setSuffix(" s")
         self.browser_delay_max_spin.setValue(self.settings.browser_delay_max_seconds)
         self.browser_delay_max_spin.setToolTip(
-            "Maximum randomized pause between signed-in website searches and providers. APIs are not delayed."
+            "Maximum randomized pause between website searches and providers."
         )
         delay_layout = QHBoxLayout()
         delay_layout.setContentsMargins(0, 0, 0, 0)
@@ -1001,9 +952,6 @@ class MainWindow(QMainWindow):
         safety_grid.addLayout(delay_layout, 1, 1)
         safety_grid.addWidget(QLabel("MTBP report timeout"), 2, 0)
         safety_grid.addWidget(self.mtbp_timeout_spin, 2, 1)
-        reference_note = QLabel("Reference context: Somatic · hg19 / GRCh37")
-        reference_note.setObjectName("ProfileNote")
-        safety_grid.addWidget(reference_note, 3, 1)
         layout.addWidget(safety_group)
 
         artifact_group = QGroupBox("Artifact exclusions")
@@ -1029,12 +977,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(artifact_group)
 
         save_row = QHBoxLayout()
-        saved_locally = QLabel("Configuration is stored locally for this Windows user.")
-        saved_locally.setObjectName("HelperText")
         save_btn = QPushButton("Save Configuration")
         save_btn.setObjectName("PrimaryButton")
         save_btn.clicked.connect(self._save_settings)
-        save_row.addWidget(saved_locally)
         save_row.addStretch()
         save_row.addWidget(save_btn)
         layout.addLayout(save_row)
@@ -1157,7 +1102,6 @@ class MainWindow(QMainWindow):
         self.browser_review_btn.setEnabled(True)
         self.rewrite_btn.setEnabled(True)
         self.patient_excel_btn.setEnabled(True)
-        self.patient_pdf_btn.setEnabled(True)
         self.load_selection_btn.setEnabled(True)
         self._set_ready()
         QMessageBox.information(self, "Complete", f"Workbook saved:\n{result.output_path}")
@@ -1173,10 +1117,8 @@ class MainWindow(QMainWindow):
         self._set_busy("Searching")
         variants = self._variants_for_search()
         self._log(f"Search scope: {len(variants)}/{self.result.total_count} variants")
-        browser_databases = self._selected_browser_databases(api_fallback_only=True)
-        api_databases = [
-            database for database in databases if database not in browser_databases
-        ]
+        browser_databases = self._selected_browser_databases()
+        api_databases: list[str] = []
         self.evidence = {}
         worker = DatabaseWorker(
             variants,
@@ -1252,19 +1194,10 @@ class MainWindow(QMainWindow):
         self._launch_browser_review(databases)
 
     def _selected_browser_databases(self, *, api_fallback_only: bool = False) -> list[str]:
-        databases = [
+        return [
             database
             for database in BROWSER_DATABASES
             if self.db_checks[database].isChecked()
-        ]
-        if not api_fallback_only:
-            return databases
-        return [
-            database for database in databases
-            if not (
-                (database == "OncoKB" and self.settings.oncokb_api_key)
-                or (database == "Franklin" and self.settings.franklin_api_key)
-            )
         ]
 
     def _launch_browser_review(self, databases: list[str]) -> None:
@@ -1437,46 +1370,6 @@ class MainWindow(QMainWindow):
             f"Created {len(outputs)} report(s):\n{report_directory}",
         )
 
-    def _export_patient_pdfs(self) -> None:
-        if not self.result:
-            return
-        default_parent = (
-            self.result.output_path.parent
-            if self.result.output_path
-            else Path(self.settings.default_output_dir)
-        )
-        selected = QFileDialog.getExistingDirectory(
-            self,
-            "Select folder for patient PDF reports",
-            str(default_parent),
-        )
-        if not selected:
-            return
-        output_stem = self.result.output_path.stem if self.result.output_path else "archer"
-        report_directory = Path(selected) / f"{output_stem}_patient_reports"
-        try:
-            outputs = PatientPdfReportWriter().write_all(
-                self.result,
-                report_directory,
-                self.evidence,
-            )
-        except Exception as exc:
-            QMessageBox.critical(self, "Patient PDF export failed", str(exc))
-            return
-        if not outputs:
-            QMessageBox.warning(
-                self,
-                "No patient PDFs created",
-                "No patients had variants with decision 'included'.",
-            )
-            return
-        self._log(f"Created {len(outputs)} patient PDF report(s) in {report_directory}")
-        QMessageBox.information(
-            self,
-            "Patient PDFs created",
-            f"Created {len(outputs)} report(s):\n{report_directory}",
-        )
-
     def _write_evidence_workbook(self) -> None:
         if not self.result or not self.result.output_path:
             return
@@ -1511,13 +1404,13 @@ class MainWindow(QMainWindow):
     def _save_settings(self, silent: bool = False) -> None:
         self.settings.history_workbook = self.history_edit.text()
         self.settings.default_output_dir = self.output_dir_edit.text()
-        self.settings.clinvar_api_key = self.clinvar_key_edit.text()
+        self.settings.clinvar_api_key = ""
         self.settings.cosmic_email = self.cosmic_email_edit.text()
         self.settings.cosmic_password = self.cosmic_password_edit.text()
-        self.settings.oncokb_api_key = self.oncokb_key_edit.text()
+        self.settings.oncokb_api_key = ""
         self.settings.oncokb_email = self.oncokb_email_edit.text()
         self.settings.oncokb_password = self.oncokb_password_edit.text()
-        self.settings.franklin_api_key = self.franklin_key_edit.text()
+        self.settings.franklin_api_key = ""
         self.settings.franklin_email = self.franklin_email_edit.text()
         self.settings.franklin_password = self.franklin_password_edit.text()
         self.settings.mtbp_email = self.mtbp_email_edit.text()
@@ -1683,7 +1576,6 @@ class MainWindow(QMainWindow):
         self.browser_signin_btn.setEnabled(False)
         self.browser_review_btn.setEnabled(False)
         self.rewrite_btn.setEnabled(False)
-        self.patient_pdf_btn.setEnabled(False)
         self.patient_excel_btn.setEnabled(False)
         self.status_bar.showMessage(label)
 
@@ -1696,7 +1588,6 @@ class MainWindow(QMainWindow):
         self.browser_signin_btn.setEnabled(True)
         self.browser_review_btn.setEnabled(self.result is not None)
         self.rewrite_btn.setEnabled(self.result is not None)
-        self.patient_pdf_btn.setEnabled(self.result is not None)
         self.patient_excel_btn.setEnabled(self.result is not None)
         self.status_bar.showMessage("Ready", 3000)
 
@@ -1746,11 +1637,6 @@ class MainWindow(QMainWindow):
                 font-weight: 750;
                 padding-top: 4px;
             }}
-            QLabel#BrandCopy {{
-                background: transparent;
-                color: #B9D8E8;
-                font-size: 12px;
-            }}
             QLabel#SidebarEyebrow {{
                 background: transparent;
                 color: #8FC5DD;
@@ -1780,23 +1666,6 @@ class MainWindow(QMainWindow):
             }}
             QPushButton#SidebarButton:focus {{
                 border: 2px solid #7DD3FC;
-            }}
-            QLabel#ReferenceProfile {{
-                color: #D9F6F3;
-                background: #0D394C;
-                border: 1px solid #2B6071;
-                border-radius: 7px;
-                padding: 8px 10px;
-                font-size: 11px;
-                font-weight: 700;
-            }}
-            QLabel#LocalNote {{
-                background: transparent;
-                color: #9BC1CF;
-                border: none;
-                border-radius: 8px;
-                padding: 8px 2px;
-                font-size: 11px;
             }}
             QLabel#PageEyebrow {{
                 color: {Palette.blue};
@@ -1889,14 +1758,10 @@ class MainWindow(QMainWindow):
                 border-radius: 8px;
             }}
             QFrame#ToolbarCard, QFrame#RunProgressCard,
-            QFrame#AnalysisProfile, QFrame#EvidenceCommand {{
+            QFrame#EvidenceCommand {{
                 background: {Palette.panel};
                 border: 1px solid {Palette.border};
                 border-radius: 9px;
-            }}
-            QFrame#AnalysisProfile {{
-                background: #EAF5F6;
-                border-left: 4px solid {Palette.cyan};
             }}
             QFrame#EvidenceCommand {{
                 background: #EEF7F8;
@@ -1909,15 +1774,6 @@ class MainWindow(QMainWindow):
             }}
             QLabel#RunProgressCount {{
                 color: {Palette.blue};
-                font-weight: 700;
-            }}
-            QLabel#ProfileChip, QLabel#ProfileNote {{
-                background: #DDF0F1;
-                color: #0A5966;
-                border: 1px solid #B7DCDD;
-                border-radius: 6px;
-                padding: 6px 9px;
-                font-size: 11px;
                 font-weight: 700;
             }}
             QCheckBox#SourceCard {{
@@ -1943,6 +1799,20 @@ class MainWindow(QMainWindow):
                 background: #F1F5F7;
                 border-radius: 6px;
                 padding: 8px;
+            }}
+            QLabel#WebAccess {{
+                color: #0A6570;
+                background: #E7F4F3;
+                border-radius: 6px;
+                padding: 8px;
+                font-weight: 650;
+            }}
+            QLabel#ReviewFlagNote {{
+                color: #7A5000;
+                background: {Palette.pale_yellow};
+                border: 1px solid #E7CF91;
+                border-radius: 7px;
+                padding: 8px 10px;
             }}
             QLabel#HelperText {{
                 color: {Palette.muted};

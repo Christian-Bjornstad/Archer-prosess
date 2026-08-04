@@ -13,14 +13,14 @@ The app is being rebuilt as a clean PyQt6 project with a stable processing core:
 
 Current database status:
 
-- ClinVar: NCBI E-utilities resolution followed by a focused browser capture of the variant title and germline/somatic classification summary.
+- ClinVar: public website resolution followed by a focused browser capture of the variant title and germline/somatic classification summary.
 - COSMIC: authenticated browser lookup by the Archer `COSMICID`, capturing the mutation Overview, Tissue distribution, and Samples filtered to `lymphoid`. The older NLM Clinical Tables v4 lookup remains in the service for basic/public records, but it does not provide these full website panels.
-- OncoKB: token-ready lookup when an API token is saved in Settings; otherwise the serial browser workflow can sign in using an OncoKB email/password stored in Windows Credential Manager.
-- Franklin: supported API lookup when a Premium token is configured; otherwise a serial browser lookup explicitly searches GRCh37/hg19 in Somatic mode, verifies the returned variant identity, and imports only the suggested classification. It captures the complete Somatic Clinical Evidence scroller, then Computed Classification through De Novo Data (excluding Add More Evidence), followed by the prediction/population panels after their render buffer. Anonymous Franklin access is limited, so saved browser login is recommended.
+- OncoKB: signed-in website lookup using the serial Microsoft Edge workflow.
+- Franklin: signed-in website lookup that explicitly searches GRCh37/hg19 in Somatic mode, verifies the returned variant identity, and imports only the suggested classification. It captures the complete Somatic Clinical Evidence scroller, then Computed Classification through De Novo Data (excluding Add More Evidence), followed by the prediction/population panels after their render buffer.
 - MTBP: login-assisted visible-browser batch submission and report parsing. Transcript HGVS is tried first; entries rejected by MTBP are retried as GRCh37 genomic HGVS derived from Archer coordinates/ref/alt. The app submits only gene/variant strings under a pseudonymous analysis ID, validates every returned row, and records pipeline/database versions. Its public instance is research-only.
 
-Evidence searches run patient-by-patient. For each patient, the selected public/API
-sources and websites run serially, with MTBP kept last for operational safety;
+Evidence searches run patient-by-patient. For each patient, the selected
+websites run serially, with MTBP kept last for operational safety;
 only then does the next patient start again at the first selected source.
 The **Included variants only** option is enabled by default, so excluded and
 flagged records are not sent to external database websites unless the option is
@@ -33,7 +33,7 @@ default report timeout. Queue waiting checks both the live queue and the exact
 pseudonymous entry in Reports List, recovering completed reports after transient
 navigation stalls without resubmitting the analysis. Completed patient evidence is saved to the workbook during
 the run so a later failure does not discard earlier patients.
-When a database search starts, the log reports each selected source as ready, token required, manual, rate limited, or error.
+When a database search starts, the log reports each selected source as a Microsoft Edge website lookup.
 
 ## Login-based browser review
 
@@ -46,14 +46,14 @@ does not install or launch Playwright, Node.js, Selenium, Selenium Manager, or a
 separate Edge WebDriver executable. Work-PC policy must allow the managed Edge
 binary and the Edge `RemoteDebuggingAllowed` policy.
 
-1. Choose a source under **Signed-in session**.
+1. Choose a source under **Browser provider**.
 2. Add COSMIC, OncoKB, Franklin and/or MTBP email/password in Settings. Passwords are encrypted
    by Windows Credential Manager and are never written to `config.json`.
-3. Click **Sign In / Refresh Session**. With saved credentials the app signs in
+3. Click **Sign In**. With saved credentials the app signs in
    and releases the Edge profile automatically. Manual login remains available.
 4. Set the randomized inter-search delay range, MTBP report timeout, and exact
    MTBP cancer type in Settings (defaults: 10-20 seconds, 20 minutes, and `Blood`).
-5. Select the desired sources and click **Run Browser Lookups**.
+5. Select the desired sources and click **Run Browser Sources**.
 
 The app uses a separate persistent Edge profile per provider under
 `%USERPROFILE%\.archer-prosess\browser_profiles`. Login passwords are stored by
@@ -121,24 +121,6 @@ without the separate screenshot folder because the images are embedded.
 The COSMIC text panel summarizes the captured page while the main
 database evidence cache retains the full source response for audit and later
 report refinement.
-
-## Patient PDF reports
-
-Use **Export Patient PDFs** after processing or evidence lookup to create one
-PDF per DIT identifier with included variants. Patient grouping uses the sample
-prefix before `_VPM_` and validates the expected `YYOUM#####` format, for example
-`26OUM00000` for a patient first registered in 2026. Reports are written to a
-dedicated `<workbook>_patient_reports` folder.
-
-Each patient PDF contains a decision-support summary, included variant details,
-AF and gnomAD AF, depth/AO, quality/caller, known IDs, warnings, normalized
-database evidence, source/screenshot links, capture and pipeline provenance,
-a clinical review checklist, a physician conclusion/signature area, and explicit
-limitations. A labeled evidence image appendix embeds every captured screenshot
-in MTBP, Franklin, ClinVar, OncoKB, and COSMIC order at readable scale with its source link and capture
-timestamp. Patients with no included variants do not receive a PDF. The
-reports do not make an automatic diagnosis or treatment recommendation, and any
-MTBP evidence retains its academic-research-only limitation.
 
 ## Run
 
