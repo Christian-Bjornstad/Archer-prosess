@@ -34,12 +34,11 @@ class AppSettings:
     artifact_rules: list[dict[str, str]] = field(default_factory=default_artifact_rules)
     enabled_databases: list[str] = field(
         default_factory=lambda: [
-            "ClinVar",
-            "gnomAD",
-            "COSMIC",
-            "Franklin",
-            "OncoKB",
             "MTBP",
+            "Franklin",
+            "ClinVar",
+            "OncoKB",
+            "COSMIC",
         ]
     )
 

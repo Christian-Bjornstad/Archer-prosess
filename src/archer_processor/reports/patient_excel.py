@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -16,9 +16,9 @@ from PIL import Image as PillowImage
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
 
 
-REPORT_DATABASES = ("ClinVar", "gnomAD", "COSMIC", "Franklin", "OncoKB", "MTBP")
-TEXT_DATABASES = ("ClinVar", "gnomAD", "COSMIC")
-IMAGE_DATABASES = ("COSMIC", "Franklin", "OncoKB", "MTBP")
+REPORT_DATABASES = ("MTBP", "Franklin", "ClinVar", "OncoKB", "COSMIC")
+TEXT_DATABASES = REPORT_DATABASES
+IMAGE_DATABASES = REPORT_DATABASES
 COSMIC_FIELDS = (
     "AccessionNumber",
     "GeneCDS_Length",
@@ -86,17 +86,18 @@ class PatientExcelReportWriter:
         result: ProcessingResult,
         output_directory: Path,
         evidence: dict[str, list[DatabaseEvidence]] | None = None,
+        variants: list[VariantRecord] | None = None,
     ) -> list[Path]:
         evidence = evidence or {}
         grouped: dict[str, list[VariantRecord]] = defaultdict(list)
-        for variant in result.included:
+        report_variants = result.included if variants is None else variants
+        for variant in report_variants:
             grouped[variant.patient_id].append(variant)
         output_directory.mkdir(parents=True, exist_ok=True)
         outputs: list[Path] = []
-        safe_date = re.sub(r"[^0-9-]", "", result.run_date) or "undated"
         for patient_id, variants in sorted(grouped.items()):
             safe_patient = re.sub(r"[^A-Za-z0-9_-]+", "_", patient_id).strip("_")
-            output = output_directory / f"{safe_patient}_evidence_report_{safe_date}.xlsx"
+            output = output_directory / f"{safe_patient}_VPM_Tolkning.xlsx"
             self.write_patient(result, patient_id, variants, output, evidence)
             outputs.append(output)
         return outputs
@@ -110,9 +111,26 @@ class PatientExcelReportWriter:
         evidence: dict[str, list[DatabaseEvidence]],
     ) -> Path:
         workbook = Workbook()
-        ws = workbook.active
-        ws.title = "Report"
-        self._report_sheet(ws, patient_id, variants, evidence)
+        placeholder = workbook.active
+        self._overview_sheet(workbook, result, patient_id, variants, evidence)
+        workbook.remove(placeholder)
+        self._attachment_sheet(workbook, patient_id)
+        gene_counts = Counter((variant.symbol or "Variant").casefold() for variant in variants)
+        used_names = {"Oversikt", "Vedlegg"}
+        for index, variant in enumerate(variants, start=1):
+            title = self._variant_sheet_name(
+                variant,
+                index,
+                used_names,
+                duplicate_gene=gene_counts[(variant.symbol or "Variant").casefold()] > 1,
+            )
+            used_names.add(title)
+            self._variant_sheet(
+                workbook,
+                title,
+                variant,
+                evidence.get(self._key(variant), []),
+            )
         output_path.parent.mkdir(parents=True, exist_ok=True)
         workbook.save(output_path)
         return output_path
@@ -212,40 +230,42 @@ class PatientExcelReportWriter:
         variants: list[VariantRecord],
         evidence: dict[str, list[DatabaseEvidence]],
     ) -> None:
-        ws = workbook.create_sheet("Overview")
+        ws = workbook.create_sheet("Oversikt")
         self._base_sheet(ws)
         ws.sheet_properties.tabColor = self.colors["navy"]
-        ws.merge_cells("A1:L2")
-        ws["A1"] = "Patient Variant Evidence Report"
+        ws.merge_cells("A1:I2")
+        ws["A1"] = f"VPM-tolkning – {patient_id}"
         self._title_style(ws["A1"])
-        ws.merge_cells("A3:L3")
+        ws.merge_cells("A3:I3")
         ws["A3"] = (
-            "Image-led evidence review • source data must be verified before clinical use • "
-            "MTBP public output is research-only"
+            "Kort evidensoversikt. Klikk på databaseresultatene for å åpne kilden. "
+            "Alle funn må verifiseres før klinisk bruk."
         )
         ws["A3"].font = Font(size=10, italic=True, color=self.colors["muted"])
         ws["A3"].alignment = Alignment(wrap_text=True, vertical="center")
-        self._info_row(ws, 5, "DIT identifier", patient_id)
-        self._info_row(ws, 6, "Report date", result.run_date)
-        self._info_row(ws, 7, "Input file", str(result.input_path))
-        self._info_row(ws, 8, "Included variants", len(variants))
+        self._info_row(ws, 5, "DIT/pasientnummer", patient_id, end_column=9)
+        self._info_row(ws, 6, "Rapportdato", result.run_date, end_column=9)
+        self._info_row(ws, 7, "Antall varianter", len(variants), end_column=9)
 
-        ws.merge_cells("A10:L10")
-        ws["A10"] = "Included variants and evidence availability"
-        self._section_style(ws["A10"])
-        headers = ["Gene", "HGVSc", "HGVSp", "AF", *REPORT_DATABASES]
+        ws.merge_cells("A9:I9")
+        ws["A9"] = "Varianter og signifikant evidens"
+        self._section_style(ws["A9"])
+        headers = ["Gen", "HGVSc", "HGVSp", "Kort evidens", *REPORT_DATABASES]
         for column, header in enumerate(headers, start=1):
-            cell = ws.cell(11, column, header)
+            cell = ws.cell(10, column, header)
             self._header_style(cell)
-        for row, variant in enumerate(variants, start=12):
+        for row, variant in enumerate(variants, start=11):
             by_database = self._by_database(evidence.get(self._key(variant), []))
             values: list[Any] = [
                 variant.symbol,
                 variant.hgvsc,
                 variant.hgvsp,
-                variant.af,
+                "\n".join(
+                    f"{database} - {self._compact_evidence(by_database.get(database, []))}"
+                    for database in REPORT_DATABASES
+                ),
                 *[
-                    self._status_text(by_database.get(database, []))
+                    self._compact_evidence(by_database.get(database, []))
                     for database in REPORT_DATABASES
                 ],
             ]
@@ -253,12 +273,32 @@ class PatientExcelReportWriter:
                 cell = ws.cell(row, column, value)
                 cell.border = self._border()
                 cell.alignment = Alignment(vertical="top", wrap_text=True)
-            if variant.af is not None:
-                ws.cell(row, 4).number_format = "0.00%"
-            ws.row_dimensions[row].height = 32
-        ws.auto_filter.ref = f"A11:J{max(11, 11 + len(variants))}"
-        ws.freeze_panes = "A11"
-        ws.print_area = f"A1:L{max(18, 12 + len(variants))}"
+            for offset, database in enumerate(REPORT_DATABASES, start=5):
+                items = by_database.get(database, [])
+                if items and items[0].url:
+                    ws.cell(row, offset).hyperlink = items[0].url
+                    ws.cell(row, offset).style = "Hyperlink"
+                    ws.cell(row, offset).alignment = Alignment(
+                        vertical="top", wrap_text=True
+                    )
+            ws.row_dimensions[row].height = 76
+        ws.column_dimensions["A"].width = 14
+        ws.column_dimensions["B"].width = 31
+        ws.column_dimensions["C"].width = 25
+        ws.column_dimensions["D"].width = 52
+        for column in "EFGHI":
+            ws.column_dimensions[column].width = 22
+        ws.auto_filter.ref = f"A10:I{max(10, 10 + len(variants))}"
+        ws.freeze_panes = "A10"
+        ws.print_area = f"A1:I{max(16, 11 + len(variants))}"
+
+    def _attachment_sheet(self, workbook: Workbook, patient_id: str) -> None:
+        ws = workbook.create_sheet("Vedlegg")
+        self._base_sheet(ws)
+        ws.sheet_properties.tabColor = self.colors["muted"]
+        ws["A1"] = patient_id
+        ws["A1"].font = Font(size=18, bold=True, color=self.colors["navy"])
+        ws.column_dimensions["A"].width = max(18, len(patient_id) + 4)
 
     def _variant_sheet(
         self,
@@ -271,7 +311,7 @@ class PatientExcelReportWriter:
         self._base_sheet(ws)
         by_database = self._by_database(evidence_items)
         ws.merge_cells("A1:L2")
-        ws["A1"] = f"{variant.symbol}  {variant.hgvsc}"
+        ws["A1"] = self._variant_heading(variant)
         self._title_style(ws["A1"])
         ws.merge_cells("A3:L3")
         ws["A3"] = " | ".join(
@@ -290,16 +330,15 @@ class PatientExcelReportWriter:
 
         row = 5
         ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
-        ws.cell(row, 1, "Structured database evidence")
+        ws.cell(row, 1, "Kort evidensoversikt og kildelenker")
         self._section_style(ws.cell(row, 1))
         row += 1
-        for database in TEXT_DATABASES:
+        for database in REPORT_DATABASES:
             items = by_database.get(database, [])
-            text = self._text_evidence(items)
             ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=2)
             ws.merge_cells(start_row=row, start_column=3, end_row=row, end_column=12)
             label = ws.cell(row, 1, database)
-            value = ws.cell(row, 3, text)
+            value = ws.cell(row, 3, self._compact_evidence(items))
             label.fill = PatternFill("solid", fgColor=self.colors["pale_blue"])
             label.font = Font(bold=True, color=self.colors["navy"])
             label.alignment = Alignment(vertical="top")
@@ -310,12 +349,16 @@ class PatientExcelReportWriter:
             if items and items[0].url:
                 label.hyperlink = items[0].url
                 label.style = "Hyperlink"
-            ws.row_dimensions[row].height = 86 if database == "COSMIC" else 60
+            if items and items[0].url:
+                value.hyperlink = items[0].url
+                value.style = "Hyperlink"
+                value.alignment = Alignment(vertical="top", wrap_text=True)
+            ws.row_dimensions[row].height = 34
             row += 1
 
         row += 1
         ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
-        ws.cell(row, 1, "Captured website evidence")
+        ws.cell(row, 1, "Skjermbilder")
         self._section_style(ws.cell(row, 1))
         row += 1
         for database in IMAGE_DATABASES:
@@ -327,7 +370,7 @@ class PatientExcelReportWriter:
             row += 1
             if not records:
                 ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
-                ws.cell(row, 1, self._text_evidence(items) or "No captured screenshot available.")
+                ws.cell(row, 1, "Skjermbilde ikke tilgjengelig.")
                 ws.cell(row, 1).alignment = Alignment(wrap_text=True, vertical="top")
                 ws.cell(row, 1).fill = PatternFill("solid", fgColor=self.colors["pale_orange"])
                 ws.row_dimensions[row].height = 42
@@ -505,9 +548,11 @@ class PatientExcelReportWriter:
         ws.page_margins.top = 0.4
         ws.page_margins.bottom = 0.4
 
-    def _info_row(self, ws, row: int, label: str, value: Any) -> None:
+    def _info_row(
+        self, ws, row: int, label: str, value: Any, *, end_column: int = 12
+    ) -> None:
         ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=2)
-        ws.merge_cells(start_row=row, start_column=3, end_row=row, end_column=12)
+        ws.merge_cells(start_row=row, start_column=3, end_row=row, end_column=end_column)
         ws.cell(row, 1, label)
         ws.cell(row, 3, value)
         ws.cell(row, 1).font = Font(bold=True, color=self.colors["navy"])
@@ -559,15 +604,53 @@ class PatientExcelReportWriter:
         return Border(left=side, right=side, top=side, bottom=side)
 
     def _variant_sheet_name(
-        self, variant: VariantRecord, index: int, used_names: set[str]
+        self,
+        variant: VariantRecord,
+        index: int,
+        used_names: set[str],
+        *,
+        duplicate_gene: bool,
     ) -> str:
-        base = re.sub(r"[\\/*?:\[\]]+", "_", variant.symbol or f"Variant {index}")[:24]
-        name = f"{index:02d} {base}"[:31]
+        gene = variant.symbol or f"Variant {index}"
+        detail = ""
+        if duplicate_gene:
+            detail = (variant.hgvsp or "").split(":", 1)[-1]
+            if not detail:
+                detail = (variant.hgvsc or "").split(":", 1)[-1]
+        base = f"{gene} {detail}".strip()
+        name = re.sub(r"[\\/*?:\[\]]+", "_", base)[:31]
         suffix = 2
-        while name in used_names:
-            name = f"{index:02d} {base[:24]}-{suffix}"[:31]
+        used_casefold = {used.casefold() for used in used_names}
+        while name.casefold() in used_casefold:
+            suffix_text = f"-{suffix}"
+            name = f"{base[:31 - len(suffix_text)]}{suffix_text}"
             suffix += 1
         return name
+
+    def _compact_evidence(self, items: list[DatabaseEvidence]) -> str:
+        if not items:
+            return "Ikke søkt"
+        item = next((candidate for candidate in items if candidate.status == "found"), items[0])
+        if item.clinical_significance:
+            return item.clinical_significance.strip()
+        for pattern in (
+            r"classification=([^;|]+)",
+            r"oncogenic(?:ity)?=([^;|]+)",
+            r"functional_relevance=([^;|]+)",
+        ):
+            match = re.search(pattern, item.summary, flags=re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+        status_labels = {
+            "found": "Funnet",
+            "not_found": "Ikke funnet",
+            "invalid_query": "Mangler søkegrunnlag",
+            "login_required": "Innlogging kreves",
+            "rate_limited": "Ratebegrenset",
+            "error": "Feil",
+            "ambiguous_result": "Tvetydig resultat",
+        }
+        return status_labels.get(item.status, item.status.replace("_", " ").title())
 
     def _text_evidence(self, items: list[DatabaseEvidence]) -> str:
         if not items:

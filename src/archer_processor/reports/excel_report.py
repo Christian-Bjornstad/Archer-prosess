@@ -16,11 +16,10 @@ from archer_processor.core.models import DatabaseEvidence, ProcessingResult, Var
 
 DEFAULT_DATABASE_COLUMNS = [
     "ClinVar",
-    "gnomAD",
-    "COSMIC",
+    "MTBP",
     "Franklin",
     "OncoKB",
-    "MTBP",
+    "COSMIC",
 ]
 
 
@@ -45,12 +44,16 @@ class ExcelReportWriter:
         output_path: Path,
         evidence: dict[str, list[DatabaseEvidence]] | None = None,
         hide_excluded: bool = True,
+        database_skip_keys: set[str] | None = None,
     ) -> Path:
         evidence = evidence or {}
         workbook = Workbook()
         workbook.remove(workbook.active)
         self._summary_sheet(workbook, result, evidence)
         self._included_sheet(workbook, result.included, evidence)
+        self._database_selection_sheet(
+            workbook, result.variants, database_skip_keys or set()
+        )
         self._database_sheet(
             workbook, result.variants, evidence, output_path.parent
         )
@@ -72,6 +75,68 @@ class ExcelReportWriter:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         workbook.save(output_path)
         return output_path
+
+    def _database_selection_sheet(
+        self,
+        workbook: Workbook,
+        variants: list[VariantRecord],
+        skip_keys: set[str],
+    ) -> None:
+        """Editable review queue: mark X only for variants that should be skipped."""
+        ws = workbook.create_sheet("Database Selection")
+        ws.sheet_properties.tabColor = self.colors["yellow"]
+        headers = [
+            "Skip Database Search (X)",
+            "Patient",
+            "Sample",
+            "Gene",
+            "HGVSc",
+            "HGVSp",
+            "AF",
+            "Depth",
+            "Decision",
+            "Decision Reason",
+            "Consequence",
+            "Clinical Significance",
+            "History",
+            "Warnings",
+        ]
+        self._headers(ws, headers)
+        ws["A1"].fill = PatternFill("solid", fgColor=self.colors["yellow"])
+        ws["A1"].font = Font(bold=True, color=self.colors["navy"])
+        for row_index, variant in enumerate(variants, start=2):
+            values = [
+                "X" if self._key(variant) in skip_keys else "",
+                variant.patient_id,
+                variant.sample,
+                variant.symbol,
+                variant.hgvsc,
+                variant.hgvsp,
+                variant.af,
+                variant.depth,
+                variant.decision,
+                variant.decision_reason,
+                variant.consequence,
+                variant.clinical_significance,
+                "\n".join(str(item) for item in variant.history_matches),
+                "\n".join(variant.warnings),
+            ]
+            for column, value in enumerate(values, start=1):
+                cell = ws.cell(row_index, column, value)
+                cell.border = self._border()
+                cell.alignment = Alignment(
+                    vertical="top", wrap_text=column in {10, 11, 12, 13, 14}
+                )
+            ws.cell(row_index, 1).fill = PatternFill(
+                "solid", fgColor=self.colors["yellow"]
+            )
+            ws.cell(row_index, 1).alignment = Alignment(horizontal="center")
+            if variant.af is not None:
+                ws.cell(row_index, 7).number_format = "0.00%"
+        ws.freeze_panes = "C2"
+        ws.auto_filter.ref = f"A1:N{max(1, len(variants) + 1)}"
+        self._fit(ws, max_width=48)
+        ws.column_dimensions["A"].width = 25
 
     def _summary_sheet(
         self,

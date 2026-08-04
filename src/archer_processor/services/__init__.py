@@ -4,6 +4,7 @@ from .browser_review import (
     BrowserReviewService,
 )
 from .database_search import DatabaseSearchService
+from .database_selection import load_database_skip_keys
 from .settings import AppSettings
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "BrowserAutomationUnavailable",
     "BrowserReviewService",
     "DatabaseSearchService",
+    "load_database_skip_keys",
 ]

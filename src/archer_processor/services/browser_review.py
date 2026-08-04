@@ -15,12 +15,13 @@ from urllib.parse import quote
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
 
 
-BROWSER_DATABASES = ("COSMIC", "OncoKB", "Franklin", "MTBP")
+BROWSER_DATABASES = ("COSMIC", "OncoKB", "Franklin", "ClinVar", "MTBP")
 MTBP_REPORTS_URL = "https://mtbp.org/patients/"
 MTBP_REPORT_LIMIT = 10
 MTBP_ARCHER_CLEANUP_THRESHOLD = 6
 
 LOGIN_URLS = {
+    "ClinVar": "https://www.ncbi.nlm.nih.gov/clinvar/",
     "COSMIC": "https://cancer.sanger.ac.uk/cosmic/login",
     "OncoKB": "https://www.oncokb.org/login",
     "Franklin": "https://franklin.genoox.com/login",
@@ -60,6 +61,7 @@ class BrowserReviewService:
         navigation_timeout_ms: int = 45_000,
         analysis_timeout_ms: int = 1_200_000,
         mtbp_cancer_type: str = "Blood",
+        clinvar_api_key: str = "",
         cosmic_email: str = "",
         cosmic_password: str = "",
         oncokb_email: str = "",
@@ -77,6 +79,7 @@ class BrowserReviewService:
         self.navigation_timeout_ms = navigation_timeout_ms
         self.analysis_timeout_ms = analysis_timeout_ms
         self.mtbp_cancer_type = mtbp_cancer_type.strip() or "Blood"
+        self.clinvar_api_key = clinvar_api_key.strip()
         self.cosmic_email = cosmic_email.strip()
         self.cosmic_password = cosmic_password
         self.oncokb_email = oncokb_email.strip()
@@ -131,6 +134,12 @@ class BrowserReviewService:
             return (
                 "https://www.oncokb.org/gene/"
                 f"{quote(variant.symbol, safe='')}/somatic/{quote(alteration, safe='')}"
+            )
+        if database == "ClinVar":
+            query = variant.hgvsc or _review_query(variant)
+            return (
+                "https://www.ncbi.nlm.nih.gov/clinvar/?term="
+                f"{quote(query, safe='')}"
             )
         if database == "Franklin":
             return FRANKLIN_HOME_URL if _franklin_search_query(variant) else ""
@@ -236,6 +245,12 @@ class BrowserReviewService:
             )
         if database == "COSMIC":
             return self._search_cosmic(
+                variants,
+                artifact_directory,
+                progress=progress,
+            )
+        if database == "ClinVar":
+            return self._search_clinvar(
                 variants,
                 artifact_directory,
                 progress=progress,
@@ -427,6 +442,142 @@ class BrowserReviewService:
                 except playwright_error:
                     pass
         return results
+
+    def _search_clinvar(
+        self,
+        variants: list[VariantRecord],
+        artifact_directory: Path,
+        *,
+        progress: Callable[[str], None] | None,
+    ) -> dict[str, DatabaseEvidence]:
+        """Resolve ClinVar through E-utilities, then capture its summary card."""
+        from archer_processor.services.database_search import DatabaseSearchService
+        from archer_processor.services.settings import AppSettings
+
+        sync_playwright, playwright_error, _ = self._playwright_api()
+        artifact_directory.mkdir(parents=True, exist_ok=True)
+        api_service = DatabaseSearchService(
+            AppSettings(clinvar_api_key=self.clinvar_api_key)
+        )
+        results: dict[str, DatabaseEvidence] = {}
+        with sync_playwright() as runtime:
+            try:
+                context = runtime.chromium.launch_persistent_context(
+                    str(self.profile_directory("ClinVar")),
+                    channel=self.channel,
+                    headless=False,
+                    accept_downloads=True,
+                    viewport={"width": 1440, "height": 1000},
+                )
+            except Exception as exc:
+                raise BrowserAutomationUnavailable(
+                    "Could not start ClinVar because its Edge profile is in use. "
+                    "Close any ClinVar Edge window and retry."
+                ) from exc
+            page = context.pages[0] if context.pages else context.new_page()
+            try:
+                for index, variant in enumerate(variants, start=1):
+                    key = self.variant_key(variant)
+                    if progress:
+                        progress(
+                            f"ClinVar browser lookup {index}/{len(variants)}: "
+                            f"{variant.hgvsc or variant.display_name}"
+                        )
+                    api_evidence = api_service.search_variant(variant, ["ClinVar"])[0]
+                    if api_evidence.status != "found" or not api_evidence.url:
+                        results[key] = api_evidence
+                        continue
+                    try:
+                        page.goto(
+                            api_evidence.url,
+                            wait_until="domcontentloaded",
+                            timeout=self.navigation_timeout_ms,
+                        )
+                        results[key] = self._capture_clinvar_result(
+                            variant,
+                            api_evidence,
+                            page,
+                            artifact_directory,
+                        )
+                    except Exception as exc:
+                        results[key] = DatabaseEvidence(
+                            database="ClinVar",
+                            status="error",
+                            summary=f"ClinVar summary capture failed: {exc}",
+                            accession=api_evidence.accession,
+                            clinical_significance=api_evidence.clinical_significance,
+                            url=api_evidence.url,
+                            raw={**api_evidence.raw},
+                        )
+                    if index < len(variants):
+                        self._wait_between_queries(page, "ClinVar", progress=progress)
+            finally:
+                try:
+                    context.close()
+                except playwright_error:
+                    pass
+        return results
+
+    def _capture_clinvar_result(
+        self,
+        variant: VariantRecord,
+        api_evidence: DatabaseEvidence,
+        page: Any,
+        artifact_directory: Path,
+    ) -> DatabaseEvidence:
+        title = page.locator("main div.functions-container")
+        summary = page.locator("#germline-somatic-info")
+        title.wait_for(state="visible", timeout=self.navigation_timeout_ms)
+        summary.wait_for(state="visible", timeout=self.navigation_timeout_ms)
+        title_box = title.bounding_box()
+        summary_box = summary.bounding_box()
+        if title_box is None or summary_box is None:
+            raise RuntimeError("ClinVar classification summary was not visible.")
+        left = min(title_box["x"], summary_box["x"])
+        top = min(title_box["y"], summary_box["y"])
+        right = max(
+            title_box["x"] + title_box["width"],
+            summary_box["x"] + summary_box["width"],
+        )
+        bottom = max(
+            title_box["y"] + title_box["height"],
+            summary_box["y"] + summary_box["height"],
+        )
+        screenshot_path = self._screenshot_path(
+            artifact_directory, "ClinVar", variant
+        )
+        page.screenshot(
+            path=str(screenshot_path),
+            clip={
+                "x": max(0, left),
+                "y": max(0, top),
+                "width": right - left,
+                "height": bottom - top,
+            },
+        )
+        summary_text = " ".join(summary.inner_text().split())
+        evidence = DatabaseEvidence(
+            database="ClinVar",
+            status="found",
+            summary=api_evidence.summary,
+            accession=api_evidence.accession,
+            clinical_significance=api_evidence.clinical_significance,
+            url=page.url,
+            raw={
+                **api_evidence.raw,
+                "classification_summary": summary_text,
+                "screenshot": str(screenshot_path),
+                "screenshots": [
+                    {
+                        "label": "Classification summary",
+                        "path": str(screenshot_path),
+                        "url": page.url,
+                    }
+                ],
+            },
+        )
+        self._write_audit(evidence, screenshot_path.with_suffix(".audit.json"))
+        return evidence
 
     def _wait_for_cosmic_result(self, page: Any) -> None:
         overview = page.get_by_role("heading", name="Overview", exact=True)
@@ -1603,6 +1754,8 @@ class BrowserReviewService:
             )
         if database == "Franklin":
             return not self._login_required(database, page.url) and page.locator("#email").count() == 0
+        if database == "ClinVar":
+            return True
         if database == "MTBP":
             return (
                 not self._login_required(database, page.url)

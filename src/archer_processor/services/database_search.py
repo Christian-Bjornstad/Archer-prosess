@@ -120,7 +120,9 @@ class DatabaseSearchService:
                 diagnostics[database] = "context only (allele ID/dbSNP cross-links)"
             elif database == "cBioPortal":
                 diagnostics[database] = "ready (public cohort context)"
-            elif database in {"ClinVar", "OncoKB"}:
+            elif database == "ClinVar":
+                diagnostics[database] = "browser summary capture (NCBI E-utilities resolution)"
+            elif database == "OncoKB":
                 diagnostics[database] = "ready"
             else:
                 diagnostics[database] = "manual"

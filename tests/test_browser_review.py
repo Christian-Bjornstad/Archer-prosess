@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from archer_processor.io import ArcherTsvReader
-from archer_processor.core.models import VariantRecord
+from archer_processor.core.models import DatabaseEvidence, VariantRecord
 from archer_processor.services.browser_review import (
     BrowserReviewService,
     FRANKLIN_ASSESSMENT_RENDER_BUFFER_MS,
@@ -34,6 +34,9 @@ def test_browser_query_urls_use_normalized_variant_identity(tmp_path):
         "https://franklin.genoox.com/clinical-db/home"
     )
     assert service.query_url("MTBP", variant) == "https://mtbp.org/analyse/"
+    assert service.query_url("ClinVar", variant).startswith(
+        "https://www.ncbi.nlm.nih.gov/clinvar/?term="
+    )
     assert service.query_url("COSMIC", variant) == (
         "https://cancer.sanger.ac.uk/cosmic/mutation/overview?id=10648"
     )
@@ -216,6 +219,68 @@ def test_franklin_visible_page_parser_returns_only_classification():
     assert evidence.clinical_significance == "Pathogenic"
     assert evidence.summary == "classification=Pathogenic;"
     assert evidence.raw == {"classification": "Pathogenic"}
+
+
+def test_clinvar_capture_is_cropped_to_title_and_classification_summary(tmp_path):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+    api_evidence = DatabaseEvidence(
+        "ClinVar",
+        "found",
+        "TP53 variant | Significance: Pathogenic",
+        accession="VCV000012345.1",
+        clinical_significance="Pathogenic",
+        url="https://www.ncbi.nlm.nih.gov/clinvar/variation/12345/",
+        raw={"clinvar_id": "12345"},
+    )
+
+    class Locator:
+        def __init__(self, box, text=""):
+            self.box = box
+            self.text = text
+
+        def wait_for(self, **kwargs):
+            pass
+
+        def bounding_box(self):
+            return self.box
+
+        def inner_text(self):
+            return self.text
+
+    class Page:
+        url = "https://www.ncbi.nlm.nih.gov/clinvar/variation/12345/"
+
+        def __init__(self):
+            self.capture = None
+
+        def locator(self, selector):
+            if selector == "main div.functions-container":
+                return Locator({"x": 100, "y": 200, "width": 1000, "height": 80})
+            assert selector == "#germline-somatic-info"
+            return Locator(
+                {"x": 120, "y": 280, "width": 960, "height": 330},
+                "Germline\nClassification\nPathogenic\nSomatic\nNo data submitted",
+            )
+
+        def screenshot(self, **kwargs):
+            self.capture = kwargs
+
+    page = Page()
+
+    evidence = service._capture_clinvar_result(
+        variant, api_evidence, page, tmp_path
+    )
+
+    assert evidence.status == "found"
+    assert evidence.clinical_significance == "Pathogenic"
+    assert evidence.raw["screenshots"][0]["label"] == "Classification summary"
+    assert page.capture["clip"] == {
+        "x": 100,
+        "y": 200,
+        "width": 1000,
+        "height": 410,
+    }
 
 
 def test_franklin_primary_capture_uses_full_page(tmp_path):

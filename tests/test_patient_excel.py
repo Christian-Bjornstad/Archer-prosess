@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import openpyxl
@@ -5,23 +6,26 @@ from PIL import Image
 
 from archer_processor.core import DatabaseEvidence, VariantProcessor
 from archer_processor.reports import PatientExcelReportWriter
+from archer_processor.reports.patient_excel import IMAGE_DATABASES
 from archer_processor.services import DatabaseSearchService
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
 
 
-def test_patient_excel_report_uses_one_image_led_sheet(tmp_path):
+def test_patient_excel_report_uses_requested_sheet_layout_and_image_order(tmp_path):
     result = VariantProcessor().process(
         FIXTURE, "2026-08-03", tmp_path / "review.xlsx"
     )
     variant = result.variants[3]
     image_paths = []
     for name, size, color in [
+        ("mtbp.png", (1200, 600), "#FFF3E8"),
         ("franklin-full.png", (1400, 2000), "#D9EAF7"),
         ("franklin-assessment.png", (1400, 500), "#EAF3FA"),
+        ("clinvar.png", (1200, 450), "#F3F6F8"),
         ("oncokb.png", (1400, 700), "#EAF5ED"),
-        ("mtbp.png", (1200, 600), "#FFF3E8"),
+        ("cosmic.png", (1400, 700), "#EAF3FA"),
     ]:
         path = tmp_path / name
         Image.new("RGB", size, color).save(path)
@@ -36,13 +40,13 @@ def test_patient_excel_report_uses_one_image_led_sheet(tmp_path):
                 accession="VCV000012345.1",
                 clinical_significance="Pathogenic",
                 url="https://www.ncbi.nlm.nih.gov/clinvar/variation/12345/",
-            ),
-            DatabaseEvidence(
-                "gnomAD",
-                "found",
-                "aggregated_AF=0.001%; homozygotes=0",
-                accession="17-7578406-G-A",
-                url="https://gnomad.broadinstitute.org/variant/example",
+                raw={
+                    "screenshots": [{
+                        "label": "Classification summary",
+                        "path": str(image_paths[3]),
+                        "url": "https://www.ncbi.nlm.nih.gov/clinvar/variation/12345/",
+                    }]
+                },
             ),
             DatabaseEvidence(
                 "COSMIC",
@@ -76,6 +80,11 @@ def test_patient_excel_report_uses_one_image_led_sheet(tmp_path):
                             "GRChVer": "37",
                         },
                     ],
+                    "screenshots": [{
+                        "label": "Overview",
+                        "path": str(image_paths[5]),
+                        "url": "https://cancer.sanger.ac.uk/cosmic/example",
+                    }],
                 },
             ),
             DatabaseEvidence(
@@ -88,12 +97,12 @@ def test_patient_excel_report_uses_one_image_led_sheet(tmp_path):
                     "screenshots": [
                         {
                             "label": "Full computed-classification page",
-                            "path": str(image_paths[0]),
+                            "path": str(image_paths[1]),
                             "url": "https://franklin.genoox.com/example",
                         },
                         {
                             "label": "Predictions and population frequencies",
-                            "path": str(image_paths[1]),
+                            "path": str(image_paths[2]),
                             "url": "https://franklin.genoox.com/example?app=assessment-tools",
                         },
                     ]
@@ -108,7 +117,7 @@ def test_patient_excel_report_uses_one_image_led_sheet(tmp_path):
                     "screenshots": [
                         {
                             "label": "Variant overview and mutation effect",
-                            "path": str(image_paths[2]),
+                            "path": str(image_paths[4]),
                             "url": "https://www.oncokb.org/example",
                         }
                     ]
@@ -123,7 +132,7 @@ def test_patient_excel_report_uses_one_image_led_sheet(tmp_path):
                     "screenshots": [
                         {
                             "label": "Alteration-centric functional evidence",
-                            "path": str(image_paths[3]),
+                            "path": str(image_paths[0]),
                             "url": "https://mtbp.org/example",
                         }
                     ]
@@ -142,12 +151,55 @@ def test_patient_excel_report_uses_one_image_led_sheet(tmp_path):
     )
 
     workbook = openpyxl.load_workbook(output)
-    assert workbook.sheetnames == ["Report"]
-    report = workbook["Report"]
-    assert report["A1"].value == "Patient ID: 26OUM00004"
-    assert report["A3"].value == "TP53 | NM_000546.6:c.524G>A | p.R175H"
-    assert report["A4"].value == "ClinVar"
-    assert report["A5"].value == "gnomAD"
-    assert report["A6"].value == "COSMIC"
-    assert len(report._images) == 4
+    assert workbook.sheetnames == ["Oversikt", "Vedlegg", "TP53"]
+    overview = workbook["Oversikt"]
+    assert overview["A1"].value == "VPM-tolkning – 26OUM00004"
+    assert [overview.cell(10, column).value for column in range(1, 10)] == [
+        "Gen", "HGVSc", "HGVSp", "Kort evidens",
+        "MTBP", "Franklin", "ClinVar", "OncoKB", "COSMIC",
+    ]
+    assert "ClinVar - Pathogenic" in overview["D11"].value
+    assert overview["G11"].value == "Pathogenic"
+    assert overview["G11"].hyperlink.target.endswith("/12345/")
+    assert workbook["Vedlegg"]["A1"].value == "26OUM00004"
+    variant_sheet = workbook["TP53"]
+    assert len(variant_sheet._images) == 6
+    assert IMAGE_DATABASES == ("MTBP", "Franklin", "ClinVar", "OncoKB", "COSMIC")
     workbook.close()
+
+
+def test_patient_excel_uses_variant_detail_only_for_duplicate_gene(tmp_path):
+    result = VariantProcessor().process(
+        FIXTURE, "2026-08-03", tmp_path / "review.xlsx"
+    )
+    first = result.variants[3]
+    second = replace(
+        first,
+        source_row=first.source_row + 1,
+        hgvsc="NM_000546.6:c.743G>A",
+        hgvsp="",
+    )
+    output = tmp_path / "duplicate.xlsx"
+
+    PatientExcelReportWriter().write_patient(
+        result, first.patient_id, [first, second], output, {}
+    )
+
+    workbook = openpyxl.load_workbook(output)
+    assert workbook.sheetnames == [
+        "Oversikt",
+        "Vedlegg",
+        "TP53 p.R175H",
+        "TP53 c.743G>A",
+    ]
+    workbook.close()
+
+
+def test_patient_excel_filename_is_dit_vpm_tolkning(tmp_path):
+    result = VariantProcessor().process(
+        FIXTURE, "2026-08-03", tmp_path / "review.xlsx"
+    )
+
+    outputs = PatientExcelReportWriter().write_all(result, tmp_path / "patients", {})
+
+    assert outputs[0].name.endswith("_VPM_Tolkning.xlsx")

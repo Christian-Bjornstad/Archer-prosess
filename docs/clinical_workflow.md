@@ -31,17 +31,18 @@ Special review flags from the current clinical notes:
 
 Database evidence sources:
 
-- ClinVar can be queried through NCBI E-utilities.
+- ClinVar is resolved through NCBI E-utilities and the browser captures only the variant title plus germline/somatic classification summary above Variant Details.
 - COSMIC is opened by the input `COSMICID` in a signed-in browser. The app captures Overview, Tissue distribution, and a Samples table filtered to `lymphoid`. The NLM Clinical Tables v4 endpoint remains only as a basic/public fallback and does not contain the full panels. Confirm that the organisation's COSMIC licence permits patient-care reporting before clinical deployment.
-- gnomAD is queried through the public browser GraphQL endpoint when genomic location plus ref/alt alleles can be converted to a GRCh37 variant ID.
-- For Archer VPM data, default gnomAD dataset is `gnomad_r2_1` because Archer Analysis exports hg19/GRCh37 coordinates. Use `gnomad_r4` only when the variant coordinates are known to be GRCh38.
-- gnomAD evidence should be interpreted as population-frequency context: aggregated AF, exome AF, genome AF, max population AF, homozygote/hemizygote counts, filters, and direct browser URL.
-- gnomAD requests are rate-limited by the app to respect the public limit of 10 requests per IP per 60 seconds.
 - OncoKB is token-based. Add the API token in Settings to enable live annotation; without a token the app records a prepared query and direct review link.
 - Franklin is token-based. Add the API token in Settings, or enter Franklin email plus runtime password for login during the current app session. The password is not saved to config. Without credentials the app records a prepared query and direct review link.
 - Franklin evidence should be reviewed for computed ACMG classification, ACMG rule triggers, population frequency, REVEL/aggregated prediction data, ClinVar evidence, and transcript match.
 - MTBP and HSMD currently require login/license/manual review. The app records prepared queries and direct review links. The 26OUM10350 manual report suggests recording classification, MTBP functional relevance/evidence category, HSMD actionability tier, clinical review status, population frequency, references, and notes.
 - Evidence must be presented as support for human interpretation, not as automatic final classification.
+
+The processed workbook includes a **Database Selection** sheet containing every
+variant. Mark unwanted rows with `X` in **Skip Database Search (X)**, reload that
+workbook in the Databases tab, and only the remaining variants are submitted.
+Selections are matched back to the same Archer run using Sample plus HGVSc.
 
 Parallel search:
 

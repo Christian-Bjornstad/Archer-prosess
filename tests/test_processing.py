@@ -6,7 +6,7 @@ from archer_processor.core import FilterEngine, VariantProcessor, production_rul
 from archer_processor.core.models import DatabaseEvidence
 from archer_processor.io import ArcherTsvReader
 from archer_processor.reports import ExcelReportWriter
-from archer_processor.services import DatabaseSearchService
+from archer_processor.services import DatabaseSearchService, load_database_skip_keys
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
@@ -91,6 +91,7 @@ def test_excel_export_preserves_raw_columns_and_adds_database_columns(tmp_path):
     assert workbook.sheetnames == [
         "Summary",
         "Included Variants",
+        "Database Selection",
         "Database Evidence",
         "With Artifacts",
         "Artifacts Removed",
@@ -107,15 +108,31 @@ def test_excel_export_preserves_raw_columns_and_adds_database_columns(tmp_path):
         f"{database} Evidence"
         for database in [
             "ClinVar",
-            "gnomAD",
-            "COSMIC",
+            "MTBP",
             "Franklin",
             "OncoKB",
-            "MTBP",
+            "COSMIC",
         ]
     ]
     assert row[headers.index("HGVSc")] == variant.raw["HGVSc"]
     assert "CIViC Evidence" not in headers
+
+
+def test_database_selection_sheet_round_trips_x_marks(tmp_path):
+    output = tmp_path / "review.xlsx"
+    result = VariantProcessor().process(FIXTURE, "2026-07-26", output)
+    skipped_key = DatabaseSearchService().variant_key(result.variants[1])
+
+    ExcelReportWriter().write(
+        result, output, database_skip_keys={skipped_key}
+    )
+
+    workbook = openpyxl.load_workbook(output)
+    worksheet = workbook["Database Selection"]
+    assert worksheet["A1"].value == "Skip Database Search (X)"
+    assert worksheet["A3"].value == "X"
+    workbook.close()
+    assert load_database_skip_keys(output) == {skipped_key}
 
 
 def test_excel_export_writes_artifact_removed_sheet(tmp_path):

@@ -27,6 +27,9 @@ from reportlab.platypus import (
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
 
 
+SCREENSHOT_DATABASE_ORDER = ("MTBP", "Franklin", "ClinVar", "OncoKB", "COSMIC")
+
+
 DIT_PATTERN = re.compile(r"^\d{2}OUM\d{5}$", flags=re.IGNORECASE)
 
 
@@ -542,7 +545,16 @@ class PatientPdfReportWriter:
         entries: list[tuple[VariantRecord, DatabaseEvidence, dict[str, str]]] = []
         seen: set[str] = set()
         for variant in variants:
-            for item in evidence.get(self._key(variant), []):
+            items = evidence.get(self._key(variant), [])
+            ordered_items = sorted(
+                items,
+                key=lambda item: (
+                    SCREENSHOT_DATABASE_ORDER.index(item.database)
+                    if item.database in SCREENSHOT_DATABASE_ORDER
+                    else len(SCREENSHOT_DATABASE_ORDER)
+                ),
+            )
+            for item in ordered_items:
                 for record in self._screenshot_records(item):
                     screenshot_path = Path(record["path"])
                     try:

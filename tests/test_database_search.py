@@ -59,7 +59,7 @@ def test_database_diagnostics_reports_ready_token_and_manual_sources():
         "HSMD",
     ])
 
-    assert diagnostics["ClinVar"] == "ready"
+    assert diagnostics["ClinVar"].startswith("browser summary capture")
     assert diagnostics["gnomAD"].startswith("ready")
     assert diagnostics["COSMIC"].startswith("browser login")
     assert diagnostics["CIViC"] == "ready (open GraphQL)"

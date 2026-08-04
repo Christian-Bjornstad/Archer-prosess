@@ -49,6 +49,7 @@ from archer_processor.services import (
     BROWSER_DATABASES,
     BrowserReviewService,
     DatabaseSearchService,
+    load_database_skip_keys,
 )
 
 
@@ -188,6 +189,7 @@ class DatabaseWorker(QObject):
     def _browser_service(self) -> BrowserReviewService:
         return BrowserReviewService(
             mtbp_cancer_type=self.settings.mtbp_cancer_type,
+            clinvar_api_key=self.settings.clinvar_api_key,
             analysis_timeout_ms=self.settings.mtbp_timeout_minutes * 60_000,
             request_delay_ms=self.settings.browser_delay_seconds * 1_000,
             request_delay_max_ms=self.settings.browser_delay_max_seconds * 1_000,
@@ -228,6 +230,7 @@ class BrowserLoginWorker(QObject):
             )
             service = BrowserReviewService(
                 mtbp_cancer_type=self.settings.mtbp_cancer_type,
+                clinvar_api_key=self.settings.clinvar_api_key,
                 analysis_timeout_ms=self.settings.mtbp_timeout_minutes * 60_000,
                 request_delay_ms=self.settings.browser_delay_seconds * 1_000,
                 request_delay_max_ms=self.settings.browser_delay_max_seconds * 1_000,
@@ -262,6 +265,7 @@ class BrowserReviewWorker(QObject):
         try:
             service = BrowserReviewService(
                 mtbp_cancer_type=self.settings.mtbp_cancer_type,
+                clinvar_api_key=self.settings.clinvar_api_key,
                 analysis_timeout_ms=self.settings.mtbp_timeout_minutes * 60_000,
                 request_delay_ms=self.settings.browser_delay_seconds * 1_000,
                 request_delay_max_ms=self.settings.browser_delay_max_seconds * 1_000,
@@ -349,12 +353,11 @@ class WorkflowStep(QFrame):
 
 class MainWindow(QMainWindow):
     databases = [
-        "ClinVar",
-        "gnomAD",
-        "COSMIC",
-        "Franklin",
-        "OncoKB",
         "MTBP",
+        "Franklin",
+        "ClinVar",
+        "OncoKB",
+        "COSMIC",
     ]
 
     def __init__(self) -> None:
@@ -362,6 +365,7 @@ class MainWindow(QMainWindow):
         self.settings = AppSettings.load()
         self.result: ProcessingResult | None = None
         self.evidence = {}
+        self.database_skip_keys: set[str] = set()
         self.processing_thread: QThread | None = None
         self.database_thread: QThread | None = None
         self.browser_thread: QThread | None = None
@@ -511,7 +515,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(12)
         intro = QLabel(
             "Choose only the evidence sources needed for this review. The app completes "
-            "one patient at a time; signed-in websites use a randomized safety delay and MTBP runs last."
+            "one patient at a time; website sources use a randomized safety delay and MTBP runs last."
         )
         intro.setObjectName("PageIntro")
         intro.setWordWrap(True)
@@ -549,6 +553,21 @@ class MainWindow(QMainWindow):
             "Patient-centric evidence collection is deliberately serial to avoid bursts of requests."
         )
         grid.addWidget(self.worker_count, scope_row, 3)
+        selection_row = scope_row + 1
+        selection_label = QLabel("Reviewed workbook")
+        selection_label.setObjectName("FieldLabel")
+        grid.addWidget(selection_label, selection_row, 0)
+        self.selection_status = QLabel("No skip list loaded")
+        self.selection_status.setObjectName("HelperText")
+        self.selection_status.setWordWrap(True)
+        grid.addWidget(self.selection_status, selection_row, 1, 1, 2)
+        self.load_selection_btn = QPushButton("Load X Selections")
+        self.load_selection_btn.setEnabled(False)
+        self.load_selection_btn.setToolTip(
+            "Load the processed workbook and skip rows marked X on Database Selection."
+        )
+        self.load_selection_btn.clicked.connect(self._load_database_selection)
+        grid.addWidget(self.load_selection_btn, selection_row, 3)
         layout.addWidget(checks)
 
         collection = QGroupBox("2. Collect Evidence")
@@ -585,7 +604,7 @@ class MainWindow(QMainWindow):
         self.browser_review_btn.setObjectName("OutlineButton")
         self.browser_review_btn.setEnabled(False)
         self.browser_review_btn.setToolTip(
-            "Runs selected COSMIC, OncoKB, Franklin, and MTBP sources patient-by-patient in visible Edge."
+            "Runs selected ClinVar, COSMIC, OncoKB, Franklin, and MTBP sources patient-by-patient in visible Edge."
         )
         self.browser_review_btn.clicked.connect(self._start_browser_review)
         session_actions = QHBoxLayout()
@@ -607,7 +626,7 @@ class MainWindow(QMainWindow):
         exports.setMinimumHeight(105)
         export_layout = QHBoxLayout(exports)
         export_help = QLabel(
-            "Patient Excel reports include COSMIC overview/tissue/lymphoid sample captures plus Franklin, OncoKB, and MTBP images."
+            "Patient Excel reports use Oversikt, Vedlegg, and one sheet per variant with MTBP, Franklin, ClinVar, OncoKB, and COSMIC captures."
         )
         export_help.setObjectName("HelperText")
         export_help.setWordWrap(True)
@@ -698,9 +717,6 @@ class MainWindow(QMainWindow):
         self.mtbp_password_edit.setText(self.settings.mtbp_password)
         self.mtbp_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.mtbp_password_edit.setPlaceholderText("Stored in Windows Credential Manager")
-        self.gnomad_dataset_combo = QComboBox()
-        self.gnomad_dataset_combo.addItems(["gnomad_r2_1", "gnomad_r3", "gnomad_r4"])
-        self.gnomad_dataset_combo.setCurrentText(self.settings.gnomad_dataset)
         self.mtbp_cancer_type_edit = QLineEdit(self.settings.mtbp_cancer_type)
         self.mtbp_cancer_type_edit.setPlaceholderText("Exact MTBP cancer type, for example Blood")
         self.browser_delay_spin = QSpinBox()
@@ -777,18 +793,16 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.mtbp_email_edit, 11, 1)
         grid.addWidget(QLabel("MTBP password"), 12, 0)
         grid.addWidget(self.mtbp_password_edit, 12, 1)
-        grid.addWidget(QLabel("gnomAD dataset"), 13, 0)
-        grid.addWidget(self.gnomad_dataset_combo, 13, 1)
-        grid.addWidget(QLabel("MTBP cancer type"), 14, 0)
-        grid.addWidget(self.mtbp_cancer_type_edit, 14, 1)
-        grid.addWidget(QLabel("Website safety delay"), 15, 0)
-        grid.addLayout(delay_layout, 15, 1, 1, 2)
-        grid.addWidget(QLabel("MTBP report timeout"), 16, 0)
-        grid.addWidget(self.mtbp_timeout_spin, 16, 1)
-        grid.addWidget(QLabel("Artifact list"), 17, 0)
-        grid.addWidget(self.artifact_table, 17, 1, 1, 2)
-        grid.addLayout(artifact_actions, 18, 1, 1, 2)
-        grid.addWidget(save_btn, 19, 2)
+        grid.addWidget(QLabel("MTBP cancer type"), 13, 0)
+        grid.addWidget(self.mtbp_cancer_type_edit, 13, 1)
+        grid.addWidget(QLabel("Website safety delay"), 14, 0)
+        grid.addLayout(delay_layout, 14, 1, 1, 2)
+        grid.addWidget(QLabel("MTBP report timeout"), 15, 0)
+        grid.addWidget(self.mtbp_timeout_spin, 15, 1)
+        grid.addWidget(QLabel("Artifact list"), 16, 0)
+        grid.addWidget(self.artifact_table, 16, 1, 1, 2)
+        grid.addLayout(artifact_actions, 17, 1, 1, 2)
+        grid.addWidget(save_btn, 18, 2)
         layout.addWidget(group)
         layout.addStretch()
         self.settings_scroll.setWidget(settings_content)
@@ -899,6 +913,8 @@ class MainWindow(QMainWindow):
 
     def _processing_finished(self, result: ProcessingResult) -> None:
         self.result = result
+        self.database_skip_keys = set()
+        self.selection_status.setText("No skip list loaded")
         self._log(f"Complete: {result.total_count} variants, {len(result.included)} included, {len(result.excluded)} excluded")
         self._refresh_metrics()
         self._refresh_variant_table()
@@ -907,6 +923,7 @@ class MainWindow(QMainWindow):
         self.rewrite_btn.setEnabled(True)
         self.patient_excel_btn.setEnabled(True)
         self.patient_pdf_btn.setEnabled(True)
+        self.load_selection_btn.setEnabled(True)
         self._set_ready()
         QMessageBox.information(self, "Complete", f"Workbook saved:\n{result.output_path}")
 
@@ -1052,9 +1069,49 @@ class MainWindow(QMainWindow):
     def _variants_for_search(self):
         if not self.result:
             return []
-        if self.included_only_check.isChecked():
-            return self.result.included
-        return self.result.variants
+        variants = (
+            self.result.included
+            if self.included_only_check.isChecked()
+            else self.result.variants
+        )
+        return [
+            variant
+            for variant in variants
+            if BrowserReviewService.variant_key(variant) not in self.database_skip_keys
+        ]
+
+    def _load_database_selection(self) -> None:
+        if not self.result:
+            return
+        initial = str(self.result.output_path or self.settings.default_output_dir)
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load reviewed database selections",
+            initial,
+            "Excel workbook (*.xlsx)",
+        )
+        if not path:
+            return
+        try:
+            loaded = load_database_skip_keys(Path(path))
+        except Exception as exc:
+            QMessageBox.critical(self, "Selection workbook could not be loaded", str(exc))
+            return
+        available = {
+            BrowserReviewService.variant_key(variant)
+            for variant in self.result.variants
+        }
+        self.database_skip_keys = loaded & available
+        unmatched = len(loaded - available)
+        self.included_only_check.setChecked(False)
+        searched = len(self.result.variants) - len(self.database_skip_keys)
+        message = (
+            f"{len(self.database_skip_keys)} marked X; {searched} variants will be searched"
+        )
+        if unmatched:
+            message += f" ({unmatched} marks did not match this run)"
+        self.selection_status.setText(message)
+        self._log(f"Database selection loaded: {message}")
 
     def _browser_review_finished(self, browser_evidence: dict) -> None:
         self._merge_browser_evidence(browser_evidence)
@@ -1119,6 +1176,7 @@ class MainWindow(QMainWindow):
                 self.result,
                 report_directory,
                 self.evidence,
+                variants=self._variants_for_search(),
             )
         except Exception as exc:
             QMessageBox.critical(self, "Patient Excel export failed", str(exc))
@@ -1187,6 +1245,7 @@ class MainWindow(QMainWindow):
             self.result.output_path,
             self.evidence,
             self.hide_excluded.isChecked(),
+            self.database_skip_keys,
         )
 
     def _auto_rewrite_workbook(self) -> None:
@@ -1230,7 +1289,6 @@ class MainWindow(QMainWindow):
         )
         self.settings.mtbp_timeout_minutes = self.mtbp_timeout_spin.value()
         self.settings.search_included_only = self.included_only_check.isChecked()
-        self.settings.gnomad_dataset = self.gnomad_dataset_combo.currentText()
         self.settings.mtbp_cancer_type = self.mtbp_cancer_type_edit.text().strip() or "Blood"
         self.settings.artifact_rules = self._artifact_rules_from_table()
         self.settings.enabled_databases = [name for name, check in self.db_checks.items() if check.isChecked()]

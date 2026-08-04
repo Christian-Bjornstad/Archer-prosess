@@ -9,17 +9,17 @@ def test_database_tab_contains_current_sources(qt_app):
     window = MainWindow()
 
     assert window.databases == [
-        "ClinVar",
-        "gnomAD",
-        "COSMIC",
-        "Franklin",
-        "OncoKB",
         "MTBP",
+        "Franklin",
+        "ClinVar",
+        "OncoKB",
+        "COSMIC",
     ]
     assert set(window.db_checks) == set(window.databases)
-    assert window.browser_database_combo.count() == 4
+    assert window.browser_database_combo.count() == 5
     assert window.browser_database_combo.itemText(0) == "COSMIC"
-    assert window.browser_database_combo.itemText(3) == "MTBP"
+    assert window.browser_database_combo.itemText(3) == "ClinVar"
+    assert window.browser_database_combo.itemText(4) == "MTBP"
     assert window.mtbp_cancer_type_edit.text() == window.settings.mtbp_cancer_type
     assert window.oncokb_password_edit.echoMode().name == "Password"
     assert window.cosmic_password_edit.echoMode().name == "Password"
@@ -84,10 +84,17 @@ def test_database_lookup_scope_can_be_limited_to_included_variants(qt_app, tmp_p
     window.included_only_check.setChecked(False)
     assert window._variants_for_search() == window.result.variants
 
+    skipped = window.result.variants[0]
+    window.database_skip_keys = {f"{skipped.sample}|{skipped.hgvsc}"}
+    assert skipped not in window._variants_for_search()
+    assert len(window._variants_for_search()) == window.result.total_count - 1
+
 
 def test_normal_search_routes_non_api_login_sources_to_browser_phase(qt_app):
     window = MainWindow()
-    for database in ["COSMIC", "OncoKB", "Franklin", "MTBP"]:
+    for check in window.db_checks.values():
+        check.setChecked(False)
+    for database in ["COSMIC", "OncoKB", "Franklin", "ClinVar", "MTBP"]:
         window.db_checks[database].setChecked(True)
     window.settings.oncokb_api_key = ""
     window.settings.franklin_api_key = ""
@@ -96,6 +103,7 @@ def test_normal_search_routes_non_api_login_sources_to_browser_phase(qt_app):
         "COSMIC",
         "OncoKB",
         "Franklin",
+        "ClinVar",
         "MTBP",
     ]
 
@@ -103,6 +111,7 @@ def test_normal_search_routes_non_api_login_sources_to_browser_phase(qt_app):
     window.settings.franklin_api_key = "franklin-token"
     assert window._selected_browser_databases(api_fallback_only=True) == [
         "COSMIC",
+        "ClinVar",
         "MTBP",
     ]
 
@@ -118,7 +127,7 @@ def test_database_diagnostics_cover_token_and_manual_statuses(qt_app):
         "ready",
     }
     assert diagnostics["COSMIC"].startswith("browser login")
-    assert diagnostics["gnomAD"].startswith("ready")
+    assert diagnostics["ClinVar"].startswith("browser summary capture")
 
 
 def test_database_worker_completes_all_sources_before_next_patient(
@@ -175,8 +184,8 @@ def test_database_worker_completes_all_sources_before_next_patient(
     monkeypatch.setattr("archer_processor.gui.app.time.sleep", slept.append)
     worker = DatabaseWorker(
         variants,
-        ["ClinVar", "gnomAD", "COSMIC"],
-        ["OncoKB", "Franklin", "MTBP"],
+        ["OncoKB"],
+        ["COSMIC", "Franklin", "ClinVar", "MTBP"],
         tmp_path / "evidence",
         settings,
     )
@@ -186,21 +195,19 @@ def test_database_worker_completes_all_sources_before_next_patient(
     worker.run()
 
     assert events == [
-        (variants[0].patient_id, "ClinVar"),
-        (variants[0].patient_id, "gnomAD"),
-        (variants[0].patient_id, "COSMIC"),
         (variants[0].patient_id, "OncoKB"),
+        (variants[0].patient_id, "COSMIC"),
         (variants[0].patient_id, "Franklin"),
+        (variants[0].patient_id, "ClinVar"),
         (variants[0].patient_id, "MTBP"),
-        (variants[1].patient_id, "ClinVar"),
-        (variants[1].patient_id, "gnomAD"),
-        (variants[1].patient_id, "COSMIC"),
         (variants[1].patient_id, "OncoKB"),
+        (variants[1].patient_id, "COSMIC"),
         (variants[1].patient_id, "Franklin"),
+        (variants[1].patient_id, "ClinVar"),
         (variants[1].patient_id, "MTBP"),
     ]
     assert len(finished) == 1
-    assert all(len(items) == 6 for items in finished[0].values())
+    assert all(len(items) == 5 for items in finished[0].values())
     # No API query is delayed; the only pause is before patient 2's website phase.
     assert len(slept) == 1
     assert 10 <= slept[0] <= 20
