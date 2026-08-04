@@ -6,10 +6,10 @@
 
 ---
 
-**Project:** Archer Prosess
-**Generated:** 2026-08-04 13:32:10
-**Category:** Magazine/Blog
-**Design Dials:** Variance 4/10 (Balanced / Modern) | Motion 2/10 (Subtle) | Density 8/10 (Dense / Dashboard)
+**Project:** VPM Tolkning
+**Generated:** 2026-08-04 19:38:19
+**Category:** Analytics Dashboard
+**Design Dials:** Variance 6/10 (Balanced / Modern) | Motion 2/10 (Subtle) | Density 8/10 (Dense / Dashboard)
 
 ---
 
@@ -34,14 +34,14 @@
 
 ### Typography
 
-- **Heading Font:** Lora
-- **Body Font:** Raleway
-- **Mood:** calm, wellness, health, relaxing, natural, organic
-- **Google Fonts:** [Lora + Raleway](https://fonts.googleapis.com/css2?family=Lora:wght@400;500;600;700&family=Raleway:wght@300;400;500;600;700&display=swap)
+- **Heading Font:** Fira Code
+- **Body Font:** Fira Sans
+- **Mood:** dashboard, data, analytics, code, technical, precise
+- **Google Fonts:** [Fira Code + Fira Sans](https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap)
 
 **CSS Import:**
 ```css
-@import url('https://fonts.googleapis.com/css2?family=Lora:wght@400;500;600;700&family=Raleway:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap');
 ```
 
 ### Spacing Variables
@@ -161,21 +161,21 @@
 
 ## Style Guidelines
 
-**Style:** Soft UI Evolution
+**Style:** Data-Dense Dashboard
 
-**Keywords:** Evolved soft UI, better contrast, modern aesthetics, subtle depth, accessibility-focused, improved shadows, hybrid
+**Keywords:** Multiple charts/widgets, data tables, KPI cards, minimal padding, grid layout, space-efficient, maximum data visibility
 
-**Best For:** Modern enterprise apps, SaaS platforms, health/wellness, modern business tools, professional, hybrid
+**Best For:** Business intelligence dashboards, financial analytics, enterprise reporting, operational dashboards, data warehousing
 
-**Key Effects:** Improved shadows (softer than flat, clearer than neumorphism), modern (200-300ms), focus visible, WCAG AA/AAA
+**Key Effects:** Hover tooltips, chart zoom on click, row highlighting on hover, smooth filter animations, data loading spinners
 
 ### Page Pattern
 
-**Pattern Name:** Newsletter / Content First
+**Pattern Name:** Real-Time / Operations Landing
 
-- **Conversion Strategy:** Single field form (Email only). Show 'Join X, 000 readers'. Read sample link.
-- **CTA Placement:** Hero inline form + Sticky header form
-- **Section Order:** 1. Hero (Value Prop + Form), 2. Recent Issues/Archives, 3. Social Proof (Subscriber count), 4. About Author
+- **Conversion Strategy:** For ops/security/iot products. Demo or sandbox link. Trust signals.
+- **CTA Placement:** Primary CTA in nav + After metrics
+- **Section Order:** 1. Hero (product + live preview or status), 2. Key metrics/indicators, 3. How it works, 4. CTA (Start trial / Contact)
 
 ---
 
@@ -197,8 +197,8 @@ gsap.from(el, { opacity: 0, y: 12, duration: 0.35, ease: 'power1.out', scrollTri
 
 ## Anti-Patterns (Do NOT Use)
 
-- ❌ Poor typography
-- ❌ Slow loading
+- ❌ Ornate design
+- ❌ No filtering
 
 ### Additional Forbidden Patterns
 

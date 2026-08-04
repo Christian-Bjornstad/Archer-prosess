@@ -55,19 +55,19 @@ from archer_processor.services import (
 
 
 class Palette:
-    ink = "#102A43"
-    muted = "#5B7083"
+    ink = "#163445"
+    muted = "#607886"
     panel = "#FFFFFF"
-    app_bg = "#F0F7FB"
-    border = "#C9DFEA"
-    navy = "#0C4A6E"
-    blue = "#0284C7"
-    cyan = "#0891B2"
-    green = "#16803B"
+    app_bg = "#F3F7F9"
+    border = "#D3E0E6"
+    navy = "#0B2F43"
+    blue = "#087EA4"
+    cyan = "#0E98A8"
+    green = "#18794E"
     red = "#B42318"
     yellow = "#A15C00"
-    pale_blue = "#E0F2FE"
-    pale_green = "#EAF7EE"
+    pale_blue = "#E7F4F7"
+    pale_green = "#E9F6EF"
     pale_orange = "#FCE4D6"
     pale_red = "#F8E8E8"
     pale_yellow = "#FFF5D6"
@@ -88,7 +88,7 @@ class ProcessingWorker(QObject):
 
     def run(self) -> None:
         try:
-            self.status.emit("Reading Archer TSV")
+            self.status.emit("Reading variant TSV")
             history_path = Path(self.settings.history_workbook)
             history = VariantHistoryRepository(history_path) if history_path.exists() else None
             filter_engine = FilterEngine(production_rules(self.settings.artifact_rules))
@@ -335,42 +335,20 @@ class MetricCard(QFrame):
     def __init__(self, label: str, value: str = "0", accent: str = Palette.blue):
         super().__init__()
         self.setObjectName("MetricCard")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 12)
-        self.value = QLabel(value)
-        self.value.setFont(QFont("Segoe UI", 22, QFont.Weight.Bold))
-        self.value.setStyleSheet(f"color: {accent};")
+        self.setFixedHeight(58)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 8, 14, 8)
         self.label = QLabel(label)
-        self.label.setStyleSheet(f"color: {Palette.muted};")
-        layout.addWidget(self.value)
+        self.label.setStyleSheet(f"color: {Palette.muted}; font-weight: 600;")
+        self.value = QLabel(value)
+        self.value.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
+        self.value.setStyleSheet(f"color: {accent};")
         layout.addWidget(self.label)
+        layout.addStretch()
+        layout.addWidget(self.value)
 
     def set_value(self, value: int | str) -> None:
         self.value.setText(str(value))
-
-
-class WorkflowStep(QFrame):
-    def __init__(self, number: str, title: str, description: str):
-        super().__init__()
-        self.setObjectName("WorkflowStep")
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(10)
-        badge = QLabel(number)
-        badge.setObjectName("StepNumber")
-        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        badge.setFixedSize(30, 30)
-        copy = QVBoxLayout()
-        copy.setSpacing(1)
-        title_label = QLabel(title)
-        title_label.setObjectName("StepTitle")
-        description_label = QLabel(description)
-        description_label.setObjectName("StepDescription")
-        description_label.setWordWrap(True)
-        copy.addWidget(title_label)
-        copy.addWidget(description_label)
-        layout.addWidget(badge)
-        layout.addLayout(copy, 1)
 
 
 class RunProgressCard(QFrame):
@@ -428,9 +406,9 @@ class MainWindow(QMainWindow):
         self.processing_worker: ProcessingWorker | None = None
         self.database_worker: DatabaseWorker | None = None
         self.browser_worker: BrowserLoginWorker | BrowserReviewWorker | None = None
-        self.setWindowTitle("Archer Prosess")
+        self.setWindowTitle("VPM Tolkning")
         self.app_icon_path = (
-            Path(__file__).resolve().parents[1] / "assets" / "archer-prosess-icon.png"
+            Path(__file__).resolve().parents[1] / "assets" / "vpm-tolkning-icon.png"
         )
         if self.app_icon_path.exists():
             self.setWindowIcon(QIcon(str(self.app_icon_path)))
@@ -448,7 +426,7 @@ class MainWindow(QMainWindow):
 
         sidebar = QFrame()
         sidebar.setObjectName("Sidebar")
-        sidebar.setFixedWidth(246)
+        sidebar.setFixedWidth(226)
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(18, 22, 18, 18)
         sidebar_layout.setSpacing(8)
@@ -466,27 +444,27 @@ class MainWindow(QMainWindow):
                     Qt.TransformationMode.SmoothTransformation,
                 )
             )
-        brand_mark.setAccessibleName("Archer Prosess application icon")
-        brand = QLabel("Archer Prosess")
+        brand_mark.setAccessibleName("VPM Tolkning application icon")
+        brand = QLabel("VPM Tolkning")
         brand.setObjectName("BrandTitle")
-        brand_copy = QLabel("Clinical variant workbench")
+        brand_copy = QLabel("Variant interpretation console")
         brand_copy.setObjectName("BrandCopy")
         sidebar_layout.addWidget(brand_mark)
         sidebar_layout.addWidget(brand)
         sidebar_layout.addWidget(brand_copy)
         sidebar_layout.addSpacing(22)
 
-        nav_label = QLabel("WORKSPACE")
+        nav_label = QLabel("ANALYSIS")
         nav_label.setObjectName("SidebarEyebrow")
         sidebar_layout.addWidget(nav_label)
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
         self.nav_buttons: list[QPushButton] = []
         nav_items = [
-            ("01", "Prepare", "Process Archer data"),
-            ("02", "Review", "Inspect variant calls"),
-            ("03", "Evidence", "Collect and export"),
-            ("04", "Settings", "Accounts and safety"),
+            ("01", "Import", "Load the variant dataset"),
+            ("02", "Variants", "Review and prioritise"),
+            ("03", "Evidence", "Research and report"),
+            ("04", "Settings", "Sources and safety"),
         ]
         for index, (number, title, description) in enumerate(nav_items):
             button = QPushButton(f"{number}   {title}\n       {description}")
@@ -503,14 +481,13 @@ class MainWindow(QMainWindow):
         self.nav_buttons[0].setChecked(True)
         sidebar_layout.addStretch()
 
-        workflow_label = QLabel("WORKFLOW")
-        workflow_label.setObjectName("SidebarEyebrow")
-        sidebar_layout.addWidget(workflow_label)
-        workflow_hint = QLabel("Prepare  →  Collect  →  Report")
-        workflow_hint.setObjectName("SidebarWorkflow")
-        workflow_hint.setWordWrap(True)
-        sidebar_layout.addWidget(workflow_hint)
-        local_note = QLabel("Local workspace\nCredentials stay in Windows Credential Manager")
+        profile_label = QLabel("REFERENCE PROFILE")
+        profile_label.setObjectName("SidebarEyebrow")
+        sidebar_layout.addWidget(profile_label)
+        reference_profile = QLabel("SOMATIC   ·   hg19 / GRCh37")
+        reference_profile.setObjectName("ReferenceProfile")
+        sidebar_layout.addWidget(reference_profile)
+        local_note = QLabel("Local processing\nProvider credentials secured by Windows")
         local_note.setObjectName("LocalNote")
         local_note.setWordWrap(True)
         sidebar_layout.addWidget(local_note)
@@ -524,11 +501,11 @@ class MainWindow(QMainWindow):
 
         header = QHBoxLayout()
         title_box = QVBoxLayout()
-        self.page_eyebrow = QLabel("WORKSPACE  /  PREPARE")
+        self.page_eyebrow = QLabel("VPM INTERPRETATION  /  IMPORT")
         self.page_eyebrow.setObjectName("PageEyebrow")
-        self.page_title = QLabel("Prepare data")
+        self.page_title = QLabel("New analysis")
         self.page_title.setObjectName("PageTitle")
-        self.page_subtitle = QLabel("Validate the Archer TSV and create the review workbook")
+        self.page_subtitle = QLabel("Load a variant dataset and create the clinical review workbook")
         self.page_subtitle.setObjectName("PageSubtitle")
         title_box.addWidget(self.page_eyebrow)
         title_box.addWidget(self.page_title)
@@ -544,6 +521,8 @@ class MainWindow(QMainWindow):
         header.addWidget(self.activity_progress)
         self.status_badge = QLabel("Ready")
         self.status_badge.setObjectName("StatusBadge")
+        self.status_badge.setFixedHeight(34)
+        self.status_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         header.addWidget(self.status_badge)
         layout.addLayout(header)
 
@@ -564,7 +543,7 @@ class MainWindow(QMainWindow):
         self.tabs.addWidget(self._processing_tab())
         self.tabs.addWidget(self._review_tab())
         self.tabs.addWidget(self._database_tab())
-        self.tabs.addWidget(self._settings_tab())
+        self.tabs.addWidget(self._settings_tab_v2())
         layout.addWidget(self.tabs, 1)
         shell.addWidget(content, 1)
 
@@ -580,17 +559,17 @@ class MainWindow(QMainWindow):
 
     def _switch_page(self, index: int) -> None:
         pages = [
-            ("PREPARE", "Prepare data", "Validate the Archer TSV and create the review workbook"),
-            ("REVIEW", "Review variants", "Inspect calls, decisions, history, and review flags"),
-            ("EVIDENCE", "Evidence workspace", "Collect database evidence and export patient reports"),
-            ("SETTINGS", "Settings", "Manage accounts, pacing, security, and reporting defaults"),
+            ("IMPORT", "New analysis", "Load a variant dataset and create the clinical review workbook"),
+            ("VARIANTS", "Variant review", "Filter, inspect, and prioritise calls for evidence research"),
+            ("EVIDENCE", "Evidence search", "Research selected variants across clinical and cancer databases"),
+            ("SETTINGS", "Configuration", "Manage local files, provider access, and search safeguards"),
         ]
         if not 0 <= index < len(pages):
             return
         self.tabs.setCurrentIndex(index)
         self.nav_buttons[index].setChecked(True)
         eyebrow, title, subtitle = pages[index]
-        self.page_eyebrow.setText(f"WORKSPACE  /  {eyebrow}")
+        self.page_eyebrow.setText(f"VPM INTERPRETATION  /  {eyebrow}")
         self.page_title.setText(title)
         self.page_subtitle.setText(subtitle)
 
@@ -599,23 +578,34 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         layout.setSpacing(14)
 
-        workflow = QHBoxLayout()
-        workflow.setSpacing(10)
-        workflow.addWidget(WorkflowStep("01", "Select input", "Choose the Archer TSV and output workbook."))
-        workflow.addWidget(WorkflowStep("02", "Validate", "Check columns and values before processing."))
-        workflow.addWidget(WorkflowStep("03", "Create review", "Export the complete workbook for clinical selection."))
-        layout.addLayout(workflow)
+        profile = QFrame()
+        profile.setObjectName("AnalysisProfile")
+        profile_layout = QHBoxLayout(profile)
+        profile_layout.setContentsMargins(16, 12, 16, 12)
+        profile_copy = QVBoxLayout()
+        profile_title = QLabel("Analysis profile")
+        profile_title.setObjectName("SectionTitle")
+        profile_help = QLabel("The interpretation run uses the required somatic and hg19 reference context.")
+        profile_help.setObjectName("HelperText")
+        profile_copy.addWidget(profile_title)
+        profile_copy.addWidget(profile_help)
+        profile_layout.addLayout(profile_copy, 1)
+        for text in ["SOMATIC", "hg19 / GRCh37", "5 EVIDENCE SOURCES"]:
+            chip = QLabel(text)
+            chip.setObjectName("ProfileChip")
+            profile_layout.addWidget(chip)
+        layout.addWidget(profile)
 
-        files = QGroupBox("Run Setup")
+        files = QGroupBox("Analysis input")
         grid = QGridLayout(files)
         grid.setColumnStretch(1, 1)
         self.input_edit = QLineEdit()
-        self.input_edit.setPlaceholderText("Archer all_samples_filtered_variants.tsv")
+        self.input_edit.setPlaceholderText("Select the filtered variant TSV")
         self.input_edit.textChanged.connect(self._update_process_state)
         input_btn = QPushButton("Browse")
         input_btn.clicked.connect(self._browse_input)
         self.output_edit = QLineEdit()
-        self.output_edit.setPlaceholderText("Output workbook")
+        self.output_edit.setPlaceholderText("Clinical review workbook (.xlsx)")
         self.output_edit.textChanged.connect(self._update_process_state)
         output_btn = QPushButton("Browse")
         output_btn.clicked.connect(self._browse_output)
@@ -639,26 +629,28 @@ class MainWindow(QMainWindow):
         actions = QHBoxLayout()
         self.validate_btn = QPushButton("Validate TSV")
         self.validate_btn.clicked.connect(self._validate_input)
-        self.process_btn = QPushButton("Process and Export")
+        self.process_btn = QPushButton("Create Review Workbook")
         self.process_btn.setObjectName("PrimaryButton")
         self.process_btn.setEnabled(False)
         self.process_btn.clicked.connect(self._start_processing)
+        actions.addStretch()
         actions.addWidget(self.validate_btn)
         actions.addWidget(self.process_btn)
-        actions.addStretch()
         layout.addLayout(actions)
 
-        activity = QGroupBox("Run Activity")
+        activity = QGroupBox("Activity")
+        activity.setMaximumHeight(190)
         activity_layout = QVBoxLayout(activity)
-        activity_help = QLabel("Validation, processing, and evidence updates appear here in chronological order.")
+        activity_help = QLabel("Validation and processing messages for the current analysis.")
         activity_help.setObjectName("HelperText")
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(500)
-        self.log.setPlaceholderText("No activity yet. Select an Archer TSV to begin.")
+        self.log.setPlaceholderText("No activity yet. Select a variant TSV to begin.")
         activity_layout.addWidget(activity_help)
         activity_layout.addWidget(self.log, 1)
-        layout.addWidget(activity, 1)
+        layout.addWidget(activity)
+        layout.addStretch()
         return page
 
     def _review_tab(self) -> QWidget:
@@ -707,106 +699,95 @@ class MainWindow(QMainWindow):
         database_content = QWidget()
         layout = QVBoxLayout(database_content)
         layout.setSpacing(12)
-        intro = QLabel(
-            "Choose only the evidence sources needed for this review. The app completes "
-            "one patient at a time; website sources use a randomized safety delay and MTBP runs last."
-        )
-        intro.setObjectName("PageIntro")
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
 
-        evidence_hero = QFrame()
-        evidence_hero.setObjectName("EvidenceHero")
-        evidence_hero_layout = QHBoxLayout(evidence_hero)
-        evidence_copy = QVBoxLayout()
-        evidence_title = QLabel("Patient-by-patient evidence collection")
-        evidence_title.setObjectName("SectionTitle")
+        command = QFrame()
+        command.setObjectName("EvidenceCommand")
+        command_layout = QHBoxLayout(command)
+        command_layout.setContentsMargins(16, 13, 16, 13)
+        command_copy = QVBoxLayout()
+        command_title = QLabel("Research queue")
+        command_title.setObjectName("SectionTitle")
         self.evidence_summary = QLabel("Choose sources to prepare a search")
         self.evidence_summary.setObjectName("HelperText")
-        evidence_copy.addWidget(evidence_title)
-        evidence_copy.addWidget(self.evidence_summary)
-        evidence_order = QLabel("MTBP  ·  Franklin  ·  ClinVar  ·  OncoKB  ·  COSMIC")
-        evidence_order.setObjectName("EvidenceOrder")
-        evidence_order.setWordWrap(True)
-        evidence_order.setMaximumWidth(360)
-        evidence_order.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        evidence_hero_layout.addLayout(evidence_copy, 1)
-        evidence_hero_layout.addWidget(evidence_order)
-        layout.addWidget(evidence_hero)
+        command_copy.addWidget(command_title)
+        command_copy.addWidget(self.evidence_summary)
+        command_layout.addLayout(command_copy, 1)
+        self.search_btn = QPushButton("Run Evidence Search")
+        self.search_btn.setObjectName("PrimaryButton")
+        self.search_btn.setMinimumWidth(190)
+        self.search_btn.setEnabled(False)
+        self.search_btn.clicked.connect(self._start_database_search)
+        command_layout.addWidget(self.search_btn)
+        layout.addWidget(command)
 
-        checks = QGroupBox("1. Choose Evidence Sources")
-        checks.setMinimumHeight(185)
+        checks = QGroupBox("Evidence sources")
+        checks.setMinimumHeight(118)
         grid = QGridLayout(checks)
-        grid.setHorizontalSpacing(20)
-        grid.setVerticalSpacing(8)
+        grid.setHorizontalSpacing(9)
+        grid.setVerticalSpacing(6)
+        source_copy = {
+            "MTBP": "Report synthesis",
+            "Franklin": "Variant prediction",
+            "ClinVar": "Clinical classification",
+            "OncoKB": "Oncology knowledge",
+            "COSMIC": "Tumour evidence",
+        }
         self.db_checks: dict[str, QCheckBox] = {}
         for index, database in enumerate(self.databases):
-            check = QCheckBox(database)
+            check = QCheckBox(f"{database}\n{source_copy[database]}")
+            check.setObjectName("SourceCard")
+            check.setMinimumHeight(60)
             check.setChecked(database in self.settings.enabled_databases)
             if database in BROWSER_DATABASES:
                 check.setProperty("loginSource", True)
                 check.setToolTip("Uses the saved signed-in browser session.")
             self.db_checks[database] = check
             check.stateChanged.connect(self._update_evidence_summary)
-            grid.addWidget(check, index // 4, index % 4)
-        scope_row = (len(self.databases) - 1) // 4 + 1
+            grid.addWidget(check, 0, index)
+            grid.setColumnStretch(index, 1)
+        layout.addWidget(checks)
+
+        options = QGroupBox("Search scope and browser session")
+        options_grid = QGridLayout(options)
+        options_grid.setColumnStretch(1, 1)
+        options_grid.setHorizontalSpacing(12)
+        options_grid.setVerticalSpacing(9)
         scope_label = QLabel("Lookup scope")
         scope_label.setObjectName("FieldLabel")
-        grid.addWidget(scope_label, scope_row, 0)
+        options_grid.addWidget(scope_label, 0, 0)
         self.included_only_check = QCheckBox("Included variants only")
         self.included_only_check.setChecked(self.settings.search_included_only)
         self.included_only_check.stateChanged.connect(self._update_evidence_summary)
         self.included_only_check.setToolTip(
             "When enabled, excluded and flagged variants are not sent to any database website."
         )
-        grid.addWidget(self.included_only_check, scope_row, 1)
-        grid.addWidget(QLabel("API workers / patient"), scope_row, 2)
+        options_grid.addWidget(self.included_only_check, 0, 1)
+        serial_label = QLabel("Serial patient queue")
+        serial_label.setObjectName("FieldLabel")
+        options_grid.addWidget(serial_label, 0, 2)
         self.worker_count = QSpinBox()
         self.worker_count.setRange(1, 1)
         self.worker_count.setValue(1)
         self.worker_count.setToolTip(
             "Patient-centric evidence collection is deliberately serial to avoid bursts of requests."
         )
-        grid.addWidget(self.worker_count, scope_row, 3)
-        selection_row = scope_row + 1
+        options_grid.addWidget(self.worker_count, 0, 3)
         selection_label = QLabel("Reviewed workbook")
         selection_label.setObjectName("FieldLabel")
-        grid.addWidget(selection_label, selection_row, 0)
+        options_grid.addWidget(selection_label, 1, 0)
         self.selection_status = QLabel("No skip list loaded")
         self.selection_status.setObjectName("HelperText")
         self.selection_status.setWordWrap(True)
-        grid.addWidget(self.selection_status, selection_row, 1, 1, 2)
-        self.load_selection_btn = QPushButton("Load X Selections")
+        options_grid.addWidget(self.selection_status, 1, 1, 1, 2)
+        self.load_selection_btn = QPushButton("Load Selection Workbook")
         self.load_selection_btn.setEnabled(False)
         self.load_selection_btn.setToolTip(
             "Load the processed workbook and skip rows marked X on Database Selection."
         )
         self.load_selection_btn.clicked.connect(self._load_database_selection)
-        grid.addWidget(self.load_selection_btn, selection_row, 3)
-        layout.addWidget(checks)
+        options_grid.addWidget(self.load_selection_btn, 1, 3)
 
-        collection = QGroupBox("2. Collect Evidence")
-        collection.setMinimumHeight(175)
-        collection_grid = QGridLayout(collection)
-        collection_grid.setColumnStretch(1, 1)
-        collection_grid.setHorizontalSpacing(12)
-        collection_grid.setVerticalSpacing(9)
-        automated_label = QLabel("Selected sources")
-        automated_label.setObjectName("FieldLabel")
-        automated_help = QLabel(
-            "Completes every selected source for one patient before starting the next; MTBP runs last."
-        )
-        automated_help.setObjectName("HelperText")
-        automated_help.setWordWrap(True)
-        self.search_btn = QPushButton("Search Selected Sources")
-        self.search_btn.setObjectName("PrimaryButton")
-        self.search_btn.setEnabled(False)
-        self.search_btn.clicked.connect(self._start_database_search)
-        collection_grid.addWidget(automated_label, 0, 0)
-        collection_grid.addWidget(automated_help, 0, 1)
-        collection_grid.addWidget(self.search_btn, 0, 2)
-
-        browser_label = QLabel("Signed-in session")
+        browser_label = QLabel("Browser provider")
         browser_label.setObjectName("FieldLabel")
         self.browser_database_combo = QComboBox()
         self.browser_database_combo.addItems(list(BROWSER_DATABASES))
@@ -822,40 +803,37 @@ class MainWindow(QMainWindow):
             "Runs selected ClinVar, COSMIC, OncoKB, Franklin, and MTBP sources patient-by-patient in visible Edge."
         )
         self.browser_review_btn.clicked.connect(self._start_browser_review)
-        session_actions = QHBoxLayout()
-        session_actions.setContentsMargins(0, 0, 0, 0)
-        session_actions.addWidget(self.browser_database_combo)
-        session_actions.addWidget(self.browser_signin_btn)
-        session_actions.addWidget(self.browser_review_btn)
-        collection_grid.addWidget(browser_label, 1, 0)
-        collection_grid.addLayout(session_actions, 1, 1, 1, 2)
+        options_grid.addWidget(browser_label, 2, 0)
+        options_grid.addWidget(self.browser_database_combo, 2, 1)
+        options_grid.addWidget(self.browser_signin_btn, 2, 2)
+        options_grid.addWidget(self.browser_review_btn, 2, 3)
         self.browser_security_label = QLabel(
-            "Credentials stay in Windows Credential Manager. Patient/sample IDs are never submitted; only variant coordinates are sent."
+            "Local privacy guard: only variant coordinates are sent; patient and sample identifiers remain on this computer."
         )
         self.browser_security_label.setObjectName("SecurityNote")
         self.browser_security_label.setWordWrap(True)
-        collection_grid.addWidget(self.browser_security_label, 2, 1, 1, 2)
-        layout.addWidget(collection)
+        options_grid.addWidget(self.browser_security_label, 3, 1, 1, 3)
+        layout.addWidget(options)
 
-        exports = QGroupBox("3. Create Reviewed Outputs")
+        exports = QGroupBox("Reports")
         exports.setMinimumHeight(105)
         export_layout = QHBoxLayout(exports)
         export_help = QLabel(
-            "Patient Excel reports use Oversikt, Vedlegg, and one sheet per variant with MTBP, Franklin, ClinVar, OncoKB, and COSMIC captures."
+            "Generate VPM interpretation workbooks with Oversikt, Vedlegg, variant sheets, evidence links, and screenshots."
         )
         export_help.setObjectName("HelperText")
         export_help.setWordWrap(True)
-        self.rewrite_btn = QPushButton("Rewrite Workbook With Evidence")
+        self.rewrite_btn = QPushButton("Update Review Workbook")
         self.rewrite_btn.setEnabled(False)
         self.rewrite_btn.clicked.connect(self._rewrite_workbook)
-        self.patient_excel_btn = QPushButton("Export Patient Excel Reports")
+        self.patient_excel_btn = QPushButton("Create Patient Workbooks")
         self.patient_excel_btn.setObjectName("ReportButton")
         self.patient_excel_btn.setEnabled(False)
         self.patient_excel_btn.setToolTip(
             "Creates one image-led Excel evidence report per DIT/patient."
         )
         self.patient_excel_btn.clicked.connect(self._export_patient_excels)
-        self.patient_pdf_btn = QPushButton("Export Patient PDFs")
+        self.patient_pdf_btn = QPushButton("Create Patient PDFs")
         self.patient_pdf_btn.setEnabled(False)
         self.patient_pdf_btn.setToolTip(
             "Creates one clinical review PDF per DIT containing included variants and captured evidence."
@@ -867,7 +845,7 @@ class MainWindow(QMainWindow):
         export_layout.addWidget(self.patient_pdf_btn)
         layout.addWidget(exports)
 
-        evidence_group = QGroupBox("Evidence Results")
+        evidence_group = QGroupBox("Evidence matrix")
         evidence_group.setMinimumHeight(330)
         evidence_layout = QVBoxLayout(evidence_group)
         self.evidence_result_summary = QLabel(
@@ -894,7 +872,7 @@ class MainWindow(QMainWindow):
         self._update_evidence_summary()
         return page
 
-    def _settings_tab(self) -> QWidget:
+    def _settings_tab_v2(self) -> QWidget:
         page = QWidget()
         page_layout = QVBoxLayout(page)
         page_layout.setContentsMargins(0, 0, 0, 0)
@@ -903,53 +881,92 @@ class MainWindow(QMainWindow):
         self.settings_scroll.setFrameShape(QFrame.Shape.NoFrame)
         settings_content = QWidget()
         layout = QVBoxLayout(settings_content)
-        settings_intro = QLabel(
-            "Configure local files, provider access, pacing, and artifact rules. Passwords are stored through Windows Credential Manager and are never written into the workbook."
-        )
-        settings_intro.setObjectName("PageIntro")
-        settings_intro.setWordWrap(True)
-        layout.addWidget(settings_intro)
-        settings_map = QHBoxLayout()
-        settings_map.setSpacing(10)
-        settings_map.addWidget(WorkflowStep("01", "Local files", "History workbook and report destination."))
-        settings_map.addWidget(WorkflowStep("02", "Provider access", "API tokens and signed-in website accounts."))
-        settings_map.addWidget(WorkflowStep("03", "Run safety", "Pacing, timeout, and artifact exclusions."))
-        layout.addLayout(settings_map)
-        group = QGroupBox("Local Configuration")
-        grid = QGridLayout(group)
-        grid.setColumnStretch(1, 1)
+        layout.setSpacing(12)
+
+        local_group = QGroupBox("Local workspace")
+        local_grid = QGridLayout(local_group)
+        local_grid.setColumnStretch(1, 1)
         self.history_edit = QLineEdit(self.settings.history_workbook)
         history_btn = QPushButton("Browse")
         history_btn.clicked.connect(self._browse_history)
         self.output_dir_edit = QLineEdit(self.settings.default_output_dir)
         dir_btn = QPushButton("Browse")
         dir_btn.clicked.connect(self._browse_output_dir)
+        local_grid.addWidget(QLabel("Variant history workbook"), 0, 0)
+        local_grid.addWidget(self.history_edit, 0, 1)
+        local_grid.addWidget(history_btn, 0, 2)
+        local_grid.addWidget(QLabel("Default report folder"), 1, 0)
+        local_grid.addWidget(self.output_dir_edit, 1, 1)
+        local_grid.addWidget(dir_btn, 1, 2)
+        layout.addWidget(local_group)
+
+        access_group = QGroupBox("Provider access")
+        access_grid = QGridLayout(access_group)
+        for column in range(1, 4):
+            access_grid.setColumnStretch(column, 1)
+        for column, title in enumerate(["Provider", "API token", "Account email", "Password"]):
+            header = QLabel(title)
+            header.setObjectName("SettingsColumnHeader")
+            access_grid.addWidget(header, 0, column)
+
         self.clinvar_key_edit = QLineEdit(self.settings.clinvar_api_key)
         self.clinvar_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.clinvar_key_edit.setPlaceholderText("Optional NCBI API key")
         self.cosmic_email_edit = QLineEdit(self.settings.cosmic_email)
-        self.cosmic_password_edit = QLineEdit()
-        self.cosmic_password_edit.setText(self.settings.cosmic_password)
+        self.cosmic_password_edit = QLineEdit(self.settings.cosmic_password)
         self.cosmic_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.cosmic_password_edit.setPlaceholderText("Stored in Windows Credential Manager")
         self.oncokb_key_edit = QLineEdit(self.settings.oncokb_api_key)
         self.oncokb_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.oncokb_key_edit.setPlaceholderText("Optional API token")
         self.oncokb_email_edit = QLineEdit(self.settings.oncokb_email)
-        self.oncokb_password_edit = QLineEdit()
-        self.oncokb_password_edit.setText(self.settings.oncokb_password)
+        self.oncokb_password_edit = QLineEdit(self.settings.oncokb_password)
         self.oncokb_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.oncokb_password_edit.setPlaceholderText("Stored in Windows Credential Manager")
         self.franklin_key_edit = QLineEdit(self.settings.franklin_api_key)
         self.franklin_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.franklin_key_edit.setPlaceholderText("Optional API token")
         self.franklin_email_edit = QLineEdit(self.settings.franklin_email)
-        self.franklin_password_edit = QLineEdit()
-        self.franklin_password_edit.setText(self.settings.franklin_password)
+        self.franklin_password_edit = QLineEdit(self.settings.franklin_password)
         self.franklin_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.franklin_password_edit.setPlaceholderText("Stored in Windows Credential Manager")
         self.mtbp_email_edit = QLineEdit(self.settings.mtbp_email)
-        self.mtbp_password_edit = QLineEdit()
-        self.mtbp_password_edit.setText(self.settings.mtbp_password)
+        self.mtbp_password_edit = QLineEdit(self.settings.mtbp_password)
         self.mtbp_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.mtbp_password_edit.setPlaceholderText("Stored in Windows Credential Manager")
+        for password in [
+            self.cosmic_password_edit,
+            self.oncokb_password_edit,
+            self.franklin_password_edit,
+            self.mtbp_password_edit,
+        ]:
+            password.setPlaceholderText("Windows secured")
+
+        def not_required() -> QLabel:
+            label = QLabel("Not required")
+            label.setObjectName("NotRequired")
+            return label
+
+        provider_rows = [
+            ("ClinVar", self.clinvar_key_edit, not_required(), not_required()),
+            ("COSMIC", not_required(), self.cosmic_email_edit, self.cosmic_password_edit),
+            ("OncoKB", self.oncokb_key_edit, self.oncokb_email_edit, self.oncokb_password_edit),
+            ("Franklin", self.franklin_key_edit, self.franklin_email_edit, self.franklin_password_edit),
+            ("MTBP", not_required(), self.mtbp_email_edit, self.mtbp_password_edit),
+        ]
+        for row, (provider, token, email, password) in enumerate(provider_rows, start=1):
+            provider_label = QLabel(provider)
+            provider_label.setObjectName("FieldLabel")
+            access_grid.addWidget(provider_label, row, 0)
+            access_grid.addWidget(token, row, 1)
+            access_grid.addWidget(email, row, 2)
+            access_grid.addWidget(password, row, 3)
+        credential_note = QLabel(
+            "Passwords are stored by Windows Credential Manager and never written to patient reports."
+        )
+        credential_note.setObjectName("SecurityNote")
+        access_grid.addWidget(credential_note, 6, 1, 1, 3)
+        layout.addWidget(access_group)
+
+        safety_group = QGroupBox("Search safeguards")
+        safety_grid = QGridLayout(safety_group)
+        safety_grid.setColumnStretch(1, 1)
         self.mtbp_cancer_type_edit = QLineEdit(self.settings.mtbp_cancer_type)
         self.mtbp_cancer_type_edit.setPlaceholderText("Exact MTBP cancer type, for example Blood")
         self.browser_delay_spin = QSpinBox()
@@ -962,9 +979,7 @@ class MainWindow(QMainWindow):
         self.browser_delay_max_spin = QSpinBox()
         self.browser_delay_max_spin.setRange(0, 120)
         self.browser_delay_max_spin.setSuffix(" s")
-        self.browser_delay_max_spin.setValue(
-            self.settings.browser_delay_max_seconds
-        )
+        self.browser_delay_max_spin.setValue(self.settings.browser_delay_max_seconds)
         self.browser_delay_max_spin.setToolTip(
             "Maximum randomized pause between signed-in website searches and providers. APIs are not delayed."
         )
@@ -980,9 +995,23 @@ class MainWindow(QMainWindow):
         self.mtbp_timeout_spin.setRange(5, 60)
         self.mtbp_timeout_spin.setSuffix(" min")
         self.mtbp_timeout_spin.setValue(self.settings.mtbp_timeout_minutes)
+        safety_grid.addWidget(QLabel("MTBP cancer type"), 0, 0)
+        safety_grid.addWidget(self.mtbp_cancer_type_edit, 0, 1)
+        safety_grid.addWidget(QLabel("Website pacing"), 1, 0)
+        safety_grid.addLayout(delay_layout, 1, 1)
+        safety_grid.addWidget(QLabel("MTBP report timeout"), 2, 0)
+        safety_grid.addWidget(self.mtbp_timeout_spin, 2, 1)
+        reference_note = QLabel("Reference context: Somatic · hg19 / GRCh37")
+        reference_note.setObjectName("ProfileNote")
+        safety_grid.addWidget(reference_note, 3, 1)
+        layout.addWidget(safety_group)
+
+        artifact_group = QGroupBox("Artifact exclusions")
+        artifact_layout = QVBoxLayout(artifact_group)
         self.artifact_table = QTableWidget(0, 3)
         self.artifact_table.setHorizontalHeaderLabels(["Gene", "HGVSc", "Reason"])
         self.artifact_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.artifact_table.setMinimumHeight(180)
         self._load_artifact_table(self.settings.artifact_rules)
         artifact_actions = QHBoxLayout()
         add_artifact_btn = QPushButton("Add Artifact")
@@ -995,58 +1024,31 @@ class MainWindow(QMainWindow):
         artifact_actions.addWidget(remove_artifact_btn)
         artifact_actions.addWidget(reset_artifact_btn)
         artifact_actions.addStretch()
-        save_btn = QPushButton("Save Settings")
+        artifact_layout.addWidget(self.artifact_table)
+        artifact_layout.addLayout(artifact_actions)
+        layout.addWidget(artifact_group)
+
+        save_row = QHBoxLayout()
+        saved_locally = QLabel("Configuration is stored locally for this Windows user.")
+        saved_locally.setObjectName("HelperText")
+        save_btn = QPushButton("Save Configuration")
         save_btn.setObjectName("PrimaryButton")
         save_btn.clicked.connect(self._save_settings)
-        grid.addWidget(QLabel("History workbook"), 0, 0)
-        grid.addWidget(self.history_edit, 0, 1)
-        grid.addWidget(history_btn, 0, 2)
-        grid.addWidget(QLabel("Default output folder"), 1, 0)
-        grid.addWidget(self.output_dir_edit, 1, 1)
-        grid.addWidget(dir_btn, 1, 2)
-        grid.addWidget(QLabel("ClinVar API key"), 2, 0)
-        grid.addWidget(self.clinvar_key_edit, 2, 1)
-        grid.addWidget(QLabel("COSMIC email"), 3, 0)
-        grid.addWidget(self.cosmic_email_edit, 3, 1)
-        grid.addWidget(QLabel("COSMIC password"), 4, 0)
-        grid.addWidget(self.cosmic_password_edit, 4, 1)
-        grid.addWidget(QLabel("OncoKB API token"), 5, 0)
-        grid.addWidget(self.oncokb_key_edit, 5, 1)
-        grid.addWidget(QLabel("OncoKB email"), 6, 0)
-        grid.addWidget(self.oncokb_email_edit, 6, 1)
-        grid.addWidget(QLabel("OncoKB password"), 7, 0)
-        grid.addWidget(self.oncokb_password_edit, 7, 1)
-        grid.addWidget(QLabel("Franklin API token"), 8, 0)
-        grid.addWidget(self.franklin_key_edit, 8, 1)
-        grid.addWidget(QLabel("Franklin email"), 9, 0)
-        grid.addWidget(self.franklin_email_edit, 9, 1)
-        grid.addWidget(QLabel("Franklin password"), 10, 0)
-        grid.addWidget(self.franklin_password_edit, 10, 1)
-        grid.addWidget(QLabel("MTBP email"), 11, 0)
-        grid.addWidget(self.mtbp_email_edit, 11, 1)
-        grid.addWidget(QLabel("MTBP password"), 12, 0)
-        grid.addWidget(self.mtbp_password_edit, 12, 1)
-        grid.addWidget(QLabel("MTBP cancer type"), 13, 0)
-        grid.addWidget(self.mtbp_cancer_type_edit, 13, 1)
-        grid.addWidget(QLabel("Website safety delay"), 14, 0)
-        grid.addLayout(delay_layout, 14, 1, 1, 2)
-        grid.addWidget(QLabel("MTBP report timeout"), 15, 0)
-        grid.addWidget(self.mtbp_timeout_spin, 15, 1)
-        grid.addWidget(QLabel("Artifact list"), 16, 0)
-        grid.addWidget(self.artifact_table, 16, 1, 1, 2)
-        grid.addLayout(artifact_actions, 17, 1, 1, 2)
-        grid.addWidget(save_btn, 18, 2)
-        layout.addWidget(group)
+        save_row.addWidget(saved_locally)
+        save_row.addStretch()
+        save_row.addWidget(save_btn)
+        layout.addLayout(save_row)
         layout.addStretch()
         self.settings_scroll.setWidget(settings_content)
         page_layout.addWidget(self.settings_scroll)
         return page
 
+
     def _browse_input(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Select Archer TSV", "", "TSV files (*.tsv *.txt);;All files (*.*)")
+        path, _ = QFileDialog.getOpenFileName(self, "Select variant TSV", "", "TSV files (*.tsv *.txt);;All files (*.*)")
         if path:
             self.input_edit.setText(path)
-            output = Path(self.settings.default_output_dir) / f"{Path(path).stem}_archer_review.xlsx"
+            output = Path(self.settings.default_output_dir) / f"{Path(path).stem}_VPM_review.xlsx"
             self.output_edit.setText(str(output))
 
     def _browse_output(self) -> None:
@@ -1723,11 +1725,14 @@ class MainWindow(QMainWindow):
                 font-family: "Segoe UI";
                 font-size: 13px;
             }}
+            QLabel {{
+                background: transparent;
+            }}
             QWidget#AppRoot, QWidget#ContentShell {{
                 background: {Palette.app_bg};
             }}
             QFrame#Sidebar {{
-                background: {Palette.navy};
+                background: #08283A;
                 border: none;
             }}
             QLabel#BrandMark {{
@@ -1756,38 +1761,41 @@ class MainWindow(QMainWindow):
             }}
             QPushButton#SidebarButton {{
                 background: transparent;
-                color: #D5E8F1;
+                color: #DCECF2;
                 border: 1px solid transparent;
-                border-radius: 9px;
-                padding: 8px 10px;
+                border-radius: 8px;
+                padding: 9px 10px;
                 text-align: left;
                 font-weight: 600;
             }}
             QPushButton#SidebarButton:hover {{
-                background: #145A7D;
+                background: #103E52;
                 color: white;
-                border-color: #28799E;
+                border-color: #28586A;
             }}
             QPushButton#SidebarButton:checked {{
-                background: {Palette.blue};
+                background: #0C7696;
                 color: white;
-                border-color: #38A7DD;
+                border-color: #49B4C6;
             }}
             QPushButton#SidebarButton:focus {{
                 border: 2px solid #7DD3FC;
             }}
-            QLabel#SidebarWorkflow {{
-                background: transparent;
-                color: white;
-                font-weight: 650;
-                padding: 0 8px 6px 8px;
+            QLabel#ReferenceProfile {{
+                color: #D9F6F3;
+                background: #0D394C;
+                border: 1px solid #2B6071;
+                border-radius: 7px;
+                padding: 8px 10px;
+                font-size: 11px;
+                font-weight: 700;
             }}
             QLabel#LocalNote {{
-                background: #123F59;
-                color: #C9E4EF;
-                border: 1px solid #256B8A;
+                background: transparent;
+                color: #9BC1CF;
+                border: none;
                 border-radius: 8px;
-                padding: 10px;
+                padding: 8px 2px;
                 font-size: 11px;
             }}
             QLabel#PageEyebrow {{
@@ -1798,7 +1806,7 @@ class MainWindow(QMainWindow):
             }}
             QLabel#PageTitle {{
                 color: {Palette.navy};
-                font-size: 24px;
+                font-size: 26px;
                 font-weight: 750;
             }}
             QLabel#PageSubtitle {{
@@ -1812,9 +1820,9 @@ class MainWindow(QMainWindow):
             QGroupBox {{
                 background: {Palette.panel};
                 border: 1px solid {Palette.border};
-                border-radius: 10px;
+                border-radius: 9px;
                 margin-top: 14px;
-                padding: 16px 12px 12px 12px;
+                padding: 14px 12px 12px 12px;
                 font-weight: 600;
                 color: {Palette.navy};
             }}
@@ -1826,10 +1834,13 @@ class MainWindow(QMainWindow):
             QLineEdit, QDateEdit, QPlainTextEdit, QTableWidget, QComboBox, QSpinBox {{
                 background: {Palette.panel};
                 border: 1px solid {Palette.border};
-                border-radius: 7px;
-                padding: 6px;
+                border-radius: 6px;
+                padding: 7px;
                 selection-background-color: {Palette.pale_blue};
                 selection-color: {Palette.navy};
+            }}
+            QLineEdit, QDateEdit, QComboBox, QSpinBox {{
+                min-height: 20px;
             }}
             QLineEdit:focus, QDateEdit:focus, QPlainTextEdit:focus,
             QTableWidget:focus, QComboBox:focus, QSpinBox:focus {{
@@ -1838,8 +1849,8 @@ class MainWindow(QMainWindow):
             QPushButton {{
                 background: {Palette.panel};
                 border: 1px solid {Palette.border};
-                border-radius: 7px;
-                padding: 8px 14px;
+                border-radius: 6px;
+                padding: 9px 15px;
                 font-weight: 600;
             }}
             QPushButton:hover {{
@@ -1857,7 +1868,7 @@ class MainWindow(QMainWindow):
                 border-color: {Palette.blue};
             }}
             QPushButton#PrimaryButton:hover {{
-                background: #036FA6;
+                background: #076B8C;
             }}
             QPushButton#OutlineButton {{
                 background: {Palette.pale_blue};
@@ -1875,20 +1886,20 @@ class MainWindow(QMainWindow):
             QFrame#MetricCard {{
                 background: {Palette.panel};
                 border: 1px solid {Palette.border};
-                border-radius: 10px;
+                border-radius: 8px;
             }}
-            QFrame#WorkflowStep {{
+            QFrame#ToolbarCard, QFrame#RunProgressCard,
+            QFrame#AnalysisProfile, QFrame#EvidenceCommand {{
                 background: {Palette.panel};
                 border: 1px solid {Palette.border};
                 border-radius: 9px;
             }}
-            QFrame#ToolbarCard, QFrame#EvidenceHero, QFrame#RunProgressCard {{
-                background: {Palette.panel};
-                border: 1px solid {Palette.border};
-                border-radius: 10px;
+            QFrame#AnalysisProfile {{
+                background: #EAF5F6;
+                border-left: 4px solid {Palette.cyan};
             }}
-            QFrame#EvidenceHero {{
-                background: #F8FCFE;
+            QFrame#EvidenceCommand {{
+                background: #EEF7F8;
                 border-left: 4px solid {Palette.blue};
             }}
             QLabel#SectionTitle, QLabel#RunProgressTitle {{
@@ -1896,38 +1907,46 @@ class MainWindow(QMainWindow):
                 font-size: 14px;
                 font-weight: 750;
             }}
-            QLabel#EvidenceOrder {{
-                color: {Palette.blue};
-                font-weight: 700;
-                padding: 6px 10px;
-                background: {Palette.pale_blue};
-                border-radius: 7px;
-            }}
             QLabel#RunProgressCount {{
                 color: {Palette.blue};
                 font-weight: 700;
             }}
-            QLabel#StepNumber {{
-                background: {Palette.navy};
-                color: white;
-                border-radius: 15px;
+            QLabel#ProfileChip, QLabel#ProfileNote {{
+                background: #DDF0F1;
+                color: #0A5966;
+                border: 1px solid #B7DCDD;
+                border-radius: 6px;
+                padding: 6px 9px;
+                font-size: 11px;
                 font-weight: 700;
             }}
-            QLabel#StepTitle {{
-                color: {Palette.navy};
-                font-size: 13px;
-                font-weight: 700;
-            }}
-            QLabel#StepDescription, QLabel#HelperText {{
-                color: {Palette.muted};
-                font-size: 12px;
-            }}
-            QLabel#PageIntro {{
-                background: {Palette.pale_blue};
+            QCheckBox#SourceCard {{
+                background: #F8FBFC;
                 color: {Palette.navy};
                 border: 1px solid {Palette.border};
-                border-radius: 8px;
-                padding: 10px 12px;
+                border-radius: 7px;
+                padding: 9px 10px;
+                font-weight: 650;
+            }}
+            QCheckBox#SourceCard:hover {{
+                background: {Palette.pale_blue};
+                border-color: {Palette.cyan};
+            }}
+            QLabel#SettingsColumnHeader {{
+                color: {Palette.muted};
+                font-size: 11px;
+                font-weight: 700;
+                padding-bottom: 3px;
+            }}
+            QLabel#NotRequired {{
+                color: #8094A0;
+                background: #F1F5F7;
+                border-radius: 6px;
+                padding: 8px;
+            }}
+            QLabel#HelperText {{
+                color: {Palette.muted};
+                font-size: 12px;
             }}
             QLabel#FieldLabel {{
                 color: {Palette.navy};
@@ -1941,7 +1960,7 @@ class MainWindow(QMainWindow):
                 font-size: 12px;
             }}
             QCheckBox[loginSource="true"] {{
-                color: {Palette.blue};
+                color: {Palette.navy};
                 font-weight: 600;
             }}
             QLabel#StatusBadge {{
@@ -1953,10 +1972,11 @@ class MainWindow(QMainWindow):
                 font-weight: 700;
             }}
             QHeaderView::section {{
-                background: {Palette.navy};
+                background: #0B3A50;
                 color: white;
                 padding: 8px;
                 border: none;
+                border-right: 1px solid #1E5368;
                 font-weight: 700;
             }}
             QTableWidget {{
@@ -2009,7 +2029,7 @@ class MainWindow(QMainWindow):
 def main() -> None:
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    icon_path = Path(__file__).resolve().parents[1] / "assets" / "archer-prosess-icon.png"
+    icon_path = Path(__file__).resolve().parents[1] / "assets" / "vpm-tolkning-icon.png"
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
     window = MainWindow()

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from PIL import Image
+
 from archer_processor.core import DatabaseEvidence, VariantProcessor
 from archer_processor.gui.app import DatabaseWorker, MainWindow
 from archer_processor.services import DatabaseSearchService
@@ -56,7 +58,7 @@ def test_sidebar_navigation_switches_workspace_pages(qt_app):
 
     assert window.tabs.currentIndex() == 2
     assert window.nav_buttons[2].isChecked()
-    assert window.page_title.text() == "Evidence workspace"
+    assert window.page_title.text() == "Evidence search"
     assert window.page_eyebrow.text().endswith("EVIDENCE")
 
 
@@ -86,7 +88,17 @@ def test_application_icon_is_packaged_and_loaded(qt_app):
     window = MainWindow()
 
     assert window.app_icon_path.exists()
+    assert window.app_icon_path.name == "vpm-tolkning-icon.png"
+    assert window.windowTitle() == "VPM Tolkning"
     assert not window.windowIcon().isNull()
+    with Image.open(window.app_icon_path) as icon:
+        corners = [
+            icon.getpixel((0, 0)),
+            icon.getpixel((icon.width - 1, 0)),
+            icon.getpixel((0, icon.height - 1)),
+            icon.getpixel((icon.width - 1, icon.height - 1)),
+        ]
+    assert all(max(corner[:3]) < 80 for corner in corners)
 
 
 def test_browser_evidence_merge_replaces_placeholders_for_every_variant(qt_app):

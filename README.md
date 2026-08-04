@@ -1,6 +1,6 @@
-# Archer Prosess
+# VPM Tolkning
 
-Clinical desktop tool for processing Archer Analysis VPM TSV files.
+Clinical desktop workstation for somatic VPM variant interpretation, evidence research, and patient reporting. Archer Analysis TSV exports are supported as the input format.
 
 The app is being rebuilt as a clean PyQt6 project with a stable processing core:
 

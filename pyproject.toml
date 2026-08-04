@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "archer-prosess"
 version = "0.1.0"
-description = "Clinical PyQt6 app for Archer Analysis VPM TSV processing"
+description = "Clinical desktop workstation for somatic VPM variant interpretation"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -27,6 +27,7 @@ dev = [
 
 [project.scripts]
 archer-prosess = "archer_processor.__main__:main"
+vpm-tolkning = "archer_processor.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
