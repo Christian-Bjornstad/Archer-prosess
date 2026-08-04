@@ -5,8 +5,8 @@ import random
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import QDate, QObject, Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QColor, QFont
+from PyQt6.QtCore import QDate, QObject, Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -120,6 +120,7 @@ class DatabaseWorker(QObject):
     patient_finished = pyqtSignal(object)
     failed = pyqtSignal(str)
     status = pyqtSignal(str)
+    progress = pyqtSignal(int, int, str)
 
     def __init__(
         self,
@@ -149,11 +150,17 @@ class DatabaseWorker(QObject):
                 f"Patient-by-patient search started: {len(patients)} patients, "
                 f"{len(self.databases)} sources"
             )
+            self.progress.emit(0, len(patients), "Preparing patient queue")
             for patient_index, (patient_id, patient_variants) in enumerate(patients, start=1):
                 patient_evidence: dict[str, list[DatabaseEvidence]] = {
                     api_service.variant_key(variant): [] for variant in patient_variants
                 }
                 prefix = f"Patient {patient_index}/{len(patients)} ({patient_id})"
+                self.progress.emit(
+                    patient_index - 1,
+                    len(patients),
+                    f"{patient_id} · {len(patient_variants)} variant(s) · {len(self.databases)} source(s)",
+                )
                 self.status.emit(f"{prefix}: starting {len(patient_variants)} variant(s)")
                 for database in self.api_databases:
                     self.status.emit(f"{prefix}: searching {database}")
@@ -184,6 +191,11 @@ class DatabaseWorker(QObject):
                 _merge_evidence_results(all_evidence, patient_evidence)
                 self.patient_finished.emit(patient_evidence)
                 self.status.emit(f"{prefix}: complete")
+                self.progress.emit(
+                    patient_index,
+                    len(patients),
+                    f"Completed {patient_id}",
+                )
             self.finished.emit(all_evidence)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -255,6 +267,7 @@ class BrowserReviewWorker(QObject):
     patient_finished = pyqtSignal(object)
     failed = pyqtSignal(str)
     status = pyqtSignal(str)
+    progress = pyqtSignal(int, int, str)
 
     def __init__(self, variants, databases: list[str], artifact_root: Path, settings: AppSettings):
         super().__init__()
@@ -282,8 +295,14 @@ class BrowserReviewWorker(QObject):
             )
             all_evidence: dict[str, list[DatabaseEvidence]] = {}
             patients = _variants_grouped_by_patient(self.variants)
+            self.progress.emit(0, len(patients), "Preparing signed-in browser queue")
             for patient_index, (patient_id, patient_variants) in enumerate(patients, start=1):
                 prefix = f"Patient {patient_index}/{len(patients)} ({patient_id})"
+                self.progress.emit(
+                    patient_index - 1,
+                    len(patients),
+                    f"{patient_id} · {len(patient_variants)} variant(s) · {len(self.databases)} source(s)",
+                )
                 patient_evidence = service.search_variants(
                     patient_variants,
                     self.databases,
@@ -293,6 +312,7 @@ class BrowserReviewWorker(QObject):
                 _merge_evidence_results(all_evidence, patient_evidence)
                 self.patient_finished.emit(patient_evidence)
                 self.status.emit(f"{prefix}: browser sources complete")
+                self.progress.emit(patient_index, len(patients), f"Completed {patient_id}")
                 if patient_index < len(patients):
                     delay = random.randint(
                         max(0, int(self.settings.browser_delay_seconds)),
@@ -353,6 +373,40 @@ class WorkflowStep(QFrame):
         layout.addLayout(copy, 1)
 
 
+class RunProgressCard(QFrame):
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("RunProgressCard")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(6)
+        heading = QHBoxLayout()
+        self.title = QLabel("Evidence search")
+        self.title.setObjectName("RunProgressTitle")
+        self.count = QLabel("0 / 0 patients")
+        self.count.setObjectName("RunProgressCount")
+        heading.addWidget(self.title)
+        heading.addStretch()
+        heading.addWidget(self.count)
+        self.detail = QLabel("Preparing patient queue")
+        self.detail.setObjectName("HelperText")
+        self.bar = QProgressBar()
+        self.bar.setObjectName("RunProgressBar")
+        self.bar.setTextVisible(False)
+        layout.addLayout(heading)
+        layout.addWidget(self.detail)
+        layout.addWidget(self.bar)
+        self.hide()
+
+    def update_progress(self, current: int, total: int, detail: str) -> None:
+        safe_total = max(1, total)
+        self.bar.setRange(0, safe_total)
+        self.bar.setValue(min(max(0, current), safe_total))
+        self.count.setText(f"{current} / {total} patients")
+        self.detail.setText(detail)
+        self.show()
+
+
 class MainWindow(QMainWindow):
     databases = [
         "MTBP",
@@ -375,6 +429,11 @@ class MainWindow(QMainWindow):
         self.database_worker: DatabaseWorker | None = None
         self.browser_worker: BrowserLoginWorker | BrowserReviewWorker | None = None
         self.setWindowTitle("Archer Prosess")
+        self.app_icon_path = (
+            Path(__file__).resolve().parents[1] / "assets" / "archer-prosess-icon.png"
+        )
+        if self.app_icon_path.exists():
+            self.setWindowIcon(QIcon(str(self.app_icon_path)))
         self.resize(1440, 900)
         self.setMinimumSize(1120, 720)
         self._build_ui()
@@ -394,10 +453,20 @@ class MainWindow(QMainWindow):
         sidebar_layout.setContentsMargins(18, 22, 18, 18)
         sidebar_layout.setSpacing(8)
 
-        brand_mark = QLabel("AP")
+        brand_mark = QLabel()
         brand_mark.setObjectName("BrandMark")
         brand_mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        brand_mark.setFixedSize(42, 42)
+        brand_mark.setFixedSize(48, 48)
+        if self.app_icon_path.exists():
+            brand_mark.setPixmap(
+                QPixmap(str(self.app_icon_path)).scaled(
+                    48,
+                    48,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+        brand_mark.setAccessibleName("Archer Prosess application icon")
         brand = QLabel("Archer Prosess")
         brand.setObjectName("BrandTitle")
         brand_copy = QLabel("Clinical variant workbench")
@@ -487,6 +556,9 @@ class MainWindow(QMainWindow):
             metrics.addWidget(card)
         layout.addLayout(metrics)
 
+        self.run_progress = RunProgressCard()
+        layout.addWidget(self.run_progress)
+
         self.tabs = QStackedWidget()
         self.tabs.setObjectName("WorkspacePages")
         self.tabs.addWidget(self._processing_tab())
@@ -495,6 +567,12 @@ class MainWindow(QMainWindow):
         self.tabs.addWidget(self._settings_tab())
         layout.addWidget(self.tabs, 1)
         shell.addWidget(content, 1)
+
+        for control in [
+            *root.findChildren(QPushButton),
+            *root.findChildren(QCheckBox),
+        ]:
+            control.setCursor(Qt.CursorShape.PointingHandCursor)
 
         self.setCentralWidget(root)
         self.status_bar = QStatusBar()
@@ -520,6 +598,13 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setSpacing(14)
+
+        workflow = QHBoxLayout()
+        workflow.setSpacing(10)
+        workflow.addWidget(WorkflowStep("01", "Select input", "Choose the Archer TSV and output workbook."))
+        workflow.addWidget(WorkflowStep("02", "Validate", "Check columns and values before processing."))
+        workflow.addWidget(WorkflowStep("03", "Create review", "Export the complete workbook for clinical selection."))
+        layout.addLayout(workflow)
 
         files = QGroupBox("Run Setup")
         grid = QGridLayout(files)
@@ -563,15 +648,42 @@ class MainWindow(QMainWindow):
         actions.addStretch()
         layout.addLayout(actions)
 
+        activity = QGroupBox("Run Activity")
+        activity_layout = QVBoxLayout(activity)
+        activity_help = QLabel("Validation, processing, and evidence updates appear here in chronological order.")
+        activity_help.setObjectName("HelperText")
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(500)
-        layout.addWidget(self.log, 1)
+        self.log.setPlaceholderText("No activity yet. Select an Archer TSV to begin.")
+        activity_layout.addWidget(activity_help)
+        activity_layout.addWidget(self.log, 1)
+        layout.addWidget(activity, 1)
         return page
 
     def _review_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
+        toolbar = QFrame()
+        toolbar.setObjectName("ToolbarCard")
+        toolbar_layout = QHBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(14, 10, 14, 10)
+        self.review_filter_edit = QLineEdit()
+        self.review_filter_edit.setPlaceholderText("Filter sample, gene, HGVS, or warning")
+        self.review_filter_edit.setClearButtonEnabled(True)
+        self.review_filter_edit.textChanged.connect(self._apply_review_filters)
+        self.review_decision_combo = QComboBox()
+        self.review_decision_combo.addItems(
+            ["All decisions", "Included", "Excluded", "Review flags"]
+        )
+        self.review_decision_combo.currentIndexChanged.connect(self._apply_review_filters)
+        self.review_count_label = QLabel("No variants loaded")
+        self.review_count_label.setObjectName("HelperText")
+        toolbar_layout.addWidget(QLabel("Find variants"))
+        toolbar_layout.addWidget(self.review_filter_edit, 1)
+        toolbar_layout.addWidget(self.review_decision_combo)
+        toolbar_layout.addWidget(self.review_count_label)
+        layout.addWidget(toolbar)
         self.variant_table = QTableWidget(0, 8)
         self.variant_table.setHorizontalHeaderLabels(
             ["Sample", "Gene", "HGVSc", "AF", "Depth", "Decision", "History", "Warnings"]
@@ -603,6 +715,25 @@ class MainWindow(QMainWindow):
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
+        evidence_hero = QFrame()
+        evidence_hero.setObjectName("EvidenceHero")
+        evidence_hero_layout = QHBoxLayout(evidence_hero)
+        evidence_copy = QVBoxLayout()
+        evidence_title = QLabel("Patient-by-patient evidence collection")
+        evidence_title.setObjectName("SectionTitle")
+        self.evidence_summary = QLabel("Choose sources to prepare a search")
+        self.evidence_summary.setObjectName("HelperText")
+        evidence_copy.addWidget(evidence_title)
+        evidence_copy.addWidget(self.evidence_summary)
+        evidence_order = QLabel("MTBP  ·  Franklin  ·  ClinVar  ·  OncoKB  ·  COSMIC")
+        evidence_order.setObjectName("EvidenceOrder")
+        evidence_order.setWordWrap(True)
+        evidence_order.setMaximumWidth(360)
+        evidence_order.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        evidence_hero_layout.addLayout(evidence_copy, 1)
+        evidence_hero_layout.addWidget(evidence_order)
+        layout.addWidget(evidence_hero)
+
         checks = QGroupBox("1. Choose Evidence Sources")
         checks.setMinimumHeight(185)
         grid = QGridLayout(checks)
@@ -616,6 +747,7 @@ class MainWindow(QMainWindow):
                 check.setProperty("loginSource", True)
                 check.setToolTip("Uses the saved signed-in browser session.")
             self.db_checks[database] = check
+            check.stateChanged.connect(self._update_evidence_summary)
             grid.addWidget(check, index // 4, index % 4)
         scope_row = (len(self.databases) - 1) // 4 + 1
         scope_label = QLabel("Lookup scope")
@@ -623,6 +755,7 @@ class MainWindow(QMainWindow):
         grid.addWidget(scope_label, scope_row, 0)
         self.included_only_check = QCheckBox("Included variants only")
         self.included_only_check.setChecked(self.settings.search_included_only)
+        self.included_only_check.stateChanged.connect(self._update_evidence_summary)
         self.included_only_check.setToolTip(
             "When enabled, excluded and flagged variants are not sent to any database website."
         )
@@ -677,12 +810,12 @@ class MainWindow(QMainWindow):
         browser_label.setObjectName("FieldLabel")
         self.browser_database_combo = QComboBox()
         self.browser_database_combo.addItems(list(BROWSER_DATABASES))
-        self.browser_signin_btn = QPushButton("Sign In / Refresh")
+        self.browser_signin_btn = QPushButton("Sign In")
         self.browser_signin_btn.setToolTip(
             "Uses credentials stored by Windows Credential Manager, or opens Edge for manual sign-in. The profile is released automatically after success."
         )
         self.browser_signin_btn.clicked.connect(self._start_browser_login)
-        self.browser_review_btn = QPushButton("Run Browser Lookups")
+        self.browser_review_btn = QPushButton("Run Browser Sources")
         self.browser_review_btn.setObjectName("OutlineButton")
         self.browser_review_btn.setEnabled(False)
         self.browser_review_btn.setToolTip(
@@ -737,6 +870,11 @@ class MainWindow(QMainWindow):
         evidence_group = QGroupBox("Evidence Results")
         evidence_group.setMinimumHeight(330)
         evidence_layout = QVBoxLayout(evidence_group)
+        self.evidence_result_summary = QLabel(
+            "No evidence collected yet. Run selected sources to populate this table."
+        )
+        self.evidence_result_summary.setObjectName("HelperText")
+        evidence_layout.addWidget(self.evidence_result_summary)
         self.evidence_table = QTableWidget(0, 3 + len(self.databases))
         self.evidence_table.setHorizontalHeaderLabels(["Sample", "Gene", "HGVSc", *self.databases])
         self.evidence_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -753,6 +891,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(evidence_group)
         self.database_scroll.setWidget(database_content)
         page_layout.addWidget(self.database_scroll)
+        self._update_evidence_summary()
         return page
 
     def _settings_tab(self) -> QWidget:
@@ -764,6 +903,18 @@ class MainWindow(QMainWindow):
         self.settings_scroll.setFrameShape(QFrame.Shape.NoFrame)
         settings_content = QWidget()
         layout = QVBoxLayout(settings_content)
+        settings_intro = QLabel(
+            "Configure local files, provider access, pacing, and artifact rules. Passwords are stored through Windows Credential Manager and are never written into the workbook."
+        )
+        settings_intro.setObjectName("PageIntro")
+        settings_intro.setWordWrap(True)
+        layout.addWidget(settings_intro)
+        settings_map = QHBoxLayout()
+        settings_map.setSpacing(10)
+        settings_map.addWidget(WorkflowStep("01", "Local files", "History workbook and report destination."))
+        settings_map.addWidget(WorkflowStep("02", "Provider access", "API tokens and signed-in website accounts."))
+        settings_map.addWidget(WorkflowStep("03", "Run safety", "Pacing, timeout, and artifact exclusions."))
+        layout.addLayout(settings_map)
         group = QGroupBox("Local Configuration")
         grid = QGridLayout(group)
         grid.setColumnStretch(1, 1)
@@ -1036,6 +1187,7 @@ class MainWindow(QMainWindow):
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.status.connect(self._log)
+        worker.progress.connect(self._update_run_progress)
         worker.patient_finished.connect(self._database_patient_finished)
         worker.finished.connect(self._database_finished)
         worker.failed.connect(self._worker_failed)
@@ -1052,6 +1204,7 @@ class MainWindow(QMainWindow):
         self._refresh_evidence_table()
         self._auto_rewrite_workbook()
         self._set_ready()
+        self._complete_run_progress("Evidence search complete")
         self._log("Patient-by-patient evidence search complete")
 
     def _database_patient_finished(self, patient_evidence: dict) -> None:
@@ -1126,6 +1279,7 @@ class MainWindow(QMainWindow):
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.status.connect(self._log)
+        worker.progress.connect(self._update_run_progress)
         worker.patient_finished.connect(self._browser_patient_finished)
         worker.finished.connect(self._browser_review_finished)
         worker.failed.connect(self._browser_review_failed)
@@ -1193,6 +1347,7 @@ class MainWindow(QMainWindow):
         if unmatched:
             message += f" ({unmatched} marks did not match this run)"
         self.selection_status.setText(message)
+        self._update_evidence_summary()
         self._log(f"Database selection loaded: {message}")
 
     def _browser_review_finished(self, browser_evidence: dict) -> None:
@@ -1200,6 +1355,7 @@ class MainWindow(QMainWindow):
         self._refresh_evidence_table()
         self._auto_rewrite_workbook()
         self._set_ready()
+        self._complete_run_progress("Browser evidence complete")
         self._log("Browser evidence lookup complete")
 
     def _browser_patient_finished(self, patient_evidence: dict) -> None:
@@ -1343,6 +1499,10 @@ class MainWindow(QMainWindow):
 
     def _worker_failed(self, message: str) -> None:
         self._set_ready()
+        if not self.run_progress.isHidden():
+            self.run_progress.title.setText("Search stopped")
+            self.run_progress.detail.setText(message)
+            QTimer.singleShot(5000, self.run_progress.hide)
         self._log(f"ERROR: {message}")
         QMessageBox.critical(self, "Error", message)
 
@@ -1385,6 +1545,8 @@ class MainWindow(QMainWindow):
         self.included_card.set_value(len(self.result.included))
         self.excluded_card.set_value(len(self.result.excluded))
         self.warning_card.set_value(sum(1 for variant in self.result.variants if variant.warnings))
+        self._apply_review_filters()
+        self._update_evidence_summary()
 
     def _refresh_variant_table(self) -> None:
         if not self.result:
@@ -1413,10 +1575,62 @@ class MainWindow(QMainWindow):
                 elif highlight == "germline":
                     item.setBackground(QColor(Palette.pale_green))
                 self.variant_table.setItem(row, col, item)
+        self._apply_review_filters()
+
+    def _apply_review_filters(self) -> None:
+        if not hasattr(self, "variant_table"):
+            return
+        query = self.review_filter_edit.text().strip().casefold()
+        mode = self.review_decision_combo.currentText()
+        visible = 0
+        for row in range(self.variant_table.rowCount()):
+            row_text = " ".join(
+                self._table_text(self.variant_table, row, column)
+                for column in range(self.variant_table.columnCount())
+            ).casefold()
+            decision = self._table_text(self.variant_table, row, 5).casefold()
+            warnings = self._table_text(self.variant_table, row, 7)
+            mode_matches = (
+                mode == "All decisions"
+                or (mode == "Included" and decision == "included")
+                or (mode == "Excluded" and decision == "excluded")
+                or (mode == "Review flags" and bool(warnings))
+            )
+            show = (not query or query in row_text) and mode_matches
+            self.variant_table.setRowHidden(row, not show)
+            visible += int(show)
+        total = self.variant_table.rowCount()
+        self.review_count_label.setText(
+            f"Showing {visible} of {total}" if total else "No variants loaded"
+        )
+
+    def _update_evidence_summary(self) -> None:
+        if not hasattr(self, "evidence_summary"):
+            return
+        selected = [name for name, check in self.db_checks.items() if check.isChecked()]
+        variant_count = len(self._variants_for_search()) if self.result else 0
+        scope = "included variants" if self.included_only_check.isChecked() else "review variants"
+        source_text = f"{len(selected)} source(s) selected" if selected else "No sources selected"
+        variant_text = f"{variant_count} {scope}" if self.result else "process data to load variants"
+        self.evidence_summary.setText(f"{source_text} · {variant_text}")
+
+    def _update_run_progress(self, current: int, total: int, detail: str) -> None:
+        self.activity_progress.hide()
+        self.run_progress.title.setText("Collecting evidence")
+        self.run_progress.update_progress(current, total, detail)
+
+    def _complete_run_progress(self, title: str) -> None:
+        self.run_progress.title.setText(title)
+        self.run_progress.detail.setText("All queued patients have been processed.")
+        self.run_progress.bar.setValue(self.run_progress.bar.maximum())
+        QTimer.singleShot(3500, self.run_progress.hide)
 
     def _refresh_evidence_table(self) -> None:
         self.evidence_table.setRowCount(0)
         if not self.result:
+            self.evidence_result_summary.setText(
+                "No evidence collected yet. Process data before starting a search."
+            )
             return
         evidence_by_key = self.evidence or {}
         variants = [
@@ -1441,6 +1655,18 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem(value)
                 item.setToolTip(value)
                 self.evidence_table.setItem(row, col, item)
+        row_count = self.evidence_table.rowCount()
+        if row_count:
+            source_count = sum(
+                len(items) for items in evidence_by_key.values()
+            )
+            self.evidence_result_summary.setText(
+                f"{row_count} variant(s) with {source_count} evidence result(s). Double-click a cell to inspect the full text."
+            )
+        else:
+            self.evidence_result_summary.setText(
+                "No evidence collected yet. Run selected sources to populate this table."
+            )
 
     def _set_busy(self, label: str) -> None:
         self.status_badge.setText(label)
@@ -1505,11 +1731,8 @@ class MainWindow(QMainWindow):
                 border: none;
             }}
             QLabel#BrandMark {{
-                background: {Palette.blue};
-                color: white;
-                border-radius: 11px;
-                font-size: 15px;
-                font-weight: 800;
+                background: transparent;
+                border: none;
             }}
             QLabel#BrandTitle {{
                 background: transparent;
@@ -1659,6 +1882,31 @@ class MainWindow(QMainWindow):
                 border: 1px solid {Palette.border};
                 border-radius: 9px;
             }}
+            QFrame#ToolbarCard, QFrame#EvidenceHero, QFrame#RunProgressCard {{
+                background: {Palette.panel};
+                border: 1px solid {Palette.border};
+                border-radius: 10px;
+            }}
+            QFrame#EvidenceHero {{
+                background: #F8FCFE;
+                border-left: 4px solid {Palette.blue};
+            }}
+            QLabel#SectionTitle, QLabel#RunProgressTitle {{
+                color: {Palette.navy};
+                font-size: 14px;
+                font-weight: 750;
+            }}
+            QLabel#EvidenceOrder {{
+                color: {Palette.blue};
+                font-weight: 700;
+                padding: 6px 10px;
+                background: {Palette.pale_blue};
+                border-radius: 7px;
+            }}
+            QLabel#RunProgressCount {{
+                color: {Palette.blue};
+                font-weight: 700;
+            }}
             QLabel#StepNumber {{
                 background: {Palette.navy};
                 color: white;
@@ -1730,6 +1978,17 @@ class MainWindow(QMainWindow):
                 background: {Palette.blue};
                 border-radius: 3px;
             }}
+            QProgressBar#RunProgressBar {{
+                background: #DCE9F0;
+                border: none;
+                border-radius: 4px;
+                min-height: 8px;
+                max-height: 8px;
+            }}
+            QProgressBar#RunProgressBar::chunk {{
+                background: {Palette.green};
+                border-radius: 4px;
+            }}
             QScrollBar:vertical {{
                 background: transparent;
                 width: 10px;
@@ -1750,6 +2009,9 @@ class MainWindow(QMainWindow):
 def main() -> None:
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    icon_path = Path(__file__).resolve().parents[1] / "assets" / "archer-prosess-icon.png"
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

@@ -60,6 +60,35 @@ def test_sidebar_navigation_switches_workspace_pages(qt_app):
     assert window.page_eyebrow.text().endswith("EVIDENCE")
 
 
+def test_review_filters_and_search_progress_are_visible(qt_app, tmp_path):
+    window = MainWindow()
+    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+    window.result = VariantProcessor().process(
+        fixture, "2026-08-01", tmp_path / "review.xlsx"
+    )
+    window._refresh_variant_table()
+
+    window.review_filter_edit.setText(window.result.variants[0].symbol)
+    assert "Showing" in window.review_count_label.text()
+    assert any(
+        not window.variant_table.isRowHidden(row)
+        for row in range(window.variant_table.rowCount())
+    )
+
+    window._update_run_progress(2, 5, "Patient 3 is running")
+    assert not window.run_progress.isHidden()
+    assert window.run_progress.bar.value() == 2
+    assert window.run_progress.count.text() == "2 / 5 patients"
+    assert window.run_progress.detail.text() == "Patient 3 is running"
+
+
+def test_application_icon_is_packaged_and_loaded(qt_app):
+    window = MainWindow()
+
+    assert window.app_icon_path.exists()
+    assert not window.windowIcon().isNull()
+
+
 def test_browser_evidence_merge_replaces_placeholders_for_every_variant(qt_app):
     window = MainWindow()
     window.evidence = {
@@ -206,7 +235,9 @@ def test_database_worker_completes_all_sources_before_next_patient(
     )
 
     finished = []
+    progress = []
     worker.finished.connect(finished.append)
+    worker.progress.connect(lambda current, total, detail: progress.append((current, total, detail)))
     worker.run()
 
     assert events == [
@@ -223,6 +254,8 @@ def test_database_worker_completes_all_sources_before_next_patient(
     ]
     assert len(finished) == 1
     assert all(len(items) == 5 for items in finished[0].values())
+    assert progress[0][:2] == (0, 2)
+    assert progress[-1][:2] == (2, 2)
     # No API query is delayed; the only pause is before patient 2's website phase.
     assert len(slept) == 1
     assert 10 <= slept[0] <= 20
