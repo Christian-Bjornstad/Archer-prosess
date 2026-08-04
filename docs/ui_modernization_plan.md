@@ -63,9 +63,10 @@ main content area then has one clear primary action per screen.
 
 ## Delivery phases
 
-1. Extract colors, typography, spacing, button variants, status badges, and cards
-   into reusable Qt style helpers. No workflow changes.
-2. Add the left workflow rail and rebuild Prepare/Review while preserving signals.
+1. **Completed:** extract colors, typography, spacing, button variants, status
+   badges, and cards into reusable Qt style helpers.
+2. **Completed:** add the left workflow rail and stacked Prepare/Review/Evidence/
+   Settings workspace while preserving existing signals.
 3. Rebuild Evidence around provider cards and the patient queue.
 4. Rebuild Reports and Settings, then remove legacy layout code.
 5. Accessibility and usability pass: keyboard navigation, contrast, 125–150%

@@ -44,6 +44,10 @@ class BrowserAutomationUnavailable(RuntimeError):
     """The optional visible-browser runtime is not installed or cannot start."""
 
 
+class MtbpReportTimeout(TimeoutError):
+    """MTBP accepted a batch but did not publish its report before the deadline."""
+
+
 class BrowserReviewService:
     """Run serial, visible website reviews in isolated persistent Edge profiles.
 
@@ -750,6 +754,7 @@ class BrowserReviewService:
                                 "input[placeholder='Enter variant, gene or select an example above']"
                             )
                             search.wait_for(state="visible", timeout=self.navigation_timeout_ms)
+                            self._select_franklin_search_mode(page)
                             search.fill(query)
                             search.press("Enter")
                             self._open_franklin_resolved_variant(page, variant)
@@ -830,7 +835,7 @@ class BrowserReviewService:
 
     def _open_franklin_resolved_variant(self, page: Any, variant: VariantRecord) -> None:
         for _ in range(40):
-            if "/clinical-db/variant/snp/" in page.url:
+            if re.search(r"/clinical-db/variant/snp(?:Tumor)?/", page.url):
                 return
             options = page.locator(".option")
             if options.count():
@@ -859,9 +864,29 @@ class BrowserReviewService:
                 )
             page.wait_for_timeout(500)
         page.wait_for_url(
-            re.compile(r"https://franklin\.genoox\.com/clinical-db/variant/snp/.+"),
+            re.compile(
+                r"https://franklin\.genoox\.com/clinical-db/variant/"
+                r"snp(?:Tumor)?/.+"
+            ),
             timeout=self.navigation_timeout_ms,
         )
+
+    def _select_franklin_search_mode(self, page: Any) -> None:
+        """Choose the explicitly requested GRCh37/hg19 somatic search mode."""
+        comboboxes = page.get_by_role("combobox")
+        if comboboxes.count() < 2:
+            raise RuntimeError("Franklin reference/type selectors were not available.")
+        for combobox, option_name in (
+            (comboboxes.nth(0), "hg19"),
+            (comboboxes.nth(1), "Somatic"),
+        ):
+            combobox.click()
+            option = page.get_by_role("option", name=option_name, exact=True)
+            if option.count() != 1:
+                raise RuntimeError(
+                    f"Franklin search option was not uniquely available: {option_name}"
+                )
+            option.click()
 
     def _search_mtbp(
         self,
@@ -926,11 +951,7 @@ class BrowserReviewService:
                             "MTBP: using previously validated GRCh37 fallback for "
                             f"{len(learned_fallback_keys)} variant(s)"
                         )
-                page.goto(
-                    self.login_url("MTBP"),
-                    wait_until="domcontentloaded",
-                    timeout=self.navigation_timeout_ms,
-                )
+                self._goto_with_retries(page, self.login_url("MTBP"))
                 if not self._session_authenticated("MTBP", page):
                     self._try_saved_login("MTBP", page)
                 if not self._session_authenticated("MTBP", page):
@@ -953,11 +974,7 @@ class BrowserReviewService:
                     page,
                     progress=progress,
                 )
-                page.goto(
-                    self.login_url("MTBP"),
-                    wait_until="domcontentloaded",
-                    timeout=self.navigation_timeout_ms,
-                )
+                self._goto_with_retries(page, self.login_url("MTBP"))
                 active_pairs = list(query_pairs)
                 query_attempts = {
                     self.variant_key(variant): list(
@@ -1045,11 +1062,7 @@ class BrowserReviewService:
                                 f"continuing with {len(active_pairs)}"
                             )
                     if active_pairs:
-                        page.goto(
-                            self.login_url("MTBP"),
-                            wait_until="domcontentloaded",
-                            timeout=self.navigation_timeout_ms,
-                        )
+                        self._goto_with_retries(page, self.login_url("MTBP"))
                 if not active_pairs:
                     return results
                 if "/queue/" in page.url:
@@ -1058,9 +1071,11 @@ class BrowserReviewService:
                             "MTBP: analysis queued; waiting up to "
                             f"{self.analysis_timeout_ms // 60_000} minutes for the report"
                         )
-                    page.wait_for_url(
-                        re.compile(r"https://mtbp\.org/patients/.+/report/\d+/?"),
-                        timeout=self.analysis_timeout_ms,
+                    self._wait_for_mtbp_report(
+                        page,
+                        analysis_id,
+                        playwright_timeout,
+                        progress=progress,
                     )
                 if progress:
                     progress("MTBP: report ready; validating returned variants")
@@ -1157,7 +1172,7 @@ class BrowserReviewService:
                         json.dumps(asdict(evidence), ensure_ascii=False, indent=2),
                         encoding="utf-8",
                     )
-        except (playwright_timeout, TimeoutError):
+        except MtbpReportTimeout:
             current_url = context.pages[0].url if context and context.pages else self.login_url("MTBP")
             for variant, query in query_pairs:
                 key = self.variant_key(variant)
@@ -1168,6 +1183,20 @@ class BrowserReviewService:
                     "timeout",
                     "MTBP did not produce a report before the configured "
                     f"{self.analysis_timeout_ms // 60_000}-minute timeout.",
+                    accession=query,
+                    url=current_url,
+                )
+        except (playwright_timeout, TimeoutError) as exc:
+            current_url = context.pages[0].url if context and context.pages else self.login_url("MTBP")
+            for variant, query in query_pairs:
+                key = self.variant_key(variant)
+                if key in results:
+                    continue
+                results[key] = DatabaseEvidence(
+                    "MTBP",
+                    "error",
+                    "An MTBP page operation timed out before report polling completed. "
+                    f"The remote report may still be available in Reports List: {exc}",
                     accession=query,
                     url=current_url,
                 )
@@ -1211,11 +1240,7 @@ class BrowserReviewService:
         progress: Callable[[str], None] | None,
     ) -> dict[str, Any]:
         """Batch-delete app reports at the threshold or when capacity is exhausted."""
-        page.goto(
-            MTBP_REPORTS_URL,
-            wait_until="domcontentloaded",
-            timeout=self.navigation_timeout_ms,
-        )
+        self._goto_with_retries(page, MTBP_REPORTS_URL)
         deleted: list[str] = []
         failed: list[dict[str, str]] = []
         remaining = page.locator("button.delete-patient").count()
@@ -1299,11 +1324,7 @@ class BrowserReviewService:
             }
         try:
             if not page.url.startswith(MTBP_REPORTS_URL):
-                page.goto(
-                    MTBP_REPORTS_URL,
-                    wait_until="domcontentloaded",
-                    timeout=self.navigation_timeout_ms,
-                )
+                self._goto_with_retries(page, MTBP_REPORTS_URL)
             report_link = page.get_by_role("link", name=analysis_id, exact=True)
             if report_link.count() != 1:
                 return {
@@ -1337,11 +1358,7 @@ class BrowserReviewService:
                     timeout=self.navigation_timeout_ms,
                 )
             except Exception:
-                page.goto(
-                    MTBP_REPORTS_URL,
-                    wait_until="domcontentloaded",
-                    timeout=self.navigation_timeout_ms,
-                )
+                self._goto_with_retries(page, MTBP_REPORTS_URL)
             if page.get_by_role("link", name=analysis_id, exact=True).count() == 0:
                 return {
                     "status": "deleted",
@@ -1390,6 +1407,113 @@ class BrowserReviewService:
                 return body_text
             page.wait_for_timeout(500)
         raise TimeoutError("MTBP did not accept the submitted batch before the navigation timeout.")
+
+    def _wait_for_mtbp_report(
+        self,
+        page: Any,
+        analysis_id: str,
+        playwright_timeout: type[Exception],
+        *,
+        progress: Callable[[str], None] | None,
+    ) -> None:
+        """Poll both the queue and Reports List, recovering from transient navigation stalls."""
+        report_pattern = re.compile(
+            r"https://mtbp\.org/patients/.+/report/\d+/?"
+        )
+        queue_url = page.url
+        deadline = time.monotonic() + self.analysis_timeout_ms / 1_000
+        next_update = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            if report_pattern.fullmatch(page.url):
+                return
+            remaining_ms = max(1, int((deadline - time.monotonic()) * 1_000))
+            try:
+                page.wait_for_url(
+                    report_pattern,
+                    timeout=min(15_000, remaining_ms),
+                )
+                if report_pattern.fullmatch(page.url):
+                    return
+            except playwright_timeout:
+                pass
+
+            # MTBP occasionally leaves the queue page unchanged after the report
+            # is already listed. Checking the exact pseudonymous ID recovers that
+            # completed report without submitting a duplicate analysis.
+            try:
+                self._goto_with_retries(page, MTBP_REPORTS_URL, attempts=2)
+                report_link = page.get_by_role(
+                    "link", name=analysis_id, exact=True
+                )
+                if report_link.count() == 1:
+                    report_link.click()
+                    page.wait_for_url(
+                        report_pattern,
+                        timeout=self.navigation_timeout_ms,
+                    )
+                    return
+            except playwright_timeout:
+                pass
+            except Exception:
+                # A transient reports-list failure should not abandon the active
+                # queue; retry it until the configured analysis deadline.
+                pass
+
+            if time.monotonic() >= next_update:
+                if progress:
+                    minutes_left = max(
+                        1, int((deadline - time.monotonic() + 59) // 60)
+                    )
+                    progress(
+                        "MTBP: still processing; checked queue and Reports List "
+                        f"({minutes_left} minute(s) remaining)"
+                    )
+                next_update = time.monotonic() + 60
+            try:
+                self._goto_with_retries(page, queue_url, attempts=2)
+            except Exception:
+                page.wait_for_timeout(1_000)
+
+        # Perform one final reports-list recovery check at the deadline.
+        try:
+            self._goto_with_retries(page, MTBP_REPORTS_URL, attempts=2)
+            report_link = page.get_by_role("link", name=analysis_id, exact=True)
+            if report_link.count() == 1:
+                report_link.click()
+                page.wait_for_url(
+                    report_pattern,
+                    timeout=self.navigation_timeout_ms,
+                )
+                return
+        except Exception:
+            pass
+        raise MtbpReportTimeout(
+            f"MTBP report {analysis_id} was not published before the deadline."
+        )
+
+    def _goto_with_retries(
+        self,
+        page: Any,
+        url: str,
+        *,
+        attempts: int = 3,
+    ) -> None:
+        """Retry idempotent MTBP navigation after short network/browser stalls."""
+        last_error: Exception | None = None
+        for attempt in range(1, max(1, attempts) + 1):
+            try:
+                page.goto(
+                    url,
+                    wait_until="domcontentloaded",
+                    timeout=self.navigation_timeout_ms,
+                )
+                return
+            except Exception as exc:
+                last_error = exc
+                if attempt < attempts:
+                    page.wait_for_timeout(1_000 * attempt)
+        if last_error is not None:
+            raise last_error
 
     @staticmethod
     def _extract_mtbp_rows(page: Any) -> list[dict[str, Any]]:
@@ -1443,7 +1567,7 @@ class BrowserReviewService:
             )
         body_text = page.locator("body").inner_text(timeout=self.navigation_timeout_ms)
         if database == "Franklin":
-            screenshots = self._capture_franklin_classification(
+            screenshots = self._capture_franklin_somatic_pages(
                 page, variant, artifact_directory
             )
             screenshot_path = Path(screenshots[0]["path"])
@@ -1475,15 +1599,69 @@ class BrowserReviewService:
         self._write_audit(evidence, audit_path)
         return evidence
 
+    def _capture_franklin_somatic_pages(
+        self,
+        page: Any,
+        variant: VariantRecord,
+        artifact_directory: Path,
+    ) -> list[dict[str, str]]:
+        """Capture both opening somatic tabs in their visible order."""
+        base_path = self._screenshot_path(
+            artifact_directory, "Franklin", variant
+        )
+        try:
+            somatic_tab = page.get_by_role(
+                "tab", name="Somatic Clinical Evidence", exact=True
+            )
+            computed_tab = page.get_by_role(
+                "tab", name="Computed Classification", exact=True
+            )
+        except (AttributeError, TypeError):
+            return self._capture_franklin_classification(
+                page, variant, artifact_directory
+            )
+        if somatic_tab.count() != 1 or computed_tab.count() != 1:
+            return self._capture_franklin_classification(
+                page, variant, artifact_directory
+            )
+
+        somatic_tab.click()
+        somatic_scroller = page.locator("div.evidences-container")
+        somatic_scroller.wait_for(
+            state="visible", timeout=self.navigation_timeout_ms
+        )
+        page.wait_for_timeout(500)
+        screenshots = self._capture_franklin_scroll_tiles(
+            page,
+            somatic_scroller,
+            base_path,
+            "Somatic clinical evidence",
+        )
+
+        computed_tab.click()
+        page.get_by_text("Suggested classification", exact=True).first.wait_for(
+            state="visible", timeout=self.navigation_timeout_ms
+        )
+        page.wait_for_timeout(500)
+        screenshots.extend(
+            self._capture_franklin_classification(
+                page, variant, artifact_directory
+            )
+        )
+        return screenshots
+
     def _capture_franklin_classification(
         self,
         page: Any,
         variant: VariantRecord,
         artifact_directory: Path,
     ) -> list[dict[str, str]]:
-        """Capture Franklin's internally scrollable ACMG panel without omissions."""
-        base_path = self._screenshot_path(
+        """Capture computed ACMG evidence through De Novo Data only."""
+        original_path = self._screenshot_path(
             artifact_directory, "Franklin", variant
+        )
+        base_path = original_path.with_name(
+            f"{original_path.stem}-computed{original_path.suffix}"
         )
         try:
             close_button = page.locator("gnx-mini-app-header img.close-btn")
@@ -1505,68 +1683,108 @@ class BrowserReviewService:
             ]
 
         panel.wait_for(state="visible", timeout=self.navigation_timeout_ms)
-        dimensions = panel.evaluate(
-            """
-            el => ({
-              clientHeight: el.clientHeight,
-              scrollHeight: el.scrollHeight
-            })
-            """
-        )
-        box = panel.bounding_box()
-        client_height = int(dimensions.get("clientHeight") or 0)
-        scroll_height = int(dimensions.get("scrollHeight") or 0)
-        if box is None or client_height <= 0 or scroll_height <= 0:
+        de_novo = page.get_by_text("De Novo Data", exact=True)
+        if de_novo.count() != 1:
             page.screenshot(path=str(base_path), full_page=True)
             return [
                 {
-                    "label": "Full computed-classification page",
+                    "label": "Computed classification (De Novo boundary unavailable)",
                     "path": str(base_path),
                     "url": page.url,
                 }
             ]
+        capture_height = int(
+            de_novo.evaluate(
+                """
+                el => {
+                  const card = el.closest('.category-box') || el;
+                  const panel = el.closest('gnx-result-page');
+                  if (!panel) return 0;
+                  return Math.ceil(
+                    card.getBoundingClientRect().bottom
+                    - panel.getBoundingClientRect().top
+                    + panel.scrollTop
+                  );
+                }
+                """
+            )
+            or 0
+        )
+        if capture_height <= 0:
+            raise RuntimeError("Franklin De Novo Data boundary could not be measured.")
+        return self._capture_franklin_scroll_tiles(
+            page,
+            panel,
+            base_path,
+            "Computed classification through De Novo Data",
+            capture_height=capture_height,
+        )
 
-        max_scroll = max(0, scroll_height - client_height)
-        overlap = min(80, max(0, client_height // 5))
-        step = max(1, client_height - overlap)
-        positions = list(range(0, max_scroll + 1, step))
-        if not positions or positions[-1] != max_scroll:
-            positions.append(max_scroll)
+    def _capture_franklin_scroll_tiles(
+        self,
+        page: Any,
+        scroller: Any,
+        base_path: Path,
+        label: str,
+        *,
+        capture_height: int | None = None,
+    ) -> list[dict[str, str]]:
+        """Capture unique, contiguous slices from an internal Franklin scroller."""
+        scroller.wait_for(state="visible", timeout=self.navigation_timeout_ms)
+        dimensions = scroller.evaluate(
+            "el => ({clientHeight: el.clientHeight, scrollHeight: el.scrollHeight})"
+        )
+        box = scroller.bounding_box()
+        client_height = int(dimensions.get("clientHeight") or 0)
+        scroll_height = int(dimensions.get("scrollHeight") or 0)
+        limit = min(scroll_height, int(capture_height or scroll_height))
+        if box is None or client_height <= 0 or limit <= 0:
+            raise RuntimeError("Franklin scrollable evidence panel could not be measured.")
 
+        starts = list(range(0, limit, client_height))
         screenshots: list[dict[str, str]] = []
         try:
-            for index, position in enumerate(positions, start=1):
-                panel.evaluate("(el, top) => { el.scrollTop = top; }", position)
+            for index, start in enumerate(starts, start=1):
+                actual_scroll = int(
+                    scroller.evaluate(
+                        "(el, top) => { el.scrollTop = top; return el.scrollTop; }",
+                        start,
+                    )
+                    or 0
+                )
                 page.wait_for_timeout(200)
+                clip_offset = max(0, start - actual_scroll)
+                clip_height = min(
+                    client_height - clip_offset,
+                    limit - start,
+                )
+                if clip_height <= 0:
+                    continue
                 screenshot_path = (
                     base_path
                     if index == 1
                     else base_path.with_name(
-                        f"{base_path.stem}-classification-{index:02d}"
-                        f"{base_path.suffix}"
+                        f"{base_path.stem}-{index:02d}{base_path.suffix}"
                     )
                 )
                 page.screenshot(
                     path=str(screenshot_path),
                     clip={
                         "x": box["x"],
-                        "y": box["y"],
+                        "y": box["y"] + clip_offset,
                         "width": box["width"],
-                        "height": box["height"],
+                        "height": clip_height,
                     },
                 )
                 screenshots.append(
                     {
-                        "label": (
-                            "Franklin classification and ACMG evidence "
-                            f"({index} of {len(positions)})"
-                        ),
+                        "label": f"{label} ({index} of {len(starts)})",
                         "path": str(screenshot_path),
                         "url": page.url,
                     }
                 )
         finally:
-            panel.evaluate("el => { el.scrollTop = 0; }")
+            scroller.evaluate("el => { el.scrollTop = 0; }")
         return screenshots
 
     @staticmethod
@@ -1583,7 +1801,7 @@ class BrowserReviewService:
         artifact_directory: Path,
     ) -> dict[str, str]:
         variant_url = page.url.split("?", 1)[0]
-        if "/clinical-db/variant/snp/" not in variant_url:
+        if not re.search(r"/clinical-db/variant/snp(?:Tumor)?/", variant_url):
             raise ValueError("Franklin did not resolve to a variant page.")
         assessment_url = f"{variant_url}?app=assessment-tools"
         page.goto(
@@ -1816,11 +2034,7 @@ class BrowserReviewService:
                 timeout=60_000,
             )
             if database == "MTBP" and "/analyse" not in page.url:
-                page.goto(
-                    self.login_url("MTBP"),
-                    wait_until="domcontentloaded",
-                    timeout=self.navigation_timeout_ms,
-                )
+                self._goto_with_retries(page, self.login_url("MTBP"))
             page.wait_for_timeout(750)
             return self._session_authenticated(database, page)
         except Exception:

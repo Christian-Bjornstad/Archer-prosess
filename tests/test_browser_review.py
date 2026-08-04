@@ -411,12 +411,22 @@ def test_franklin_classification_capture_scrolls_complete_panel(tmp_path):
         def evaluate(self, script, argument=None):
             if "clientHeight" in script:
                 return {"clientHeight": 400, "scrollHeight": 1000}
-            self.positions.append(0 if argument is None else argument)
+            actual = 0 if argument is None else min(argument, 600)
+            self.positions.append(actual)
+            return actual
 
         def bounding_box(self):
             return {"x": 10, "y": 200, "width": 1200, "height": 400}
 
     panel = Panel()
+
+    class DeNovo:
+        def count(self):
+            return 1
+
+        def evaluate(self, script):
+            assert "category-box" in script
+            return 900
 
     class Page:
         url = "https://franklin.genoox.com/clinical-db/variant/snp/example"
@@ -438,6 +448,11 @@ def test_franklin_classification_capture_scrolls_complete_panel(tmp_path):
         def wait_for_timeout(self, milliseconds):
             assert milliseconds == 200
 
+        def get_by_text(self, text, *, exact):
+            assert text == "De Novo Data"
+            assert exact
+            return DeNovo()
+
         def screenshot(self, **kwargs):
             self.captures.append(kwargs)
 
@@ -447,10 +462,66 @@ def test_franklin_classification_capture_scrolls_complete_panel(tmp_path):
     )
 
     assert len(screenshots) == 3
-    assert panel.positions == [0, 320, 600, 0]
+    assert panel.positions == [0, 400, 600, 0]
     assert screenshots[0]["label"].endswith("(1 of 3)")
     assert screenshots[-1]["label"].endswith("(3 of 3)")
-    assert all(capture["clip"]["height"] == 400 for capture in page.captures)
+    assert [capture["clip"]["height"] for capture in page.captures] == [
+        400,
+        400,
+        100,
+    ]
+    assert page.captures[-1]["clip"]["y"] == 400
+
+
+def test_franklin_search_explicitly_selects_hg19_and_somatic(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path)
+    selected = []
+
+    class Option:
+        def __init__(self, name):
+            self.name = name
+
+        def count(self):
+            return 1
+
+        def click(self):
+            selected.append(self.name)
+
+    class Combo:
+        def click(self):
+            pass
+
+    class Combos:
+        def count(self):
+            return 2
+
+        def nth(self, index):
+            return Combo()
+
+    class Page:
+        def get_by_role(self, role, **kwargs):
+            if role == "combobox":
+                return Combos()
+            assert role == "option"
+            assert kwargs["exact"]
+            return Option(kwargs["name"])
+
+    service._select_franklin_search_mode(Page())
+
+    assert selected == ["hg19", "Somatic"]
+
+
+def test_franklin_resolver_accepts_somatic_variant_route(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path)
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+
+    class Page:
+        url = (
+            "https://franklin.genoox.com/clinical-db/variant/"
+            "snpTumor/chr17-7578406-C-T"
+        )
+
+    service._open_franklin_resolved_variant(Page(), variant)
 
 
 def test_franklin_visible_page_parser_rejects_wrong_variant_identity():
@@ -713,6 +784,62 @@ def test_mtbp_validation_error_identifies_rejected_entries():
     assert rejected == ["CEBPA:p.His195_Pro196dup", "EZH2:c.118-4dup"]
     assert _mtbp_query_rejected("NM_004456.4:c.118-4dup", rejected)
     assert not _mtbp_query_rejected("NM_000546.6:c.524G>A", rejected)
+
+
+def test_mtbp_queue_recovers_report_from_reports_list(tmp_path):
+    service = BrowserReviewService(
+        profile_root=tmp_path,
+        navigation_timeout_ms=100,
+        analysis_timeout_ms=1_000,
+    )
+    analysis_id = "ARCHER-20260804T120000Z-test"
+
+    class FakePlaywrightTimeout(Exception):
+        pass
+
+    class ReportLink:
+        def __init__(self, page):
+            self.page = page
+
+        def count(self):
+            return 1
+
+        def click(self):
+            self.page.url = "https://mtbp.org/patients/1/sample/1/report/2/"
+
+    class Page:
+        def __init__(self):
+            self.url = "https://mtbp.org/queue/123/"
+            self.gotos = []
+
+        def wait_for_url(self, pattern, *, timeout):
+            if pattern.fullmatch(self.url):
+                return
+            raise FakePlaywrightTimeout()
+
+        def goto(self, url, **kwargs):
+            self.url = url
+            self.gotos.append(url)
+
+        def get_by_role(self, role, *, name, exact):
+            assert role == "link"
+            assert name == analysis_id
+            assert exact
+            return ReportLink(self)
+
+        def wait_for_timeout(self, milliseconds):
+            pass
+
+    page = Page()
+    service._wait_for_mtbp_report(
+        page,
+        analysis_id,
+        FakePlaywrightTimeout,
+        progress=None,
+    )
+
+    assert page.url.endswith("/report/2/")
+    assert page.gotos == ["https://mtbp.org/patients/"]
 
 
 class _FakeMtbpDialog:

@@ -45,6 +45,21 @@ def test_database_tab_contains_current_sources(qt_app):
     assert headers == ["Sample", "Gene", "HGVSc", *window.databases]
 
 
+def test_sidebar_navigation_switches_workspace_pages(qt_app):
+    window = MainWindow()
+
+    assert len(window.nav_buttons) == 4
+    assert window.nav_buttons[0].isChecked()
+    assert window.tabs.currentIndex() == 0
+
+    window._switch_page(2)
+
+    assert window.tabs.currentIndex() == 2
+    assert window.nav_buttons[2].isChecked()
+    assert window.page_title.text() == "Evidence workspace"
+    assert window.page_eyebrow.text().endswith("EVIDENCE")
+
+
 def test_browser_evidence_merge_replaces_placeholders_for_every_variant(qt_app):
     window = MainWindow()
     window.evidence = {

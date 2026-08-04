@@ -10,6 +10,7 @@ from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QButtonGroup,
     QComboBox,
     QDateEdit,
     QFileDialog,
@@ -30,7 +31,7 @@ from PyQt6.QtWidgets import (
     QStatusBar,
     QTableWidget,
     QTableWidgetItem,
-    QTabWidget,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -54,18 +55,19 @@ from archer_processor.services import (
 
 
 class Palette:
-    ink = "#17212B"
-    muted = "#5E6A73"
+    ink = "#102A43"
+    muted = "#5B7083"
     panel = "#FFFFFF"
-    app_bg = "#F4F7F9"
-    border = "#CBD7E1"
-    navy = "#163B5C"
-    blue = "#2F75B5"
-    green = "#4F8A5B"
-    red = "#A92525"
-    yellow = "#B98100"
-    pale_blue = "#EAF3FA"
-    pale_green = "#EAF5ED"
+    app_bg = "#F0F7FB"
+    border = "#C9DFEA"
+    navy = "#0C4A6E"
+    blue = "#0284C7"
+    cyan = "#0891B2"
+    green = "#16803B"
+    red = "#B42318"
+    yellow = "#A15C00"
+    pale_blue = "#E0F2FE"
+    pale_green = "#EAF7EE"
     pale_orange = "#FCE4D6"
     pale_red = "#F8E8E8"
     pale_yellow = "#FFF5D6"
@@ -380,19 +382,88 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         root = QWidget()
-        layout = QVBoxLayout(root)
-        layout.setContentsMargins(18, 16, 18, 12)
-        layout.setSpacing(12)
+        root.setObjectName("AppRoot")
+        shell = QHBoxLayout(root)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.setSpacing(0)
+
+        sidebar = QFrame()
+        sidebar.setObjectName("Sidebar")
+        sidebar.setFixedWidth(246)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(18, 22, 18, 18)
+        sidebar_layout.setSpacing(8)
+
+        brand_mark = QLabel("AP")
+        brand_mark.setObjectName("BrandMark")
+        brand_mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        brand_mark.setFixedSize(42, 42)
+        brand = QLabel("Archer Prosess")
+        brand.setObjectName("BrandTitle")
+        brand_copy = QLabel("Clinical variant workbench")
+        brand_copy.setObjectName("BrandCopy")
+        sidebar_layout.addWidget(brand_mark)
+        sidebar_layout.addWidget(brand)
+        sidebar_layout.addWidget(brand_copy)
+        sidebar_layout.addSpacing(22)
+
+        nav_label = QLabel("WORKSPACE")
+        nav_label.setObjectName("SidebarEyebrow")
+        sidebar_layout.addWidget(nav_label)
+        self.nav_group = QButtonGroup(self)
+        self.nav_group.setExclusive(True)
+        self.nav_buttons: list[QPushButton] = []
+        nav_items = [
+            ("01", "Prepare", "Process Archer data"),
+            ("02", "Review", "Inspect variant calls"),
+            ("03", "Evidence", "Collect and export"),
+            ("04", "Settings", "Accounts and safety"),
+        ]
+        for index, (number, title, description) in enumerate(nav_items):
+            button = QPushButton(f"{number}   {title}\n       {description}")
+            button.setObjectName("SidebarButton")
+            button.setCheckable(True)
+            button.setMinimumHeight(58)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.clicked.connect(
+                lambda checked=False, page_index=index: self._switch_page(page_index)
+            )
+            self.nav_group.addButton(button, index)
+            self.nav_buttons.append(button)
+            sidebar_layout.addWidget(button)
+        self.nav_buttons[0].setChecked(True)
+        sidebar_layout.addStretch()
+
+        workflow_label = QLabel("WORKFLOW")
+        workflow_label.setObjectName("SidebarEyebrow")
+        sidebar_layout.addWidget(workflow_label)
+        workflow_hint = QLabel("Prepare  →  Collect  →  Report")
+        workflow_hint.setObjectName("SidebarWorkflow")
+        workflow_hint.setWordWrap(True)
+        sidebar_layout.addWidget(workflow_hint)
+        local_note = QLabel("Local workspace\nCredentials stay in Windows Credential Manager")
+        local_note.setObjectName("LocalNote")
+        local_note.setWordWrap(True)
+        sidebar_layout.addWidget(local_note)
+        shell.addWidget(sidebar)
+
+        content = QWidget()
+        content.setObjectName("ContentShell")
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(24, 20, 24, 14)
+        layout.setSpacing(14)
 
         header = QHBoxLayout()
         title_box = QVBoxLayout()
-        title = QLabel("Archer Prosess")
-        title.setFont(QFont("Segoe UI", 24, QFont.Weight.Bold))
-        title.setStyleSheet(f"color: {Palette.navy};")
-        subtitle = QLabel("VPM variant processing, local history, and database evidence")
-        subtitle.setStyleSheet(f"color: {Palette.muted};")
-        title_box.addWidget(title)
-        title_box.addWidget(subtitle)
+        self.page_eyebrow = QLabel("WORKSPACE  /  PREPARE")
+        self.page_eyebrow.setObjectName("PageEyebrow")
+        self.page_title = QLabel("Prepare data")
+        self.page_title.setObjectName("PageTitle")
+        self.page_subtitle = QLabel("Validate the Archer TSV and create the review workbook")
+        self.page_subtitle.setObjectName("PageSubtitle")
+        title_box.addWidget(self.page_eyebrow)
+        title_box.addWidget(self.page_title)
+        title_box.addWidget(self.page_subtitle)
         header.addLayout(title_box)
         header.addStretch()
         self.activity_progress = QProgressBar()
@@ -416,23 +487,34 @@ class MainWindow(QMainWindow):
             metrics.addWidget(card)
         layout.addLayout(metrics)
 
-        workflow = QHBoxLayout()
-        workflow.setSpacing(10)
-        workflow.addWidget(WorkflowStep("1", "Prepare", "Validate and process the Archer TSV"))
-        workflow.addWidget(WorkflowStep("2", "Collect", "Gather API and signed-in evidence"))
-        workflow.addWidget(WorkflowStep("3", "Report", "Export workbook and patient PDFs"))
-        layout.addLayout(workflow)
-
-        self.tabs = QTabWidget()
-        self.tabs.addTab(self._processing_tab(), "Processing")
-        self.tabs.addTab(self._review_tab(), "Review")
-        self.tabs.addTab(self._database_tab(), "Databases")
-        self.tabs.addTab(self._settings_tab(), "Settings")
+        self.tabs = QStackedWidget()
+        self.tabs.setObjectName("WorkspacePages")
+        self.tabs.addWidget(self._processing_tab())
+        self.tabs.addWidget(self._review_tab())
+        self.tabs.addWidget(self._database_tab())
+        self.tabs.addWidget(self._settings_tab())
         layout.addWidget(self.tabs, 1)
+        shell.addWidget(content, 1)
 
         self.setCentralWidget(root)
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
+
+    def _switch_page(self, index: int) -> None:
+        pages = [
+            ("PREPARE", "Prepare data", "Validate the Archer TSV and create the review workbook"),
+            ("REVIEW", "Review variants", "Inspect calls, decisions, history, and review flags"),
+            ("EVIDENCE", "Evidence workspace", "Collect database evidence and export patient reports"),
+            ("SETTINGS", "Settings", "Manage accounts, pacing, security, and reporting defaults"),
+        ]
+        if not 0 <= index < len(pages):
+            return
+        self.tabs.setCurrentIndex(index)
+        self.nav_buttons[index].setChecked(True)
+        eyebrow, title, subtitle = pages[index]
+        self.page_eyebrow.setText(f"WORKSPACE  /  {eyebrow}")
+        self.page_title.setText(title)
+        self.page_subtitle.setText(subtitle)
 
     def _processing_tab(self) -> QWidget:
         page = QWidget()
@@ -1415,6 +1497,95 @@ class MainWindow(QMainWindow):
                 font-family: "Segoe UI";
                 font-size: 13px;
             }}
+            QWidget#AppRoot, QWidget#ContentShell {{
+                background: {Palette.app_bg};
+            }}
+            QFrame#Sidebar {{
+                background: {Palette.navy};
+                border: none;
+            }}
+            QLabel#BrandMark {{
+                background: {Palette.blue};
+                color: white;
+                border-radius: 11px;
+                font-size: 15px;
+                font-weight: 800;
+            }}
+            QLabel#BrandTitle {{
+                background: transparent;
+                color: white;
+                font-size: 20px;
+                font-weight: 750;
+                padding-top: 4px;
+            }}
+            QLabel#BrandCopy {{
+                background: transparent;
+                color: #B9D8E8;
+                font-size: 12px;
+            }}
+            QLabel#SidebarEyebrow {{
+                background: transparent;
+                color: #8FC5DD;
+                font-size: 10px;
+                font-weight: 800;
+                letter-spacing: 1px;
+                padding: 4px 8px;
+            }}
+            QPushButton#SidebarButton {{
+                background: transparent;
+                color: #D5E8F1;
+                border: 1px solid transparent;
+                border-radius: 9px;
+                padding: 8px 10px;
+                text-align: left;
+                font-weight: 600;
+            }}
+            QPushButton#SidebarButton:hover {{
+                background: #145A7D;
+                color: white;
+                border-color: #28799E;
+            }}
+            QPushButton#SidebarButton:checked {{
+                background: {Palette.blue};
+                color: white;
+                border-color: #38A7DD;
+            }}
+            QPushButton#SidebarButton:focus {{
+                border: 2px solid #7DD3FC;
+            }}
+            QLabel#SidebarWorkflow {{
+                background: transparent;
+                color: white;
+                font-weight: 650;
+                padding: 0 8px 6px 8px;
+            }}
+            QLabel#LocalNote {{
+                background: #123F59;
+                color: #C9E4EF;
+                border: 1px solid #256B8A;
+                border-radius: 8px;
+                padding: 10px;
+                font-size: 11px;
+            }}
+            QLabel#PageEyebrow {{
+                color: {Palette.blue};
+                font-size: 10px;
+                font-weight: 800;
+                letter-spacing: 1px;
+            }}
+            QLabel#PageTitle {{
+                color: {Palette.navy};
+                font-size: 24px;
+                font-weight: 750;
+            }}
+            QLabel#PageSubtitle {{
+                color: {Palette.muted};
+                font-size: 12px;
+            }}
+            QStackedWidget#WorkspacePages {{
+                background: transparent;
+                border: none;
+            }}
             QGroupBox {{
                 background: {Palette.panel};
                 border: 1px solid {Palette.border};
@@ -1453,8 +1624,9 @@ class MainWindow(QMainWindow):
                 background: {Palette.pale_blue};
             }}
             QPushButton:disabled {{
-                color: #9AA5AD;
-                background: #EEF2F5;
+                color: #8293A1;
+                background: #E7EEF2;
+                border-color: #D2DEE5;
             }}
             QPushButton#PrimaryButton {{
                 background: {Palette.blue};
@@ -1462,7 +1634,7 @@ class MainWindow(QMainWindow):
                 border-color: {Palette.blue};
             }}
             QPushButton#PrimaryButton:hover {{
-                background: #245F93;
+                background: #036FA6;
             }}
             QPushButton#OutlineButton {{
                 background: {Palette.pale_blue};
@@ -1530,27 +1702,6 @@ class MainWindow(QMainWindow):
                 border: 1px solid #BDD9C3;
                 border-radius: 12px;
                 padding: 5px 12px;
-                font-weight: 700;
-            }}
-            QTabWidget::pane {{
-                border: 1px solid {Palette.border};
-                background: {Palette.panel};
-                border-radius: 10px;
-            }}
-            QTabBar::tab {{
-                padding: 10px 20px;
-                background: #E8EEF3;
-                border: 1px solid {Palette.border};
-                border-bottom: none;
-                margin-right: 2px;
-            }}
-            QTabBar::tab:hover {{
-                color: {Palette.blue};
-                background: {Palette.pale_blue};
-            }}
-            QTabBar::tab:selected {{
-                background: {Palette.panel};
-                color: {Palette.navy};
                 font-weight: 700;
             }}
             QHeaderView::section {{

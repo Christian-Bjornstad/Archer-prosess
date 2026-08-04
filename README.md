@@ -16,7 +16,7 @@ Current database status:
 - ClinVar: NCBI E-utilities resolution followed by a focused browser capture of the variant title and germline/somatic classification summary.
 - COSMIC: authenticated browser lookup by the Archer `COSMICID`, capturing the mutation Overview, Tissue distribution, and Samples filtered to `lymphoid`. The older NLM Clinical Tables v4 lookup remains in the service for basic/public records, but it does not provide these full website panels.
 - OncoKB: token-ready lookup when an API token is saved in Settings; otherwise the serial browser workflow can sign in using an OncoKB email/password stored in Windows Credential Manager.
-- Franklin: supported API lookup when a Premium token is configured; otherwise a serial browser lookup searches by transcript HGVS, verifies the returned variant identity, and imports only the suggested classification. Anonymous Franklin access is limited, so saved browser login is recommended.
+- Franklin: supported API lookup when a Premium token is configured; otherwise a serial browser lookup explicitly searches GRCh37/hg19 in Somatic mode, verifies the returned variant identity, and imports only the suggested classification. It captures the complete Somatic Clinical Evidence scroller, then Computed Classification through De Novo Data (excluding Add More Evidence), followed by the prediction/population panels after their render buffer. Anonymous Franklin access is limited, so saved browser login is recommended.
 - MTBP: login-assisted visible-browser batch submission and report parsing. Transcript HGVS is tried first; entries rejected by MTBP are retried as GRCh37 genomic HGVS derived from Archer coordinates/ref/alt. The app submits only gene/variant strings under a pseudonymous analysis ID, validates every returned row, and records pipeline/database versions. Its public instance is research-only.
 
 Evidence searches run patient-by-patient. For each patient, the selected public/API
@@ -29,7 +29,9 @@ Website safety delays are randomized independently between
 website variants, provider changes, and consecutive browser-only patients. It
 defaults to 10-20 seconds, with editable minimum and maximum values in Settings.
 MTBP always runs last for each patient and has a separately configurable 20-minute
-default report timeout. Completed patient evidence is saved to the workbook during
+default report timeout. Queue waiting checks both the live queue and the exact
+pseudonymous entry in Reports List, recovering completed reports after transient
+navigation stalls without resubmitting the analysis. Completed patient evidence is saved to the workbook during
 the run so a later failure does not discard earlier patients.
 When a database search starts, the log reports each selected source as ready, token required, manual, rate limited, or error.
 
