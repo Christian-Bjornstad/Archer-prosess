@@ -40,6 +40,12 @@ When a database search starts, the log reports each selected source as ready, to
 The Databases tab also provides a visible Microsoft Edge workflow for COSMIC,
 OncoKB, Franklin, ClinVar and MTBP:
 
+The app starts the installed Microsoft Edge directly and controls it over the
+localhost Edge DevTools Protocol (CDP) using a pure-Python WebSocket client. It
+does not install or launch Playwright, Node.js, Selenium, Selenium Manager, or a
+separate Edge WebDriver executable. Work-PC policy must allow the managed Edge
+binary and the Edge `RemoteDebuggingAllowed` policy.
+
 1. Choose a source under **Signed-in session**.
 2. Add COSMIC, OncoKB, Franklin and/or MTBP email/password in Settings. Passwords are encrypted
    by Windows Credential Manager and are never written to `config.json`.
@@ -61,9 +67,9 @@ uses the input `COSMICID` directly and captures three evidence panels; Franklin
 uses the provider search form instead of constructing a genomic URL, which avoids
 reverse-strand ref/alt errors, retries transient failures three times, and returns
 only `[found] classification=<value>;`. It captures the complete internally
-scrollable computed-classification panel as readable overlapping sections,
-including every ACMG evidence card below Suggested Classification and Add More
-Evidence. It also captures a tightly cropped assessment-tools view containing Predictions and
+scrollable Somatic Clinical Evidence tab, followed by non-overlapping Computed
+Classification sections ending after De Novo Data. It deliberately excludes Add
+More Evidence. It also captures a tightly cropped assessment-tools view containing Predictions and
 Population Frequencies. ClinVar captures only the title and classification-summary
 region above Variant Details. OncoKB captures the variant overview and mutation-effect
 view. The app saves screenshots and a JSON audit record beside the review workbook,

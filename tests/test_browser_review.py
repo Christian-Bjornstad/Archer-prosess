@@ -484,6 +484,9 @@ def test_franklin_search_explicitly_selects_hg19_and_somatic(tmp_path):
         def count(self):
             return 1
 
+        def wait_for(self, **kwargs):
+            pass
+
         def click(self):
             selected.append(self.name)
 
@@ -505,6 +508,9 @@ def test_franklin_search_explicitly_selects_hg19_and_somatic(tmp_path):
             assert role == "option"
             assert kwargs["exact"]
             return Option(kwargs["name"])
+
+        def wait_for_timeout(self, milliseconds):
+            pass
 
     service._select_franklin_search_mode(Page())
 
@@ -794,7 +800,7 @@ def test_mtbp_queue_recovers_report_from_reports_list(tmp_path):
     )
     analysis_id = "ARCHER-20260804T120000Z-test"
 
-    class FakePlaywrightTimeout(Exception):
+    class FakeBrowserTimeout(Exception):
         pass
 
     class ReportLink:
@@ -815,7 +821,7 @@ def test_mtbp_queue_recovers_report_from_reports_list(tmp_path):
         def wait_for_url(self, pattern, *, timeout):
             if pattern.fullmatch(self.url):
                 return
-            raise FakePlaywrightTimeout()
+            raise FakeBrowserTimeout()
 
         def goto(self, url, **kwargs):
             self.url = url
@@ -834,7 +840,7 @@ def test_mtbp_queue_recovers_report_from_reports_list(tmp_path):
     service._wait_for_mtbp_report(
         page,
         analysis_id,
-        FakePlaywrightTimeout,
+        FakeBrowserTimeout,
         progress=None,
     )
 

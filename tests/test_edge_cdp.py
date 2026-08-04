@@ -1,0 +1,61 @@
+from archer_processor.services.browser_review import BrowserReviewService
+from archer_processor.services.edge_cdp import (
+    EdgeCdpError,
+    EdgeCdpPage,
+    EdgeCdpTimeout,
+    _role_expression,
+    _text_expression,
+    find_edge_executable,
+)
+
+
+def test_browser_service_uses_edge_cdp_backend(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path)
+
+    factory, error_type, timeout_type = service._browser_api()
+
+    assert factory.__name__ == "sync_edge_cdp"
+    assert error_type is EdgeCdpError
+    assert timeout_type is EdgeCdpTimeout
+
+
+def test_find_edge_executable_uses_managed_program_files(tmp_path, monkeypatch):
+    edge = tmp_path / "Microsoft" / "Edge" / "Application" / "msedge.exe"
+    edge.parent.mkdir(parents=True)
+    edge.write_bytes(b"")
+    monkeypatch.setattr("archer_processor.services.edge_cdp.shutil.which", lambda _: None)
+    monkeypatch.setenv("PROGRAMFILES(X86)", str(tmp_path))
+    monkeypatch.delenv("PROGRAMFILES", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+
+    assert find_edge_executable() == edge.resolve()
+
+
+def test_role_and_text_locators_encode_accessible_matching():
+    role = _role_expression("button", "Sign in", True)
+    text = _text_expression("De Novo Data", True)
+
+    assert "aria-label" in role
+    assert "placeholder" in role
+    assert "actual === expected" in role
+    assert "children" in text
+    assert "actual === expected" in text
+
+
+def test_wait_for_url_accepts_predicate():
+    class Page(EdgeCdpPage):
+        def __init__(self):
+            self.urls = iter(
+                [
+                    "https://example.org/login",
+                    "https://example.org/result",
+                ]
+            )
+            self.current = ""
+
+        @property
+        def url(self):
+            self.current = next(self.urls, self.current)
+            return self.current
+
+    Page().wait_for_url(lambda url: url.endswith("/result"), timeout=1_000)

@@ -106,10 +106,10 @@ class BrowserReviewService:
     @staticmethod
     def dependency_available() -> bool:
         try:
-            import playwright.sync_api  # noqa: F401
+            from archer_processor.services.edge_cdp import edge_cdp_available
         except ImportError:
             return False
-        return True
+        return edge_cdp_available()
 
     def profile_directory(self, database: str) -> Path:
         self._validate_database(database)
@@ -151,9 +151,9 @@ class BrowserReviewService:
 
     def open_login(self, database: str, *, maximum_minutes: int = 30) -> str:
         """Open login and release the profile as soon as authentication succeeds."""
-        sync_playwright, playwright_error, _ = self._playwright_api()
+        sync_browser, browser_error, _ = self._browser_api()
         profile = self.profile_directory(database)
-        with sync_playwright() as runtime:
+        with sync_browser() as runtime:
             try:
                 context = runtime.chromium.launch_persistent_context(
                     str(profile),
@@ -164,7 +164,8 @@ class BrowserReviewService:
             except Exception as exc:
                 raise BrowserAutomationUnavailable(
                     "Could not start Microsoft Edge for browser review. "
-                    "Confirm that Edge and the Python Playwright package are installed."
+                    "Confirm that managed Edge is installed and its "
+                    "RemoteDebuggingAllowed policy is enabled."
                 ) from exc
             page = context.pages[0] if context.pages else context.new_page()
             page.goto(
@@ -183,12 +184,12 @@ class BrowserReviewService:
                     if self._session_authenticated(database, active_page):
                         return f"{database} sign-in confirmed; browser profile released."
                     active_page.wait_for_timeout(500)
-            except playwright_error:
+            except browser_error:
                 pass
             finally:
                 try:
                     context.close()
-                except playwright_error:
+                except browser_error:
                     pass
         return f"{database} sign-in window closed; session will be checked during lookup."
 
@@ -260,10 +261,10 @@ class BrowserReviewService:
                 progress=progress,
             )
 
-        sync_playwright, playwright_error, playwright_timeout = self._playwright_api()
+        sync_browser, browser_error, browser_timeout = self._browser_api()
         artifact_directory.mkdir(parents=True, exist_ok=True)
         results: dict[str, DatabaseEvidence] = {}
-        with sync_playwright() as runtime:
+        with sync_browser() as runtime:
             try:
                 context = runtime.chromium.launch_persistent_context(
                     str(self.profile_directory(database)),
@@ -319,7 +320,7 @@ class BrowserReviewService:
                         else:
                             try:
                                 page.wait_for_load_state("networkidle", timeout=12_000)
-                            except playwright_timeout:
+                            except browser_timeout:
                                 page.wait_for_timeout(1_500)
                         results[key] = self._capture_result(
                             database, variant, page, artifact_directory
@@ -339,7 +340,7 @@ class BrowserReviewService:
             finally:
                 try:
                     context.close()
-                except playwright_error:
+                except browser_error:
                     pass
         return results
 
@@ -351,10 +352,10 @@ class BrowserReviewService:
         progress: Callable[[str], None] | None,
     ) -> dict[str, DatabaseEvidence]:
         """Capture the licensed COSMIC mutation page by Archer COSMICID."""
-        sync_playwright, playwright_error, _ = self._playwright_api()
+        sync_browser, browser_error, _ = self._browser_api()
         artifact_directory.mkdir(parents=True, exist_ok=True)
         results: dict[str, DatabaseEvidence] = {}
-        with sync_playwright() as runtime:
+        with sync_browser() as runtime:
             try:
                 context = runtime.chromium.launch_persistent_context(
                     str(self.profile_directory("COSMIC")),
@@ -443,7 +444,7 @@ class BrowserReviewService:
             finally:
                 try:
                     context.close()
-                except playwright_error:
+                except browser_error:
                     pass
         return results
 
@@ -458,13 +459,13 @@ class BrowserReviewService:
         from archer_processor.services.database_search import DatabaseSearchService
         from archer_processor.services.settings import AppSettings
 
-        sync_playwright, playwright_error, _ = self._playwright_api()
+        sync_browser, browser_error, _ = self._browser_api()
         artifact_directory.mkdir(parents=True, exist_ok=True)
         api_service = DatabaseSearchService(
             AppSettings(clinvar_api_key=self.clinvar_api_key)
         )
         results: dict[str, DatabaseEvidence] = {}
-        with sync_playwright() as runtime:
+        with sync_browser() as runtime:
             try:
                 context = runtime.chromium.launch_persistent_context(
                     str(self.profile_directory("ClinVar")),
@@ -518,7 +519,7 @@ class BrowserReviewService:
             finally:
                 try:
                     context.close()
-                except playwright_error:
+                except browser_error:
                     pass
         return results
 
@@ -688,12 +689,12 @@ class BrowserReviewService:
         progress: Callable[[str], None] | None,
     ) -> dict[str, DatabaseEvidence]:
         """Resolve HGVS through Franklin search, then extract only classification."""
-        sync_playwright, playwright_error, playwright_timeout = self._playwright_api()
+        sync_browser, browser_error, browser_timeout = self._browser_api()
         artifact_directory.mkdir(parents=True, exist_ok=True)
         results: dict[str, DatabaseEvidence] = {}
         context = None
         try:
-            with sync_playwright() as runtime:
+            with sync_browser() as runtime:
                 try:
                     context = runtime.chromium.launch_persistent_context(
                         str(self.profile_directory("Franklin")),
@@ -761,13 +762,13 @@ class BrowserReviewService:
                             for _ in range(60):
                                 last_text = page.locator("body").inner_text()
                                 if (
-                                    "Suggested classification" in last_text
+                                    self._franklin_result_ready(page, last_text)
                                     or "Something went wrong" in last_text
                                     or _franklin_quota_message(last_text)
                                 ):
                                     break
                                 page.wait_for_timeout(1_000)
-                            if "Suggested classification" in last_text:
+                            if self._franklin_result_ready(page, last_text):
                                 evidence = self._capture_result(
                                     "Franklin", variant, page, artifact_directory
                                 )
@@ -802,7 +803,7 @@ class BrowserReviewService:
                                 )
                                 break
                             last_error = "Franklin returned 'Something went wrong'."
-                        except playwright_timeout:
+                        except browser_timeout:
                             last_error = "Franklin timed out while resolving the variant."
                         except Exception as exc:
                             last_error = str(exc)
@@ -829,9 +830,19 @@ class BrowserReviewService:
             if context is not None:
                 try:
                     context.close()
-                except playwright_error:
+                except browser_error:
                     pass
         return results
+
+    @staticmethod
+    def _franklin_result_ready(page: Any, body_text: str) -> bool:
+        if "Suggested classification" in body_text:
+            return True
+        return (
+            "/clinical-db/variant/snpTumor/" in page.url
+            and "Somatic Clinical Evidence" in body_text
+            and ("AMP Classification" in body_text or "Evidence for" in body_text)
+        )
 
     def _open_franklin_resolved_variant(self, page: Any, variant: VariantRecord) -> None:
         for _ in range(40):
@@ -846,18 +857,35 @@ class BrowserReviewService:
                     if transcript and transcript in text
                 ]
                 if len(matches) == 1:
-                    options.nth(matches[0]).click()
-                    break
+                    selected = options.nth(matches[0])
+                    try:
+                        selected.wait_for(state="visible", timeout=2_000)
+                        selected.click()
+                        break
+                    except Exception:
+                        page.wait_for_timeout(500)
+                        continue
                 if len(option_texts) == 1:
-                    options.first.click()
-                    break
+                    try:
+                        options.first.wait_for(state="visible", timeout=2_000)
+                        options.first.click()
+                        break
+                    except Exception:
+                        page.wait_for_timeout(500)
+                        continue
                 canonical = [
                     index for index, text in enumerate(option_texts)
                     if "Includes Canonical transcript" in text
                 ]
                 if len(canonical) == 1:
-                    options.nth(canonical[0]).click()
-                    break
+                    selected = options.nth(canonical[0])
+                    try:
+                        selected.wait_for(state="visible", timeout=2_000)
+                        selected.click()
+                        break
+                    except Exception:
+                        page.wait_for_timeout(500)
+                        continue
                 raise ValueError(
                     f"Franklin returned {len(option_texts)} ambiguous variants for "
                     f"{_franklin_search_query(variant)}."
@@ -880,13 +908,24 @@ class BrowserReviewService:
             (comboboxes.nth(0), "hg19"),
             (comboboxes.nth(1), "Somatic"),
         ):
-            combobox.click()
+            current_text = (
+                combobox.inner_text().strip().lower()
+                if hasattr(combobox, "inner_text")
+                else ""
+            )
+            if option_name.lower() in current_text:
+                continue
+            click_physical = getattr(combobox, "click_physical", combobox.click)
+            click_physical()
             option = page.get_by_role("option", name=option_name, exact=True)
+            option.wait_for(state="visible", timeout=self.navigation_timeout_ms)
             if option.count() != 1:
                 raise RuntimeError(
                     f"Franklin search option was not uniquely available: {option_name}"
                 )
-            option.click()
+            option_click = getattr(option, "click_physical", option.click)
+            option_click()
+            page.wait_for_timeout(150)
 
     def _search_mtbp(
         self,
@@ -918,7 +957,7 @@ class BrowserReviewService:
         if not query_pairs:
             return results
 
-        sync_playwright, playwright_error, playwright_timeout = self._playwright_api()
+        sync_browser, browser_error, browser_timeout = self._browser_api()
         artifact_directory.mkdir(parents=True, exist_ok=True)
         submitted_queries = list(dict.fromkeys(query for _, query in query_pairs))
         batch_digest = hashlib.sha256("\n".join(submitted_queries).encode("utf-8")).hexdigest()[:10]
@@ -929,7 +968,7 @@ class BrowserReviewService:
         )
         context = None
         try:
-            with sync_playwright() as runtime:
+            with sync_browser() as runtime:
                 try:
                     context = runtime.chromium.launch_persistent_context(
                         str(self.profile_directory("MTBP")),
@@ -1074,7 +1113,7 @@ class BrowserReviewService:
                     self._wait_for_mtbp_report(
                         page,
                         analysis_id,
-                        playwright_timeout,
+                        browser_timeout,
                         progress=progress,
                     )
                 if progress:
@@ -1186,7 +1225,7 @@ class BrowserReviewService:
                     accession=query,
                     url=current_url,
                 )
-        except (playwright_timeout, TimeoutError) as exc:
+        except (browser_timeout, TimeoutError) as exc:
             current_url = context.pages[0].url if context and context.pages else self.login_url("MTBP")
             for variant, query in query_pairs:
                 key = self.variant_key(variant)
@@ -1216,7 +1255,7 @@ class BrowserReviewService:
             if context is not None:
                 try:
                     context.close()
-                except playwright_error:
+                except browser_error:
                     pass
         return results
 
@@ -1412,7 +1451,7 @@ class BrowserReviewService:
         self,
         page: Any,
         analysis_id: str,
-        playwright_timeout: type[Exception],
+        browser_timeout: type[Exception],
         *,
         progress: Callable[[str], None] | None,
     ) -> None:
@@ -1434,7 +1473,7 @@ class BrowserReviewService:
                 )
                 if report_pattern.fullmatch(page.url):
                     return
-            except playwright_timeout:
+            except browser_timeout:
                 pass
 
             # MTBP occasionally leaves the queue page unchanged after the report
@@ -1452,7 +1491,7 @@ class BrowserReviewService:
                         timeout=self.navigation_timeout_ms,
                     )
                     return
-            except playwright_timeout:
+            except browser_timeout:
                 pass
             except Exception:
                 # A transient reports-list failure should not abandon the active
@@ -1565,13 +1604,21 @@ class BrowserReviewService:
                 accession=_review_query(variant),
                 url=current_url,
             )
-        body_text = page.locator("body").inner_text(timeout=self.navigation_timeout_ms)
         if database == "Franklin":
             screenshots = self._capture_franklin_somatic_pages(
                 page, variant, artifact_directory
             )
             screenshot_path = Path(screenshots[0]["path"])
+            # The somatic route opens on clinical evidence. Capture that tab,
+            # switch to Computed Classification, and only then parse the visible
+            # suggested classification text.
+            body_text = page.locator("body").inner_text(
+                timeout=self.navigation_timeout_ms
+            )
         else:
+            body_text = page.locator("body").inner_text(
+                timeout=self.navigation_timeout_ms
+            )
             screenshot_path = self._screenshot_path(
                 artifact_directory, database, variant
             )
@@ -1968,7 +2015,7 @@ class BrowserReviewService:
         if database == "COSMIC":
             return (
                 not self._login_required(database, page.url)
-                and page.get_by_role("link", name="log out", exact=True).count() == 1
+                and page.get_by_role("link", name="log out", exact=False).count() >= 1
             )
         if database == "Franklin":
             return not self._login_required(database, page.url) and page.locator("#email").count() == 0
@@ -2060,18 +2107,19 @@ class BrowserReviewService:
             page.wait_for_timeout(500)
         raise TimeoutError("OncoKB did not finish rendering the variant result.")
 
-    def _playwright_api(self):
+    def _browser_api(self):
         try:
-            from playwright.sync_api import (
-                Error as PlaywrightError,
-                TimeoutError as PlaywrightTimeoutError,
-                sync_playwright,
+            from archer_processor.services.edge_cdp import (
+                EdgeCdpError,
+                EdgeCdpTimeout,
+                sync_edge_cdp,
             )
         except ImportError as exc:
             raise BrowserAutomationUnavailable(
-                "Browser review requires Playwright. Reinstall Archer Prosess packages."
+                "Browser review requires the pure-Python websocket-client package. "
+                "Reinstall Archer Prosess packages."
             ) from exc
-        return sync_playwright, PlaywrightError, PlaywrightTimeoutError
+        return sync_edge_cdp, EdgeCdpError, EdgeCdpTimeout
 
     def _validate_database(self, database: str) -> None:
         if database not in BROWSER_DATABASES:
