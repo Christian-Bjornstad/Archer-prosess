@@ -48,6 +48,29 @@ AMINO_ACID_3_TO_1 = {
     "Pyl": "O",
 }
 
+COSMIC_FIELDS = [
+    "AccessionNumber",
+    "GeneCDS_Length",
+    "GeneName",
+    "HGNC_ID",
+    "MutationAA",
+    "MutationCDS",
+    "MutationDescription",
+    "MutationGenomePosition",
+    "MutationStrand",
+    "MutationID",
+    "LegacyMutationID",
+    "GenomicMutationID",
+    "Name",
+    "PrimaryHistology",
+    "PrimarySite",
+    "PubmedPMID",
+    "Site",
+    "GRChVer",
+    "COSMIC_GENE_ID",
+    "COSMIC_PHENOTYPE_ID",
+]
+
 
 class FranklinAuthenticationError(RuntimeError):
     pass
@@ -84,7 +107,9 @@ class DatabaseSearchService:
             elif database == "gnomAD":
                 diagnostics[database] = f"ready ({self.settings.gnomad_dataset}, rate limited)"
             elif database == "COSMIC":
-                diagnostics[database] = "ready (basic/public lookup)"
+                diagnostics[database] = (
+                    "browser login (full page + screenshots); public basic lookup retained"
+                )
             elif database == "CIViC":
                 diagnostics[database] = "ready (open GraphQL)"
             elif database == "CancerMine":
@@ -351,28 +376,14 @@ class DatabaseSearchService:
         queries = self._cosmic_queries(variant)
         if not queries:
             return DatabaseEvidence("COSMIC", "invalid_query", "Missing gene/HGVS fields.")
-        fields = [
-            "MutationID",
-            "LegacyMutationID",
-            "GenomicMutationID",
-            "GeneName",
-            "MutationCDS",
-            "MutationAA",
-            "MutationDescription",
-            "MutationGenomePosition",
-            "GRChVer",
-            "PrimarySite",
-            "PrimaryHistology",
-            "PubmedPMID",
-        ]
         try:
             last_data = None
             for cosmic_query in queries:
                 params = {
                     "terms": cosmic_query["terms"],
-                    "maxList": 8,
+                    "maxList": 500,
                     "grchv": "37",
-                    "ef": ",".join(fields),
+                    "ef": ",".join(COSMIC_FIELDS),
                 }
                 if cosmic_query.get("q"):
                     params["q"] = cosmic_query["q"]
@@ -409,6 +420,24 @@ class DatabaseSearchService:
         positions = extras.get("MutationGenomePosition", [])
         grch = extras.get("GRChVer", [])
         sites = extras.get("PrimarySite", [])
+        histologies = extras.get("PrimaryHistology", [])
+        pmids = extras.get("PubmedPMID", [])
+        genomic_ids = extras.get("GenomicMutationID", [])
+        phenotype_ids = extras.get("COSMIC_PHENOTYPE_ID", [])
+        returned_count = max(
+            [
+                len(ids),
+                *(len(value) for value in extras.values() if isinstance(value, list)),
+            ],
+            default=0,
+        )
+        records = [
+            {
+                field: self._at(extras.get(field, []), index)
+                for field in COSMIC_FIELDS
+            }
+            for index in range(returned_count)
+        ]
         first = []
         for index, mutation_id in enumerate(ids[:3]):
             bits = [
@@ -423,14 +452,47 @@ class DatabaseSearchService:
                 self._at(sites, index),
             ]
             first.append(" ".join(bit for bit in bits if bit))
-        summary = f"COSMIC basic/public lookup: {total} match(es) for {query}. " + "; ".join(first)
+        unique_sites = self._split_unique_text(sites)
+        unique_histologies = self._split_unique_text(histologies)
+        unique_pmids = self._split_unique_text(pmids)
+        summary_parts = [
+            f"COSMIC public dataset: {total} match(es), {returned_count} record(s) returned for {query}",
+            "IDs=" + ", ".join(self._unique_text(ids)[:8]),
+        ]
+        if unique_sites:
+            summary_parts.append("primary_sites=" + ", ".join(unique_sites[:12]))
+        if unique_histologies:
+            summary_parts.append(
+                "primary_histologies=" + ", ".join(unique_histologies[:12])
+            )
+        if unique_pmids:
+            summary_parts.append(f"PubMed_references={len(unique_pmids)}")
+        if first:
+            summary_parts.append("examples=" + "; ".join(first))
+        summary = "; ".join(part for part in summary_parts if part)
         return DatabaseEvidence(
             database="COSMIC",
             status="found",
             summary=summary.strip(),
             accession=", ".join(self._unique_text(ids)[:5]),
             url=self._manual_url("COSMIC", variant),
-            raw={"query": query, "extra": extras},
+            raw={
+                "query": query,
+                "total_matches": total,
+                "returned_count": returned_count,
+                "fields": COSMIC_FIELDS,
+                "records": records,
+                "aggregates": {
+                    "mutation_ids": self._unique_text(ids),
+                    "legacy_mutation_ids": self._split_unique_text(legacy_ids),
+                    "genomic_mutation_ids": self._split_unique_text(genomic_ids),
+                    "primary_sites": unique_sites,
+                    "primary_histologies": unique_histologies,
+                    "pubmed_pmids": unique_pmids,
+                    "phenotype_ids": self._split_unique_text(phenotype_ids),
+                },
+                "extra": extras,
+            },
         )
 
     def _search_civic(self, variant: VariantRecord) -> DatabaseEvidence:
@@ -1393,6 +1455,14 @@ class DatabaseSearchService:
             text = str(value)
             if text and text not in unique:
                 unique.append(text)
+        return unique
+
+    def _split_unique_text(self, values: list) -> list[str]:
+        unique: list[str] = []
+        for value in values:
+            for part in re.split(r"\s*;\s*", str(value or "")):
+                if part and part not in unique:
+                    unique.append(part)
         return unique
 
     def _name(self, value: dict) -> str:

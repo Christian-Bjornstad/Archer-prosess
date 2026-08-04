@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import random
+import time
 from pathlib import Path
 
 from PyQt6.QtCore import QDate, QObject, Qt, QThread, pyqtSignal
@@ -21,6 +23,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -36,7 +39,11 @@ from archer_processor.core import DatabaseEvidence, FilterEngine, ProcessingResu
 from archer_processor.core.highlights import variant_highlight
 from archer_processor.io import ArcherTsvReader
 from archer_processor.knowledge import VariantHistoryRepository
-from archer_processor.reports import ExcelReportWriter, PatientPdfReportWriter
+from archer_processor.reports import (
+    ExcelReportWriter,
+    PatientExcelReportWriter,
+    PatientPdfReportWriter,
+)
 from archer_processor.services import (
     AppSettings,
     BROWSER_DATABASES,
@@ -91,40 +98,117 @@ class ProcessingWorker(QObject):
             self.failed.emit(str(exc))
 
 
+def _variants_grouped_by_patient(variants) -> list[tuple[str, list]]:
+    grouped: dict[str, list] = {}
+    for variant in variants:
+        grouped.setdefault(variant.patient_id, []).append(variant)
+    return list(grouped.items())
+
+
+def _merge_evidence_results(target: dict, incoming: dict) -> None:
+    for key, new_items in incoming.items():
+        by_database = {item.database: item for item in target.get(key, [])}
+        by_database.update({item.database: item for item in new_items})
+        target[key] = list(by_database.values())
+
+
 class DatabaseWorker(QObject):
     finished = pyqtSignal(object)
+    patient_finished = pyqtSignal(object)
     failed = pyqtSignal(str)
     status = pyqtSignal(str)
 
-    def __init__(self, variants, databases: list[str], settings: AppSettings, max_workers: int):
+    def __init__(
+        self,
+        variants,
+        api_databases: list[str],
+        browser_databases: list[str],
+        artifact_root: Path,
+        settings: AppSettings,
+    ):
         super().__init__()
         self.variants = variants
-        self.databases = databases
+        self.api_databases = api_databases
+        self.browser_databases = browser_databases
+        self.databases = [*api_databases, *browser_databases]
+        self.artifact_root = artifact_root
         self.settings = settings
-        self.max_workers = max_workers
 
     def run(self) -> None:
         try:
-            service = DatabaseSearchService(self.settings)
-            for database, status in service.database_diagnostics(self.databases).items():
+            api_service = DatabaseSearchService(self.settings)
+            browser_service = self._browser_service()
+            for database, status in api_service.database_diagnostics(self.databases).items():
                 self.status.emit(f"{database}: {status}")
+            patients = _variants_grouped_by_patient(self.variants)
+            all_evidence: dict[str, list[DatabaseEvidence]] = {}
             self.status.emit(
-                f"Parallel search started: {len(self.variants)} variants, "
-                f"{len(self.databases)} sources, {self.max_workers} workers"
+                f"Patient-by-patient search started: {len(patients)} patients, "
+                f"{len(self.databases)} sources"
             )
+            for patient_index, (patient_id, patient_variants) in enumerate(patients, start=1):
+                patient_evidence: dict[str, list[DatabaseEvidence]] = {
+                    api_service.variant_key(variant): [] for variant in patient_variants
+                }
+                prefix = f"Patient {patient_index}/{len(patients)} ({patient_id})"
+                self.status.emit(f"{prefix}: starting {len(patient_variants)} variant(s)")
+                for database in self.api_databases:
+                    self.status.emit(f"{prefix}: searching {database}")
+                    for variant in patient_variants:
+                        key = api_service.variant_key(variant)
+                        try:
+                            patient_evidence[key].extend(
+                                api_service.search_variant(variant, [database])
+                            )
+                        except Exception as exc:
+                            patient_evidence[key].append(
+                                DatabaseEvidence(database, "error", str(exc))
+                            )
 
-            def on_progress(done: int, total: int, variant) -> None:
-                self.status.emit(f"Evidence {done}/{total} complete: {variant.display_name}")
+                if self.browser_databases:
+                    if patient_index > 1:
+                        self._wait(
+                            f"{prefix}: website safety buffer before signed-in sources"
+                        )
+                    browser_evidence = browser_service.search_variants(
+                        patient_variants,
+                        self.browser_databases,
+                        self.artifact_root / f"patient-{patient_index:03d}",
+                        progress=lambda message, p=prefix: self.status.emit(f"{p}: {message}"),
+                    )
+                    _merge_evidence_results(patient_evidence, browser_evidence)
 
-            evidence = service.search_variants_parallel(
-                self.variants,
-                self.databases,
-                max_workers=self.max_workers,
-                progress=on_progress,
-            )
-            self.finished.emit(evidence)
+                _merge_evidence_results(all_evidence, patient_evidence)
+                self.patient_finished.emit(patient_evidence)
+                self.status.emit(f"{prefix}: complete")
+            self.finished.emit(all_evidence)
         except Exception as exc:
             self.failed.emit(str(exc))
+
+    def _browser_service(self) -> BrowserReviewService:
+        return BrowserReviewService(
+            mtbp_cancer_type=self.settings.mtbp_cancer_type,
+            analysis_timeout_ms=self.settings.mtbp_timeout_minutes * 60_000,
+            request_delay_ms=self.settings.browser_delay_seconds * 1_000,
+            request_delay_max_ms=self.settings.browser_delay_max_seconds * 1_000,
+            cosmic_email=self.settings.cosmic_email,
+            cosmic_password=self.settings.cosmic_password,
+            oncokb_email=self.settings.oncokb_email,
+            oncokb_password=self.settings.oncokb_password,
+            franklin_email=self.settings.franklin_email,
+            franklin_password=self.settings.franklin_password,
+            mtbp_email=self.settings.mtbp_email,
+            mtbp_password=self.settings.mtbp_password,
+        )
+
+    def _wait(self, reason: str) -> None:
+        minimum = max(0, int(self.settings.browser_delay_seconds))
+        maximum = max(minimum, int(self.settings.browser_delay_max_seconds))
+        delay = random.randint(minimum, maximum)
+        if delay <= 0:
+            return
+        self.status.emit(f"{reason}: {delay}s")
+        time.sleep(delay)
 
 
 class BrowserLoginWorker(QObject):
@@ -146,6 +230,9 @@ class BrowserLoginWorker(QObject):
                 mtbp_cancer_type=self.settings.mtbp_cancer_type,
                 analysis_timeout_ms=self.settings.mtbp_timeout_minutes * 60_000,
                 request_delay_ms=self.settings.browser_delay_seconds * 1_000,
+                request_delay_max_ms=self.settings.browser_delay_max_seconds * 1_000,
+                cosmic_email=self.settings.cosmic_email,
+                cosmic_password=self.settings.cosmic_password,
                 oncokb_email=self.settings.oncokb_email,
                 oncokb_password=self.settings.oncokb_password,
                 franklin_email=self.settings.franklin_email,
@@ -160,6 +247,7 @@ class BrowserLoginWorker(QObject):
 
 class BrowserReviewWorker(QObject):
     finished = pyqtSignal(object)
+    patient_finished = pyqtSignal(object)
     failed = pyqtSignal(str)
     status = pyqtSignal(str)
 
@@ -176,6 +264,9 @@ class BrowserReviewWorker(QObject):
                 mtbp_cancer_type=self.settings.mtbp_cancer_type,
                 analysis_timeout_ms=self.settings.mtbp_timeout_minutes * 60_000,
                 request_delay_ms=self.settings.browser_delay_seconds * 1_000,
+                request_delay_max_ms=self.settings.browser_delay_max_seconds * 1_000,
+                cosmic_email=self.settings.cosmic_email,
+                cosmic_password=self.settings.cosmic_password,
                 oncokb_email=self.settings.oncokb_email,
                 oncokb_password=self.settings.oncokb_password,
                 franklin_email=self.settings.franklin_email,
@@ -183,13 +274,33 @@ class BrowserReviewWorker(QObject):
                 mtbp_email=self.settings.mtbp_email,
                 mtbp_password=self.settings.mtbp_password,
             )
-            evidence = service.search_variants(
-                self.variants,
-                self.databases,
-                self.artifact_root,
-                progress=self.status.emit,
-            )
-            self.finished.emit(evidence)
+            all_evidence: dict[str, list[DatabaseEvidence]] = {}
+            patients = _variants_grouped_by_patient(self.variants)
+            for patient_index, (patient_id, patient_variants) in enumerate(patients, start=1):
+                prefix = f"Patient {patient_index}/{len(patients)} ({patient_id})"
+                patient_evidence = service.search_variants(
+                    patient_variants,
+                    self.databases,
+                    self.artifact_root / f"patient-{patient_index:03d}",
+                    progress=lambda message, p=prefix: self.status.emit(f"{p}: {message}"),
+                )
+                _merge_evidence_results(all_evidence, patient_evidence)
+                self.patient_finished.emit(patient_evidence)
+                self.status.emit(f"{prefix}: browser sources complete")
+                if patient_index < len(patients):
+                    delay = random.randint(
+                        max(0, int(self.settings.browser_delay_seconds)),
+                        max(
+                            int(self.settings.browser_delay_seconds),
+                            int(self.settings.browser_delay_max_seconds),
+                        ),
+                    )
+                    if delay > 0:
+                        self.status.emit(
+                            f"{prefix}: safety buffer before next patient: {delay}s"
+                        )
+                        time.sleep(delay)
+            self.finished.emit(all_evidence)
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -212,20 +323,38 @@ class MetricCard(QFrame):
         self.value.setText(str(value))
 
 
+class WorkflowStep(QFrame):
+    def __init__(self, number: str, title: str, description: str):
+        super().__init__()
+        self.setObjectName("WorkflowStep")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(10)
+        badge = QLabel(number)
+        badge.setObjectName("StepNumber")
+        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        badge.setFixedSize(30, 30)
+        copy = QVBoxLayout()
+        copy.setSpacing(1)
+        title_label = QLabel(title)
+        title_label.setObjectName("StepTitle")
+        description_label = QLabel(description)
+        description_label.setObjectName("StepDescription")
+        description_label.setWordWrap(True)
+        copy.addWidget(title_label)
+        copy.addWidget(description_label)
+        layout.addWidget(badge)
+        layout.addLayout(copy, 1)
+
+
 class MainWindow(QMainWindow):
     databases = [
         "ClinVar",
         "gnomAD",
         "COSMIC",
-        "CIViC",
-        "CancerMine",
-        "DGIdb",
-        "ClinGen Allele Registry",
-        "cBioPortal",
-        "MTBP",
-        "HSMD",
-        "OncoKB",
         "Franklin",
+        "OncoKB",
+        "MTBP",
     ]
 
     def __init__(self) -> None:
@@ -240,7 +369,8 @@ class MainWindow(QMainWindow):
         self.database_worker: DatabaseWorker | None = None
         self.browser_worker: BrowserLoginWorker | BrowserReviewWorker | None = None
         self.setWindowTitle("Archer Prosess")
-        self.resize(1280, 820)
+        self.resize(1440, 900)
+        self.setMinimumSize(1120, 720)
         self._build_ui()
         self._apply_style()
 
@@ -261,6 +391,13 @@ class MainWindow(QMainWindow):
         title_box.addWidget(subtitle)
         header.addLayout(title_box)
         header.addStretch()
+        self.activity_progress = QProgressBar()
+        self.activity_progress.setObjectName("ActivityProgress")
+        self.activity_progress.setRange(0, 0)
+        self.activity_progress.setTextVisible(False)
+        self.activity_progress.setFixedWidth(150)
+        self.activity_progress.hide()
+        header.addWidget(self.activity_progress)
         self.status_badge = QLabel("Ready")
         self.status_badge.setObjectName("StatusBadge")
         header.addWidget(self.status_badge)
@@ -274,6 +411,13 @@ class MainWindow(QMainWindow):
         for card in [self.total_card, self.included_card, self.excluded_card, self.warning_card]:
             metrics.addWidget(card)
         layout.addLayout(metrics)
+
+        workflow = QHBoxLayout()
+        workflow.setSpacing(10)
+        workflow.addWidget(WorkflowStep("1", "Prepare", "Validate and process the Archer TSV"))
+        workflow.addWidget(WorkflowStep("2", "Collect", "Gather API and signed-in evidence"))
+        workflow.addWidget(WorkflowStep("3", "Report", "Export workbook and patient PDFs"))
+        layout.addLayout(workflow)
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._processing_tab(), "Processing")
@@ -354,79 +498,160 @@ class MainWindow(QMainWindow):
 
     def _database_tab(self) -> QWidget:
         page = QWidget()
-        layout = QVBoxLayout(page)
-        checks = QGroupBox("Evidence Sources")
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        self.database_scroll = QScrollArea()
+        self.database_scroll.setWidgetResizable(True)
+        self.database_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.database_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        database_content = QWidget()
+        layout = QVBoxLayout(database_content)
+        layout.setSpacing(12)
+        intro = QLabel(
+            "Choose only the evidence sources needed for this review. The app completes "
+            "one patient at a time; signed-in websites use a randomized safety delay and MTBP runs last."
+        )
+        intro.setObjectName("PageIntro")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        checks = QGroupBox("1. Choose Evidence Sources")
+        checks.setMinimumHeight(185)
         grid = QGridLayout(checks)
+        grid.setHorizontalSpacing(20)
+        grid.setVerticalSpacing(8)
         self.db_checks: dict[str, QCheckBox] = {}
         for index, database in enumerate(self.databases):
             check = QCheckBox(database)
             check.setChecked(database in self.settings.enabled_databases)
+            if database in BROWSER_DATABASES:
+                check.setProperty("loginSource", True)
+                check.setToolTip("Uses the saved signed-in browser session.")
             self.db_checks[database] = check
             grid.addWidget(check, index // 4, index % 4)
-        layout.addWidget(checks)
-
-        actions = QHBoxLayout()
-        actions.addWidget(QLabel("Workers"))
-        self.worker_count = QSpinBox()
-        self.worker_count.setRange(1, 8)
-        self.worker_count.setValue(self.settings.database_workers)
-        self.worker_count.setToolTip("Parallel variant searches. Use 2-3 for public APIs without API keys.")
-        actions.addWidget(self.worker_count)
+        scope_row = (len(self.databases) - 1) // 4 + 1
+        scope_label = QLabel("Lookup scope")
+        scope_label.setObjectName("FieldLabel")
+        grid.addWidget(scope_label, scope_row, 0)
         self.included_only_check = QCheckBox("Included variants only")
         self.included_only_check.setChecked(self.settings.search_included_only)
         self.included_only_check.setToolTip(
             "When enabled, excluded and flagged variants are not sent to any database website."
         )
-        actions.addWidget(self.included_only_check)
+        grid.addWidget(self.included_only_check, scope_row, 1)
+        grid.addWidget(QLabel("API workers / patient"), scope_row, 2)
+        self.worker_count = QSpinBox()
+        self.worker_count.setRange(1, 1)
+        self.worker_count.setValue(1)
+        self.worker_count.setToolTip(
+            "Patient-centric evidence collection is deliberately serial to avoid bursts of requests."
+        )
+        grid.addWidget(self.worker_count, scope_row, 3)
+        layout.addWidget(checks)
+
+        collection = QGroupBox("2. Collect Evidence")
+        collection.setMinimumHeight(175)
+        collection_grid = QGridLayout(collection)
+        collection_grid.setColumnStretch(1, 1)
+        collection_grid.setHorizontalSpacing(12)
+        collection_grid.setVerticalSpacing(9)
+        automated_label = QLabel("Selected sources")
+        automated_label.setObjectName("FieldLabel")
+        automated_help = QLabel(
+            "Completes every selected source for one patient before starting the next; MTBP runs last."
+        )
+        automated_help.setObjectName("HelperText")
+        automated_help.setWordWrap(True)
         self.search_btn = QPushButton("Search Selected Sources")
+        self.search_btn.setObjectName("PrimaryButton")
         self.search_btn.setEnabled(False)
         self.search_btn.clicked.connect(self._start_database_search)
+        collection_grid.addWidget(automated_label, 0, 0)
+        collection_grid.addWidget(automated_help, 0, 1)
+        collection_grid.addWidget(self.search_btn, 0, 2)
+
+        browser_label = QLabel("Signed-in session")
+        browser_label.setObjectName("FieldLabel")
+        self.browser_database_combo = QComboBox()
+        self.browser_database_combo.addItems(list(BROWSER_DATABASES))
+        self.browser_signin_btn = QPushButton("Sign In / Refresh")
+        self.browser_signin_btn.setToolTip(
+            "Uses credentials stored by Windows Credential Manager, or opens Edge for manual sign-in. The profile is released automatically after success."
+        )
+        self.browser_signin_btn.clicked.connect(self._start_browser_login)
+        self.browser_review_btn = QPushButton("Run Browser Lookups")
+        self.browser_review_btn.setObjectName("OutlineButton")
+        self.browser_review_btn.setEnabled(False)
+        self.browser_review_btn.setToolTip(
+            "Runs selected COSMIC, OncoKB, Franklin, and MTBP sources patient-by-patient in visible Edge."
+        )
+        self.browser_review_btn.clicked.connect(self._start_browser_review)
+        session_actions = QHBoxLayout()
+        session_actions.setContentsMargins(0, 0, 0, 0)
+        session_actions.addWidget(self.browser_database_combo)
+        session_actions.addWidget(self.browser_signin_btn)
+        session_actions.addWidget(self.browser_review_btn)
+        collection_grid.addWidget(browser_label, 1, 0)
+        collection_grid.addLayout(session_actions, 1, 1, 1, 2)
+        self.browser_security_label = QLabel(
+            "Credentials stay in Windows Credential Manager. Patient/sample IDs are never submitted; only variant coordinates are sent."
+        )
+        self.browser_security_label.setObjectName("SecurityNote")
+        self.browser_security_label.setWordWrap(True)
+        collection_grid.addWidget(self.browser_security_label, 2, 1, 1, 2)
+        layout.addWidget(collection)
+
+        exports = QGroupBox("3. Create Reviewed Outputs")
+        exports.setMinimumHeight(105)
+        export_layout = QHBoxLayout(exports)
+        export_help = QLabel(
+            "Patient Excel reports include COSMIC overview/tissue/lymphoid sample captures plus Franklin, OncoKB, and MTBP images."
+        )
+        export_help.setObjectName("HelperText")
+        export_help.setWordWrap(True)
         self.rewrite_btn = QPushButton("Rewrite Workbook With Evidence")
         self.rewrite_btn.setEnabled(False)
         self.rewrite_btn.clicked.connect(self._rewrite_workbook)
+        self.patient_excel_btn = QPushButton("Export Patient Excel Reports")
+        self.patient_excel_btn.setObjectName("ReportButton")
+        self.patient_excel_btn.setEnabled(False)
+        self.patient_excel_btn.setToolTip(
+            "Creates one image-led Excel evidence report per DIT/patient."
+        )
+        self.patient_excel_btn.clicked.connect(self._export_patient_excels)
         self.patient_pdf_btn = QPushButton("Export Patient PDFs")
         self.patient_pdf_btn.setEnabled(False)
         self.patient_pdf_btn.setToolTip(
             "Creates one clinical review PDF per DIT containing included variants and captured evidence."
         )
         self.patient_pdf_btn.clicked.connect(self._export_patient_pdfs)
-        actions.addWidget(self.search_btn)
-        actions.addWidget(self.rewrite_btn)
-        actions.addWidget(self.patient_pdf_btn)
-        actions.addStretch()
-        layout.addLayout(actions)
+        export_layout.addWidget(export_help, 1)
+        export_layout.addWidget(self.rewrite_btn)
+        export_layout.addWidget(self.patient_excel_btn)
+        export_layout.addWidget(self.patient_pdf_btn)
+        layout.addWidget(exports)
 
-        browser_actions = QHBoxLayout()
-        browser_actions.addWidget(QLabel("Login-based sources"))
-        self.browser_database_combo = QComboBox()
-        self.browser_database_combo.addItems(list(BROWSER_DATABASES))
-        self.browser_signin_btn = QPushButton("Sign In / Refresh Session")
-        self.browser_signin_btn.setToolTip(
-            "Uses credentials stored by Windows Credential Manager, or opens Edge for manual sign-in. The profile is released automatically after success."
-        )
-        self.browser_signin_btn.clicked.connect(self._start_browser_login)
-        self.browser_review_btn = QPushButton("Run Browser Lookups")
-        self.browser_review_btn.setEnabled(False)
-        self.browser_review_btn.setToolTip(
-            "Runs selected OncoKB/Franklin lookups and one pseudonymous MTBP batch serially in visible Edge."
-        )
-        self.browser_review_btn.clicked.connect(self._start_browser_review)
-        self.browser_security_label = QLabel(
-            "Passwords stay in Windows Credential Manager; no patient/sample ID is submitted."
-        )
-        self.browser_security_label.setStyleSheet(f"color: {Palette.muted};")
-        browser_actions.addWidget(self.browser_database_combo)
-        browser_actions.addWidget(self.browser_signin_btn)
-        browser_actions.addWidget(self.browser_review_btn)
-        browser_actions.addWidget(self.browser_security_label)
-        browser_actions.addStretch()
-        layout.addLayout(browser_actions)
-
+        evidence_group = QGroupBox("Evidence Results")
+        evidence_group.setMinimumHeight(330)
+        evidence_layout = QVBoxLayout(evidence_group)
         self.evidence_table = QTableWidget(0, 3 + len(self.databases))
         self.evidence_table.setHorizontalHeaderLabels(["Sample", "Gene", "HGVSc", *self.databases])
-        self.evidence_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.evidence_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.evidence_table.setColumnWidth(0, 175)
+        self.evidence_table.setColumnWidth(1, 90)
+        self.evidence_table.setColumnWidth(2, 245)
+        for column in range(3, self.evidence_table.columnCount()):
+            self.evidence_table.setColumnWidth(column, 210)
+        self.evidence_table.verticalHeader().setDefaultSectionSize(70)
         self.evidence_table.setAlternatingRowColors(True)
-        layout.addWidget(self.evidence_table, 1)
+        self.evidence_table.setWordWrap(True)
+        self.evidence_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        evidence_layout.addWidget(self.evidence_table)
+        layout.addWidget(evidence_group)
+        self.database_scroll.setWidget(database_content)
+        page_layout.addWidget(self.database_scroll)
         return page
 
     def _settings_tab(self) -> QWidget:
@@ -449,6 +674,11 @@ class MainWindow(QMainWindow):
         dir_btn.clicked.connect(self._browse_output_dir)
         self.clinvar_key_edit = QLineEdit(self.settings.clinvar_api_key)
         self.clinvar_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.cosmic_email_edit = QLineEdit(self.settings.cosmic_email)
+        self.cosmic_password_edit = QLineEdit()
+        self.cosmic_password_edit.setText(self.settings.cosmic_password)
+        self.cosmic_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.cosmic_password_edit.setPlaceholderText("Stored in Windows Credential Manager")
         self.oncokb_key_edit = QLineEdit(self.settings.oncokb_api_key)
         self.oncokb_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.oncokb_email_edit = QLineEdit(self.settings.oncokb_email)
@@ -478,8 +708,25 @@ class MainWindow(QMainWindow):
         self.browser_delay_spin.setSuffix(" s")
         self.browser_delay_spin.setValue(self.settings.browser_delay_seconds)
         self.browser_delay_spin.setToolTip(
-            "Pause between Franklin and OncoKB variants to reduce throttling/session issues."
+            "Minimum randomized pause between signed-in website searches and providers. APIs are not delayed."
         )
+        self.browser_delay_max_spin = QSpinBox()
+        self.browser_delay_max_spin.setRange(0, 120)
+        self.browser_delay_max_spin.setSuffix(" s")
+        self.browser_delay_max_spin.setValue(
+            self.settings.browser_delay_max_seconds
+        )
+        self.browser_delay_max_spin.setToolTip(
+            "Maximum randomized pause between signed-in website searches and providers. APIs are not delayed."
+        )
+        delay_layout = QHBoxLayout()
+        delay_layout.setContentsMargins(0, 0, 0, 0)
+        delay_layout.addWidget(QLabel("Minimum"))
+        delay_layout.addWidget(self.browser_delay_spin)
+        delay_layout.addSpacing(12)
+        delay_layout.addWidget(QLabel("Maximum"))
+        delay_layout.addWidget(self.browser_delay_max_spin)
+        delay_layout.addStretch()
         self.mtbp_timeout_spin = QSpinBox()
         self.mtbp_timeout_spin.setRange(5, 60)
         self.mtbp_timeout_spin.setSuffix(" min")
@@ -510,34 +757,38 @@ class MainWindow(QMainWindow):
         grid.addWidget(dir_btn, 1, 2)
         grid.addWidget(QLabel("ClinVar API key"), 2, 0)
         grid.addWidget(self.clinvar_key_edit, 2, 1)
-        grid.addWidget(QLabel("OncoKB API token"), 3, 0)
-        grid.addWidget(self.oncokb_key_edit, 3, 1)
-        grid.addWidget(QLabel("OncoKB email"), 4, 0)
-        grid.addWidget(self.oncokb_email_edit, 4, 1)
-        grid.addWidget(QLabel("OncoKB password"), 5, 0)
-        grid.addWidget(self.oncokb_password_edit, 5, 1)
-        grid.addWidget(QLabel("Franklin API token"), 6, 0)
-        grid.addWidget(self.franklin_key_edit, 6, 1)
-        grid.addWidget(QLabel("Franklin email"), 7, 0)
-        grid.addWidget(self.franklin_email_edit, 7, 1)
-        grid.addWidget(QLabel("Franklin password"), 8, 0)
-        grid.addWidget(self.franklin_password_edit, 8, 1)
-        grid.addWidget(QLabel("MTBP email"), 9, 0)
-        grid.addWidget(self.mtbp_email_edit, 9, 1)
-        grid.addWidget(QLabel("MTBP password"), 10, 0)
-        grid.addWidget(self.mtbp_password_edit, 10, 1)
-        grid.addWidget(QLabel("gnomAD dataset"), 11, 0)
-        grid.addWidget(self.gnomad_dataset_combo, 11, 1)
-        grid.addWidget(QLabel("MTBP cancer type"), 12, 0)
-        grid.addWidget(self.mtbp_cancer_type_edit, 12, 1)
-        grid.addWidget(QLabel("Browser delay"), 13, 0)
-        grid.addWidget(self.browser_delay_spin, 13, 1)
-        grid.addWidget(QLabel("MTBP report timeout"), 14, 0)
-        grid.addWidget(self.mtbp_timeout_spin, 14, 1)
-        grid.addWidget(QLabel("Artifact list"), 15, 0)
-        grid.addWidget(self.artifact_table, 15, 1, 1, 2)
-        grid.addLayout(artifact_actions, 16, 1, 1, 2)
-        grid.addWidget(save_btn, 17, 2)
+        grid.addWidget(QLabel("COSMIC email"), 3, 0)
+        grid.addWidget(self.cosmic_email_edit, 3, 1)
+        grid.addWidget(QLabel("COSMIC password"), 4, 0)
+        grid.addWidget(self.cosmic_password_edit, 4, 1)
+        grid.addWidget(QLabel("OncoKB API token"), 5, 0)
+        grid.addWidget(self.oncokb_key_edit, 5, 1)
+        grid.addWidget(QLabel("OncoKB email"), 6, 0)
+        grid.addWidget(self.oncokb_email_edit, 6, 1)
+        grid.addWidget(QLabel("OncoKB password"), 7, 0)
+        grid.addWidget(self.oncokb_password_edit, 7, 1)
+        grid.addWidget(QLabel("Franklin API token"), 8, 0)
+        grid.addWidget(self.franklin_key_edit, 8, 1)
+        grid.addWidget(QLabel("Franklin email"), 9, 0)
+        grid.addWidget(self.franklin_email_edit, 9, 1)
+        grid.addWidget(QLabel("Franklin password"), 10, 0)
+        grid.addWidget(self.franklin_password_edit, 10, 1)
+        grid.addWidget(QLabel("MTBP email"), 11, 0)
+        grid.addWidget(self.mtbp_email_edit, 11, 1)
+        grid.addWidget(QLabel("MTBP password"), 12, 0)
+        grid.addWidget(self.mtbp_password_edit, 12, 1)
+        grid.addWidget(QLabel("gnomAD dataset"), 13, 0)
+        grid.addWidget(self.gnomad_dataset_combo, 13, 1)
+        grid.addWidget(QLabel("MTBP cancer type"), 14, 0)
+        grid.addWidget(self.mtbp_cancer_type_edit, 14, 1)
+        grid.addWidget(QLabel("Website safety delay"), 15, 0)
+        grid.addLayout(delay_layout, 15, 1, 1, 2)
+        grid.addWidget(QLabel("MTBP report timeout"), 16, 0)
+        grid.addWidget(self.mtbp_timeout_spin, 16, 1)
+        grid.addWidget(QLabel("Artifact list"), 17, 0)
+        grid.addWidget(self.artifact_table, 17, 1, 1, 2)
+        grid.addLayout(artifact_actions, 18, 1, 1, 2)
+        grid.addWidget(save_btn, 19, 2)
         layout.addWidget(group)
         layout.addStretch()
         self.settings_scroll.setWidget(settings_content)
@@ -654,6 +905,7 @@ class MainWindow(QMainWindow):
         self.search_btn.setEnabled(True)
         self.browser_review_btn.setEnabled(True)
         self.rewrite_btn.setEnabled(True)
+        self.patient_excel_btn.setEnabled(True)
         self.patient_pdf_btn.setEnabled(True)
         self._set_ready()
         QMessageBox.information(self, "Complete", f"Workbook saved:\n{result.output_path}")
@@ -669,11 +921,23 @@ class MainWindow(QMainWindow):
         self._set_busy("Searching")
         variants = self._variants_for_search()
         self._log(f"Search scope: {len(variants)}/{self.result.total_count} variants")
-        worker = DatabaseWorker(variants, databases, self.settings, self.worker_count.value())
+        browser_databases = self._selected_browser_databases(api_fallback_only=True)
+        api_databases = [
+            database for database in databases if database not in browser_databases
+        ]
+        self.evidence = {}
+        worker = DatabaseWorker(
+            variants,
+            api_databases,
+            browser_databases,
+            self._browser_artifact_root(),
+            self.settings,
+        )
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.status.connect(self._log)
+        worker.patient_finished.connect(self._database_patient_finished)
         worker.finished.connect(self._database_finished)
         worker.failed.connect(self._worker_failed)
         worker.finished.connect(thread.quit)
@@ -687,17 +951,14 @@ class MainWindow(QMainWindow):
     def _database_finished(self, evidence: dict) -> None:
         self.evidence = evidence
         self._refresh_evidence_table()
-        browser_databases = self._selected_browser_databases(api_fallback_only=True)
-        if browser_databases:
-            self._log(
-                "API/database phase complete; continuing with login-based sources: "
-                + ", ".join(browser_databases)
-            )
-            self._launch_browser_review(browser_databases)
-            return
         self._auto_rewrite_workbook()
         self._set_ready()
-        self._log("Database evidence search complete")
+        self._log("Patient-by-patient evidence search complete")
+
+    def _database_patient_finished(self, patient_evidence: dict) -> None:
+        _merge_evidence_results(self.evidence, patient_evidence)
+        self._refresh_evidence_table()
+        self._auto_rewrite_workbook()
 
     def _start_browser_login(self) -> None:
         database = self.browser_database_combo.currentText()
@@ -731,7 +992,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "No browser sources",
-                "Select at least one of OncoKB, Franklin, or MTBP.",
+                "Select at least one of COSMIC, OncoKB, Franklin, or MTBP.",
             )
             return
         self._launch_browser_review(databases)
@@ -755,24 +1016,18 @@ class MainWindow(QMainWindow):
     def _launch_browser_review(self, databases: list[str]) -> None:
         if not self.result:
             return
-        output_parent = (
-            self.result.output_path.parent
-            if self.result.output_path
-            else Path(self.settings.default_output_dir)
-        )
-        output_stem = self.result.output_path.stem if self.result.output_path else "archer"
-        artifact_root = output_parent / f"{output_stem}_browser_evidence"
         self._set_busy("Browser lookups")
         worker = BrowserReviewWorker(
             self._variants_for_search(),
             databases,
-            artifact_root,
+            self._browser_artifact_root(),
             self.settings,
         )
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.status.connect(self._log)
+        worker.patient_finished.connect(self._browser_patient_finished)
         worker.finished.connect(self._browser_review_finished)
         worker.failed.connect(self._browser_review_failed)
         worker.finished.connect(thread.quit)
@@ -782,6 +1037,17 @@ class MainWindow(QMainWindow):
         self.browser_thread = thread
         self.browser_worker = worker
         thread.start()
+
+    def _browser_artifact_root(self) -> Path:
+        if not self.result:
+            return Path(self.settings.default_output_dir) / "archer_browser_evidence"
+        output_parent = (
+            self.result.output_path.parent
+            if self.result.output_path
+            else Path(self.settings.default_output_dir)
+        )
+        output_stem = self.result.output_path.stem if self.result.output_path else "archer"
+        return output_parent / f"{output_stem}_browser_evidence"
 
     def _variants_for_search(self):
         if not self.result:
@@ -797,13 +1063,13 @@ class MainWindow(QMainWindow):
         self._set_ready()
         self._log("Browser evidence lookup complete")
 
+    def _browser_patient_finished(self, patient_evidence: dict) -> None:
+        self._merge_browser_evidence(patient_evidence)
+        self._refresh_evidence_table()
+        self._auto_rewrite_workbook()
+
     def _merge_browser_evidence(self, browser_evidence: dict) -> None:
-        for key, new_items in browser_evidence.items():
-            by_database = {
-                item.database: item for item in self.evidence.get(key, [])
-            }
-            by_database.update({item.database: item for item in new_items})
-            self.evidence[key] = list(by_database.values())
+        _merge_evidence_results(self.evidence, browser_evidence)
 
     def _browser_review_failed(self, message: str) -> None:
         worker = self.browser_worker
@@ -830,6 +1096,48 @@ class MainWindow(QMainWindow):
             return
         self._write_evidence_workbook()
         QMessageBox.information(self, "Workbook Updated", f"Evidence written to:\n{self.result.output_path}")
+
+    def _export_patient_excels(self) -> None:
+        if not self.result:
+            return
+        default_parent = (
+            self.result.output_path.parent
+            if self.result.output_path
+            else Path(self.settings.default_output_dir)
+        )
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Select folder for patient Excel reports",
+            str(default_parent),
+        )
+        if not selected:
+            return
+        output_stem = self.result.output_path.stem if self.result.output_path else "archer"
+        report_directory = Path(selected) / f"{output_stem}_patient_excel_reports"
+        try:
+            outputs = PatientExcelReportWriter().write_all(
+                self.result,
+                report_directory,
+                self.evidence,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Patient Excel export failed", str(exc))
+            return
+        if not outputs:
+            QMessageBox.warning(
+                self,
+                "No patient Excel reports created",
+                "No patients had variants with decision 'included'.",
+            )
+            return
+        self._log(
+            f"Created {len(outputs)} patient Excel report(s) in {report_directory}"
+        )
+        QMessageBox.information(
+            self,
+            "Patient Excel reports created",
+            f"Created {len(outputs)} report(s):\n{report_directory}",
+        )
 
     def _export_patient_pdfs(self) -> None:
         if not self.result:
@@ -901,6 +1209,8 @@ class MainWindow(QMainWindow):
         self.settings.history_workbook = self.history_edit.text()
         self.settings.default_output_dir = self.output_dir_edit.text()
         self.settings.clinvar_api_key = self.clinvar_key_edit.text()
+        self.settings.cosmic_email = self.cosmic_email_edit.text()
+        self.settings.cosmic_password = self.cosmic_password_edit.text()
         self.settings.oncokb_api_key = self.oncokb_key_edit.text()
         self.settings.oncokb_email = self.oncokb_email_edit.text()
         self.settings.oncokb_password = self.oncokb_password_edit.text()
@@ -911,6 +1221,13 @@ class MainWindow(QMainWindow):
         self.settings.mtbp_password = self.mtbp_password_edit.text()
         self.settings.database_workers = self.worker_count.value()
         self.settings.browser_delay_seconds = self.browser_delay_spin.value()
+        self.settings.browser_delay_max_seconds = max(
+            self.settings.browser_delay_seconds,
+            self.browser_delay_max_spin.value(),
+        )
+        self.browser_delay_max_spin.setValue(
+            self.settings.browser_delay_max_seconds
+        )
         self.settings.mtbp_timeout_minutes = self.mtbp_timeout_spin.value()
         self.settings.search_included_only = self.included_only_check.isChecked()
         self.settings.gnomad_dataset = self.gnomad_dataset_combo.currentText()
@@ -987,22 +1304,32 @@ class MainWindow(QMainWindow):
 
     def _set_busy(self, label: str) -> None:
         self.status_badge.setText(label)
+        self.status_badge.setStyleSheet(
+            f"background: {Palette.pale_blue}; color: {Palette.blue}; "
+            f"border: 1px solid {Palette.blue}; border-radius: 12px; "
+            "padding: 5px 12px; font-weight: 700;"
+        )
+        self.activity_progress.show()
         self.process_btn.setEnabled(False)
         self.search_btn.setEnabled(False)
         self.browser_signin_btn.setEnabled(False)
         self.browser_review_btn.setEnabled(False)
         self.rewrite_btn.setEnabled(False)
         self.patient_pdf_btn.setEnabled(False)
+        self.patient_excel_btn.setEnabled(False)
         self.status_bar.showMessage(label)
 
     def _set_ready(self) -> None:
         self.status_badge.setText("Ready")
+        self.status_badge.setStyleSheet("")
+        self.activity_progress.hide()
         self._update_process_state()
         self.search_btn.setEnabled(self.result is not None)
         self.browser_signin_btn.setEnabled(True)
         self.browser_review_btn.setEnabled(self.result is not None)
         self.rewrite_btn.setEnabled(self.result is not None)
         self.patient_pdf_btn.setEnabled(self.result is not None)
+        self.patient_excel_btn.setEnabled(self.result is not None)
         self.status_bar.showMessage("Ready", 3000)
 
     def _update_process_state(self) -> None:
@@ -1033,7 +1360,7 @@ class MainWindow(QMainWindow):
             QGroupBox {{
                 background: {Palette.panel};
                 border: 1px solid {Palette.border};
-                border-radius: 6px;
+                border-radius: 10px;
                 margin-top: 14px;
                 padding: 16px 12px 12px 12px;
                 font-weight: 600;
@@ -1044,21 +1371,28 @@ class MainWindow(QMainWindow):
                 left: 12px;
                 padding: 0 6px;
             }}
-            QLineEdit, QDateEdit, QPlainTextEdit, QTableWidget {{
+            QLineEdit, QDateEdit, QPlainTextEdit, QTableWidget, QComboBox, QSpinBox {{
                 background: {Palette.panel};
                 border: 1px solid {Palette.border};
-                border-radius: 5px;
+                border-radius: 7px;
                 padding: 6px;
+                selection-background-color: {Palette.pale_blue};
+                selection-color: {Palette.navy};
+            }}
+            QLineEdit:focus, QDateEdit:focus, QPlainTextEdit:focus,
+            QTableWidget:focus, QComboBox:focus, QSpinBox:focus {{
+                border: 1px solid {Palette.blue};
             }}
             QPushButton {{
                 background: {Palette.panel};
                 border: 1px solid {Palette.border};
-                border-radius: 5px;
+                border-radius: 7px;
                 padding: 8px 14px;
                 font-weight: 600;
             }}
             QPushButton:hover {{
                 border-color: {Palette.blue};
+                background: {Palette.pale_blue};
             }}
             QPushButton:disabled {{
                 color: #9AA5AD;
@@ -1069,10 +1403,68 @@ class MainWindow(QMainWindow):
                 color: white;
                 border-color: {Palette.blue};
             }}
+            QPushButton#PrimaryButton:hover {{
+                background: #245F93;
+            }}
+            QPushButton#OutlineButton {{
+                background: {Palette.pale_blue};
+                color: {Palette.navy};
+                border-color: {Palette.blue};
+            }}
+            QPushButton#ReportButton {{
+                background: {Palette.green};
+                color: white;
+                border-color: {Palette.green};
+            }}
+            QPushButton#ReportButton:hover {{
+                background: #3F724A;
+            }}
             QFrame#MetricCard {{
                 background: {Palette.panel};
                 border: 1px solid {Palette.border};
+                border-radius: 10px;
+            }}
+            QFrame#WorkflowStep {{
+                background: {Palette.panel};
+                border: 1px solid {Palette.border};
+                border-radius: 9px;
+            }}
+            QLabel#StepNumber {{
+                background: {Palette.navy};
+                color: white;
+                border-radius: 15px;
+                font-weight: 700;
+            }}
+            QLabel#StepTitle {{
+                color: {Palette.navy};
+                font-size: 13px;
+                font-weight: 700;
+            }}
+            QLabel#StepDescription, QLabel#HelperText {{
+                color: {Palette.muted};
+                font-size: 12px;
+            }}
+            QLabel#PageIntro {{
+                background: {Palette.pale_blue};
+                color: {Palette.navy};
+                border: 1px solid {Palette.border};
+                border-radius: 8px;
+                padding: 10px 12px;
+            }}
+            QLabel#FieldLabel {{
+                color: {Palette.navy};
+                font-weight: 700;
+            }}
+            QLabel#SecurityNote {{
+                background: {Palette.pale_green};
+                color: {Palette.green};
                 border-radius: 6px;
+                padding: 7px 9px;
+                font-size: 12px;
+            }}
+            QCheckBox[loginSource="true"] {{
+                color: {Palette.blue};
+                font-weight: 600;
             }}
             QLabel#StatusBadge {{
                 background: {Palette.pale_green};
@@ -1085,14 +1477,18 @@ class MainWindow(QMainWindow):
             QTabWidget::pane {{
                 border: 1px solid {Palette.border};
                 background: {Palette.panel};
-                border-radius: 6px;
+                border-radius: 10px;
             }}
             QTabBar::tab {{
-                padding: 9px 18px;
+                padding: 10px 20px;
                 background: #E8EEF3;
                 border: 1px solid {Palette.border};
                 border-bottom: none;
                 margin-right: 2px;
+            }}
+            QTabBar::tab:hover {{
+                color: {Palette.blue};
+                background: {Palette.pale_blue};
             }}
             QTabBar::tab:selected {{
                 background: {Palette.panel};
@@ -1105,6 +1501,38 @@ class MainWindow(QMainWindow):
                 padding: 8px;
                 border: none;
                 font-weight: 700;
+            }}
+            QTableWidget {{
+                gridline-color: #E4EBF0;
+                alternate-background-color: #F7FAFC;
+            }}
+            QTableWidget::item:selected {{
+                background: {Palette.pale_blue};
+                color: {Palette.navy};
+            }}
+            QProgressBar#ActivityProgress {{
+                background: #E8EEF3;
+                border: none;
+                border-radius: 3px;
+                min-height: 6px;
+                max-height: 6px;
+            }}
+            QProgressBar#ActivityProgress::chunk {{
+                background: {Palette.blue};
+                border-radius: 3px;
+            }}
+            QScrollBar:vertical {{
+                background: transparent;
+                width: 10px;
+                margin: 2px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: #B9C8D3;
+                border-radius: 4px;
+                min-height: 28px;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0;
             }}
             """
         )

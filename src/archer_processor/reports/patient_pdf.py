@@ -11,9 +11,12 @@ from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
+from reportlab.lib.utils import ImageReader
 from reportlab.platypus import (
+    Image as ReportImage,
     KeepTogether,
     LongTable,
+    PageBreak,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
@@ -263,6 +266,7 @@ class PatientPdfReportWriter:
         story.extend(self._review_section(included_variants, patient_evidence))
         story.extend(self._conclusion_section())
         story.extend(self._limitations_section(result, patient_evidence))
+        story.extend(self._image_appendix(included_variants, evidence))
 
         footer = self._footer(patient_id, result.run_date)
         doc.build(story, onFirstPage=footer, onLaterPages=footer)
@@ -489,7 +493,16 @@ class PatientPdfReportWriter:
                 ]
             )
         )
-        return [self._p("Conclusion and sign-off", "h1"), box, Spacer(1, 0.18 * cm), signature]
+        return [
+            KeepTogether(
+                [
+                    self._p("Conclusion and sign-off", "h1"),
+                    box,
+                    Spacer(1, 0.18 * cm),
+                    signature,
+                ]
+            )
+        ]
 
     def _limitations_section(
         self,
@@ -506,14 +519,149 @@ class PatientPdfReportWriter:
             limitations.append(
                 "MTBP public portal output is marked for academic research use only and must not be treated as standalone clinical reporting evidence."
             )
+        if any(item.database == "COSMIC" for item in evidence_items):
+            limitations.append(
+                "COSMIC content is licence-controlled. Confirm that the organisation's "
+                "COSMIC licence permits use in patient-care reporting before clinical use."
+            )
         if any(item.raw.get("screenshot") for item in evidence_items):
             limitations.append(
-                "Browser screenshots are stored outside the PDF and may contain provider-specific context not reproduced here."
+                "Provider screenshots are embedded in the evidence image appendix. "
+                "They remain point-in-time captures and must be checked against the live source."
             )
         story: list[Any] = [self._p("Limitations and provenance", "h1")]
         for limitation in limitations:
             story.append(Paragraph(escape(limitation), self.styles["body"], bulletText="-"))
         return story
+
+    def _image_appendix(
+        self,
+        variants: list[VariantRecord],
+        evidence: dict[str, list[DatabaseEvidence]],
+    ) -> list[Any]:
+        entries: list[tuple[VariantRecord, DatabaseEvidence, dict[str, str]]] = []
+        seen: set[str] = set()
+        for variant in variants:
+            for item in evidence.get(self._key(variant), []):
+                for record in self._screenshot_records(item):
+                    screenshot_path = Path(record["path"])
+                    try:
+                        identity = str(screenshot_path.resolve())
+                    except OSError:
+                        identity = str(screenshot_path)
+                    if identity in seen or not screenshot_path.is_file():
+                        continue
+                    try:
+                        ImageReader(str(screenshot_path)).getSize()
+                    except Exception:
+                        continue
+                    seen.add(identity)
+                    entries.append((variant, item, record))
+        if not entries:
+            return []
+
+        story: list[Any] = [
+            PageBreak(),
+            self._p("Evidence image appendix", "h1"),
+            self._callout(
+                "Point-in-time provider captures for visual review. Each image is "
+                "linked to its source page and exact submitted variant; reopen the "
+                "live record before clinical sign-off.",
+                self.pale_blue,
+            ),
+            Spacer(1, 0.18 * cm),
+        ]
+        current_variant = ""
+        for image_index, (variant, item, record) in enumerate(entries, start=1):
+            variant_identity = (
+                f"{variant.symbol} - {variant.hgvsc or variant.genomic_location}"
+            )
+            if variant_identity != current_variant:
+                story.append(self._p(variant_identity, "h2"))
+                current_variant = variant_identity
+            image_path = Path(record["path"])
+            width_px, height_px = ImageReader(str(image_path)).getSize()
+            scale = min(
+                (17.1 * cm) / width_px,
+                (12.5 * cm) / height_px,
+            )
+            image = ReportImage(
+                str(image_path),
+                width=width_px * scale,
+                height=height_px * scale,
+            )
+            image.hAlign = "LEFT"
+            image_frame = Table([[image]], colWidths=[17.1 * cm])
+            image_frame.setStyle(
+                TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, -1), colors.white),
+                        ("BOX", (0, 0), (-1, -1), 0.55, self.border),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                        ("TOPPADDING", (0, 0), (-1, -1), 4),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                    ]
+                )
+            )
+            label = record.get("label") or "Provider evidence"
+            caption = self._p(
+                f"Figure {image_index}. {item.database} - {label}", "label"
+            )
+            metadata_parts = [f"Status: {item.status.replace('_', ' ').title()}"]
+            captured_at = str(item.raw.get("captured_at") or "")
+            if captured_at:
+                metadata_parts.append(f"Captured: {captured_at}")
+            source_url = record.get("url") or item.url
+            source_text = escape(" | ".join(metadata_parts))
+            if source_url:
+                source_text += (
+                    " | <link href="
+                    + quoteattr(source_url)
+                    + "><font color='#2F75B5'><u>Open live source</u></font></link>"
+                )
+            story.append(
+                KeepTogether(
+                    [
+                        caption,
+                        Spacer(1, 0.06 * cm),
+                        image_frame,
+                        Spacer(1, 0.06 * cm),
+                        Paragraph(source_text, self.styles["small"]),
+                    ]
+                )
+            )
+            story.append(Spacer(1, 0.22 * cm))
+        return story
+
+    @staticmethod
+    def _screenshot_records(item: DatabaseEvidence) -> list[dict[str, str]]:
+        records: list[dict[str, str]] = []
+        raw_records = item.raw.get("screenshots")
+        if isinstance(raw_records, list):
+            for raw_record in raw_records:
+                if not isinstance(raw_record, dict):
+                    continue
+                path = str(raw_record.get("path") or "").strip()
+                if path:
+                    records.append(
+                        {
+                            "label": str(raw_record.get("label") or ""),
+                            "path": path,
+                            "url": str(raw_record.get("url") or ""),
+                        }
+                    )
+        legacy_path = str(item.raw.get("screenshot") or "").strip()
+        if legacy_path and all(record["path"] != legacy_path for record in records):
+            records.insert(
+                0,
+                {
+                    "label": "Provider evidence",
+                    "path": legacy_path,
+                    "url": item.url,
+                },
+            )
+        return records
 
     def _callout(self, text: str, fill: colors.Color) -> Table:
         table = Table([[self._p(text, "callout")]], colWidths=[17.1 * cm])

@@ -32,7 +32,7 @@ Special review flags from the current clinical notes:
 Database evidence sources:
 
 - ClinVar can be queried through NCBI E-utilities.
-- COSMIC is queried through the NLM Clinical Tables COSMIC v4 endpoint for basic/public mutation evidence; the official COSMIC site may still require registration/licensing for full clinical review.
+- COSMIC is opened by the input `COSMICID` in a signed-in browser. The app captures Overview, Tissue distribution, and a Samples table filtered to `lymphoid`. The NLM Clinical Tables v4 endpoint remains only as a basic/public fallback and does not contain the full panels. Confirm that the organisation's COSMIC licence permits patient-care reporting before clinical deployment.
 - gnomAD is queried through the public browser GraphQL endpoint when genomic location plus ref/alt alleles can be converted to a GRCh37 variant ID.
 - For Archer VPM data, default gnomAD dataset is `gnomad_r2_1` because Archer Analysis exports hg19/GRCh37 coordinates. Use `gnomad_r4` only when the variant coordinates are known to be GRCh38.
 - gnomAD evidence should be interpreted as population-frequency context: aggregated AF, exome AF, genome AF, max population AF, homozygote/hemizygote counts, filters, and direct browser URL.

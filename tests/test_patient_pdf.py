@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from PIL import Image
 from pypdf import PdfReader
 
 from archer_processor.core import VariantProcessor
@@ -15,6 +16,8 @@ def test_patient_pdf_writer_groups_included_variants_by_dit(tmp_path):
         FIXTURE, "2026-08-01", tmp_path / "review.xlsx"
     )
     tp53 = next(variant for variant in result.included if variant.symbol == "TP53")
+    screenshot = tmp_path / "oncokb-overview.png"
+    Image.new("RGB", (1200, 500), "#EAF3FA").save(screenshot)
     evidence = {
         f"{tp53.sample}|{tp53.hgvsc}": [
             DatabaseEvidence(
@@ -24,7 +27,17 @@ def test_patient_pdf_writer_groups_included_variants_by_dit(tmp_path):
                 accession="TP53 R175H",
                 clinical_significance="Oncogenic",
                 url="https://www.oncokb.org/gene/TP53/somatic/R175H",
-                raw={"captured_at": "2026-08-01T12:00:00+00:00"},
+                raw={
+                    "captured_at": "2026-08-01T12:00:00+00:00",
+                    "screenshot": str(screenshot),
+                    "screenshots": [
+                        {
+                            "label": "Variant overview and mutation effect",
+                            "path": str(screenshot),
+                            "url": "https://www.oncokb.org/gene/TP53/somatic/R175H",
+                        }
+                    ],
+                },
             )
         ]
     }
@@ -58,7 +71,14 @@ def test_patient_pdf_writer_groups_included_variants_by_dit(tmp_path):
     assert "Oncogenic" in text
     assert "Responsible physician conclusion" in text
     assert "does not establish a diagnosis" in text
+    assert "Evidence image appendix" in text
+    assert "Variant overview and mutation effect" in text
     assert "https://www.oncokb.org/gene/TP53/somatic/R175H" in uris
+    assert any(
+        x_object.get_object().get("/Subtype") == "/Image"
+        for page in reader.pages
+        for x_object in (page.get("/Resources", {}).get("/XObject", {}) or {}).values()
+    )
 
 
 def test_dit_format_and_year_validation():

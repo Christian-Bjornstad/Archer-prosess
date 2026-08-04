@@ -11,8 +11,10 @@ dist/
 *.egg-info/
 .coverage
 htmlcov/
+tmp/
 
 # Local generated outputs and sensitive clinical data
+outputs/
 *.xlsx
 *.xlsm
 *.tsv

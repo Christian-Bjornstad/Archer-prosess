@@ -18,15 +18,9 @@ DEFAULT_DATABASE_COLUMNS = [
     "ClinVar",
     "gnomAD",
     "COSMIC",
-    "CIViC",
-    "CancerMine",
-    "DGIdb",
-    "ClinGen Allele Registry",
-    "cBioPortal",
-    "OncoKB",
     "Franklin",
+    "OncoKB",
     "MTBP",
-    "HSMD",
 ]
 
 
@@ -323,6 +317,8 @@ class ExcelReportWriter:
         row_index = 2
         for variant in variants:
             for item in evidence.get(self._key(variant), []):
+                if item.database not in DEFAULT_DATABASE_COLUMNS:
+                    continue
                 values = [
                     variant.sample,
                     variant.symbol,
@@ -453,13 +449,7 @@ class ExcelReportWriter:
         return value
 
     def _database_columns(self, evidence: dict[str, list[DatabaseEvidence]]) -> list[str]:
-        seen = {
-            item.database
-            for items in evidence.values()
-            for item in items
-            if item.database
-        }
-        return DEFAULT_DATABASE_COLUMNS + sorted(seen.difference(DEFAULT_DATABASE_COLUMNS))
+        return list(DEFAULT_DATABASE_COLUMNS)
 
     def _evidence_by_database(self, evidence_items: list[DatabaseEvidence]) -> dict[str, list[DatabaseEvidence]]:
         grouped: dict[str, list[DatabaseEvidence]] = defaultdict(list)

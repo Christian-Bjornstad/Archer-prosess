@@ -61,7 +61,7 @@ def test_database_diagnostics_reports_ready_token_and_manual_sources():
 
     assert diagnostics["ClinVar"] == "ready"
     assert diagnostics["gnomAD"].startswith("ready")
-    assert diagnostics["COSMIC"] == "ready (basic/public lookup)"
+    assert diagnostics["COSMIC"].startswith("browser login")
     assert diagnostics["CIViC"] == "ready (open GraphQL)"
     assert diagnostics["CancerMine"] == "ready (cached cancer gene roles)"
     assert diagnostics["DGIdb"] == "context only (drug-gene, not MTB evidence)"
@@ -340,8 +340,13 @@ def test_cosmic_basic_found_uses_v4_and_public_label(monkeypatch):
     assert calls[0][1]["q"] == 'LegacyMutationID:"COSM10648" OR MutationID:"10648"'
     assert calls[1][1]["terms"] == "TP53 c.524G>A"
     assert evidence.status == "found"
-    assert "COSMIC basic/public lookup" in evidence.summary
+    assert "COSMIC public dataset" in evidence.summary
     assert evidence.accession == "10648"
+    assert evidence.raw["returned_count"] == 1
+    assert evidence.raw["records"][0]["MutationCDS"] == "c.524G>A"
+    assert evidence.raw["aggregates"]["primary_sites"] == [
+        "haematopoietic_and_lymphoid_tissue"
+    ]
 
 
 def test_cosmic_basic_not_found(monkeypatch):

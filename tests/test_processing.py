@@ -109,19 +109,13 @@ def test_excel_export_preserves_raw_columns_and_adds_database_columns(tmp_path):
             "ClinVar",
             "gnomAD",
             "COSMIC",
-            "CIViC",
-            "CancerMine",
-            "DGIdb",
-            "ClinGen Allele Registry",
-            "cBioPortal",
-            "OncoKB",
             "Franklin",
+            "OncoKB",
             "MTBP",
-            "HSMD",
         ]
     ]
     assert row[headers.index("HGVSc")] == variant.raw["HGVSc"]
-    assert row[headers.index("CIViC Evidence")] == "[found] CIViC summary"
+    assert "CIViC Evidence" not in headers
 
 
 def test_excel_export_writes_artifact_removed_sheet(tmp_path):

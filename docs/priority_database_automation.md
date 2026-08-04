@@ -97,8 +97,21 @@ The application now includes a serial visible-Edge workflow with isolated,
 persistent provider profiles and optional passwords encrypted by Windows
 Credential Manager. OncoKB and Franklin web lookups have been tested end to end
 with synthetic data. Franklin resolves transcript HGVS through its search UI,
-checks returned identity, and saves only the classification plus screenshot/JSON
-audit evidence.
+checks returned identity, imports only the classification, and captures separate
+computed-classification and prediction/population-frequency images. OncoKB waits
+for the client-rendered overview/mutation-effect evidence before capture. Each
+capture is represented in the structured JSON audit evidence.
+
+The full evidence workflow is patient-centric: it finishes the selected API/public
+sources, COSMIC, OncoKB, Franklin, and finally MTBP for one patient before restarting at
+the first source for the next patient. Public/API sources have no added delay. A
+fresh randomized safety delay is used only for signed-in website variants and
+provider changes (10-20 seconds by default). Completed patient evidence is
+checkpointed into the workbook during long runs. MTBP reports created with the
+application’s `ARCHER-` prefix are retained until six accumulate, at which point
+all six are deleted together. The same cleanup is triggered early if the report
+list reaches its ten-report limit. Local captures are written before post-analysis
+cleanup, and manually named reports are never automatically deleted.
 
 OncoKB browser credentials can also be saved in Windows Credential Manager.
 Database and browser searches expose an **Included variants only** option,
@@ -109,7 +122,9 @@ per database result, with source-page and captured-screenshot links.
 The application can also create one patient-level PDF per validated DIT
 (`YYOUM#####`) using only included variants. The PDF keeps source links,
 classification/significance, capture timestamps, MTBP pipeline/cancer-type
-provenance, review flags, and a physician conclusion/sign-off area. It is a
+provenance, review flags, and a physician conclusion/sign-off area. A final image
+appendix embeds all available provider screenshots, labels them by variant/source,
+and retains live-source links and capture timestamps. It is a
 decision-support summary and does not generate a diagnosis or treatment
 recommendation.
 
