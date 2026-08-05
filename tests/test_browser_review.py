@@ -266,6 +266,33 @@ def test_oncokb_login_accepts_successful_redirect_after_click_error(tmp_path):
     assert service._try_saved_login("OncoKB", Page())
 
 
+def test_franklin_login_waits_for_saved_session_redirect(tmp_path):
+    service = BrowserReviewService(
+        profile_root=tmp_path,
+        franklin_email="researcher@example.org",
+        franklin_password="secret",
+        navigation_timeout_ms=2_000,
+    )
+
+    class Locator:
+        def count(self):
+            return 0
+
+        def fill(self, value):
+            raise AssertionError("Franklin form must not be filled after redirect")
+
+    class Page:
+        url = "https://franklin.genoox.com/login"
+
+        def locator(self, selector):
+            return Locator()
+
+        def wait_for_timeout(self, milliseconds):
+            self.url = "https://franklin.genoox.com/clinical-db/home"
+
+    assert service._try_saved_login("Franklin", Page())
+
+
 def test_oncokb_waits_for_client_rendered_variant_content(tmp_path):
     service = BrowserReviewService(profile_root=tmp_path, navigation_timeout_ms=2_000)
 

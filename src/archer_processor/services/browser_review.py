@@ -2196,6 +2196,8 @@ class BrowserReviewService:
     def _try_saved_login(self, database: str, page: Any) -> bool:
         if self._session_authenticated(database, page):
             return True
+        if database == "Franklin" and self._wait_for_franklin_auth_or_form(page):
+            return True
         if database == "COSMIC":
             email, password = self.cosmic_email, self.cosmic_password
             email_selector = "input[placeholder='Registered email address']"
@@ -2257,6 +2259,23 @@ class BrowserReviewService:
                 return self._session_authenticated(database, page)
             except Exception:
                 return False
+
+    def _wait_for_franklin_auth_or_form(self, page: Any) -> bool:
+        """Allow Franklin's login route to finish its saved-session redirect."""
+        attempts = max(
+            1,
+            min(5_000, self.navigation_timeout_ms) // 250,
+        )
+        for _ in range(attempts):
+            if self._session_authenticated("Franklin", page):
+                return True
+            if (
+                page.locator("#email").count() == 1
+                and page.locator("#password").count() == 1
+            ):
+                return False
+            page.wait_for_timeout(250)
+        return self._session_authenticated("Franklin", page)
 
     def _wait_for_oncokb_result(self, page: Any) -> None:
         """Wait for OncoKB's client-rendered variant evidence, not network idle."""
