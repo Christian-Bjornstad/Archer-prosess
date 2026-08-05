@@ -175,7 +175,7 @@ class PatientExcelReportWriter:
                 value.alignment = Alignment(vertical="top", wrap_text=True)
                 for cell in ws[row]:
                     cell.border = self._border()
-                if items and items[0].url:
+                if items and items[0].url and database != "MTBP":
                     label.hyperlink = items[0].url
                     label.style = "Hyperlink"
                 ws.row_dimensions[row].height = 82 if database == "COSMIC" else 58
@@ -204,7 +204,7 @@ class PatientExcelReportWriter:
                     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
                     caption = ws.cell(row, 1, record["label"])
                     caption.font = Font(bold=True, color=self.colors["navy"])
-                    if record.get("url"):
+                    if record.get("url") and database != "MTBP":
                         caption.hyperlink = record["url"]
                         caption.style = "Hyperlink"
                     row += 1
@@ -236,13 +236,6 @@ class PatientExcelReportWriter:
         ws.merge_cells("A1:I2")
         ws["A1"] = f"VPM-tolkning – {patient_id}"
         self._title_style(ws["A1"])
-        ws.merge_cells("A3:I3")
-        ws["A3"] = (
-            "Kort evidensoversikt. Klikk på databaseresultatene for å åpne kilden. "
-            "Alle funn må verifiseres før klinisk bruk."
-        )
-        ws["A3"].font = Font(size=10, italic=True, color=self.colors["muted"])
-        ws["A3"].alignment = Alignment(wrap_text=True, vertical="center")
         self._info_row(ws, 5, "DIT/pasientnummer", patient_id, end_column=9)
         self._info_row(ws, 6, "Rapportdato", result.run_date, end_column=9)
         self._info_row(ws, 7, "Antall varianter", len(variants), end_column=9)
@@ -275,7 +268,7 @@ class PatientExcelReportWriter:
                 cell.alignment = Alignment(vertical="top", wrap_text=True)
             for offset, database in enumerate(REPORT_DATABASES, start=5):
                 items = by_database.get(database, [])
-                if items and items[0].url:
+                if items and items[0].url and database != "MTBP":
                     ws.cell(row, offset).hyperlink = items[0].url
                     ws.cell(row, offset).style = "Hyperlink"
                     ws.cell(row, offset).alignment = Alignment(
@@ -346,10 +339,10 @@ class PatientExcelReportWriter:
             value.alignment = Alignment(vertical="top", wrap_text=True)
             for cell in ws[row]:
                 cell.border = self._border()
-            if items and items[0].url:
+            if items and items[0].url and database != "MTBP":
                 label.hyperlink = items[0].url
                 label.style = "Hyperlink"
-            if items and items[0].url:
+            if items and items[0].url and database != "MTBP":
                 value.hyperlink = items[0].url
                 value.style = "Hyperlink"
                 value.alignment = Alignment(vertical="top", wrap_text=True)
@@ -381,7 +374,7 @@ class PatientExcelReportWriter:
                 caption = ws.cell(row, 1, record["label"])
                 caption.font = Font(bold=True, color=self.colors["navy"])
                 caption.fill = PatternFill("solid", fgColor=self.colors["pale_blue"])
-                if record.get("url"):
+                if record.get("url") and database != "MTBP":
                     caption.hyperlink = record["url"]
                     caption.style = "Hyperlink"
                 row += 1
@@ -428,14 +421,14 @@ class PatientExcelReportWriter:
                     item.clinical_significance,
                     item.accession,
                     item.summary,
-                    item.url,
+                    "" if item.database == "MTBP" else item.url,
                     item.raw.get("captured_at", ""),
                 ]
                 for column, value in enumerate(values, start=1):
                     cell = ws.cell(row, column, value)
                     cell.border = self._border()
                     cell.alignment = Alignment(vertical="top", wrap_text=column in {7, 9, 10})
-                if item.url:
+                if item.url and item.database != "MTBP":
                     ws.cell(row, 10).hyperlink = item.url
                     ws.cell(row, 10).style = "Hyperlink"
                 ws.row_dimensions[row].height = 48
@@ -665,7 +658,9 @@ class PatientExcelReportWriter:
                     else "",
                     f"Accession: {item.accession}" if item.accession else "",
                     item.summary,
-                    f"Source: {item.url}" if item.url else "",
+                    f"Source: {item.url}"
+                    if item.url and item.database != "MTBP"
+                    else "",
                 ]
                 if part
             )
@@ -698,7 +693,9 @@ class PatientExcelReportWriter:
                         {
                             "label": str(record.get("label") or f"{item.database} evidence"),
                             "path": path,
-                            "url": str(record.get("url") or item.url or ""),
+                            "url": ""
+                            if item.database == "MTBP"
+                            else str(record.get("url") or item.url or ""),
                         }
                     )
             legacy = str(item.raw.get("screenshot") or "").strip()
@@ -708,7 +705,7 @@ class PatientExcelReportWriter:
                     {
                         "label": f"{item.database} evidence",
                         "path": legacy,
-                        "url": item.url,
+                        "url": "" if item.database == "MTBP" else item.url,
                     }
                 )
         return records

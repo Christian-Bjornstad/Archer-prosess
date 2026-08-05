@@ -2,6 +2,7 @@ from archer_processor.services.browser_review import BrowserReviewService
 from archer_processor.services.edge_cdp import (
     EdgeCdpError,
     EdgeCdpContext,
+    EdgeCdpLocator,
     EdgeCdpPage,
     EdgeCdpRuntime,
     EdgeCdpTimeout,
@@ -83,3 +84,20 @@ def test_edge_launcher_retries_transient_broker_failures(tmp_path, monkeypatch):
     assert context is sentinel
     assert len(attempts) == 3
     assert sleeps == [1.5, 3.0]
+
+
+def test_locator_can_scroll_visible_element_before_screenshot():
+    class Page:
+        def __init__(self):
+            self.expression = ""
+
+        def _evaluate_value(self, expression):
+            self.expression = expression
+            return True
+
+    page = Page()
+
+    EdgeCdpLocator(page, "[document.body]").scroll_into_view_if_needed()
+
+    assert "scrollIntoView" in page.expression
+    assert "Element is hidden" in page.expression

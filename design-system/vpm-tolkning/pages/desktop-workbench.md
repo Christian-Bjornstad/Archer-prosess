@@ -45,5 +45,7 @@ the master design system.
   active patient, variant count, and source count.
 - Source selection, state, and warnings are communicated by text as well as
   colour.
-- Review flags include a concise explanation that they indicate warnings or
-  incomplete information requiring manual attention, not automatic exclusion.
+- The Variants page shows only total, included, and excluded counts. Do not add
+  a separate review-flags metric, filter, note, or workflow state.
+- The review workbook uses two data sheets: With Artifacts and Artifacts Removed.
+  Selection happens in the first sheet through Skip Database Search (X).

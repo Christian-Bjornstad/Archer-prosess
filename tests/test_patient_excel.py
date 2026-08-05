@@ -154,6 +154,7 @@ def test_patient_excel_report_uses_requested_sheet_layout_and_image_order(tmp_pa
     assert workbook.sheetnames == ["Oversikt", "Vedlegg", "TP53"]
     overview = workbook["Oversikt"]
     assert overview["A1"].value == "VPM-tolkning – 26OUM00004"
+    assert overview["A3"].value is None
     assert [overview.cell(10, column).value for column in range(1, 10)] == [
         "Gen", "HGVSc", "HGVSp", "Kort evidens",
         "MTBP", "Franklin", "ClinVar", "OncoKB", "COSMIC",
@@ -161,8 +162,10 @@ def test_patient_excel_report_uses_requested_sheet_layout_and_image_order(tmp_pa
     assert "ClinVar - Pathogenic" in overview["D11"].value
     assert overview["G11"].value == "Pathogenic"
     assert overview["G11"].hyperlink.target.endswith("/12345/")
+    assert overview["E11"].hyperlink is None
     assert workbook["Vedlegg"]["A1"].value == "26OUM00004"
     variant_sheet = workbook["TP53"]
+    assert variant_sheet["A6"].hyperlink is None
     assert len(variant_sheet._images) == 6
     assert IMAGE_DATABASES == ("MTBP", "Franklin", "ClinVar", "OncoKB", "COSMIC")
     workbook.close()

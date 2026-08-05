@@ -88,23 +88,19 @@ def test_excel_export_preserves_raw_columns_and_adds_database_columns(tmp_path):
     ExcelReportWriter().write(result, output, evidence=evidence)
 
     workbook = openpyxl.load_workbook(output)
-    assert workbook.sheetnames == [
-        "Summary",
-        "Included Variants",
-        "Database Selection",
-        "Database Evidence",
-        "With Artifacts",
-        "Artifacts Removed",
-        "Rules",
-    ]
+    assert workbook.sheetnames == ["With Artifacts", "Artifacts Removed"]
     ws = workbook["With Artifacts"]
     headers = [cell.value for cell in ws[1]]
     raw_headers = list(result.variants[0].raw)
-    row = next(row for row in ws.iter_rows(min_row=2, values_only=True) if row[0] == variant.sample)
+    row = next(
+        row for row in ws.iter_rows(min_row=2, values_only=True)
+        if row[headers.index("Sample")] == variant.sample
+    )
     workbook.close()
 
-    assert headers[: len(raw_headers)] == raw_headers
-    assert headers[len(raw_headers):] == [
+    assert headers[0] == "Skip Database Search (X)"
+    assert headers[1 : len(raw_headers) + 1] == raw_headers
+    assert headers[len(raw_headers) + 1 :] == [
         f"{database} Evidence"
         for database in [
             "ClinVar",
@@ -128,11 +124,13 @@ def test_database_selection_sheet_round_trips_x_marks(tmp_path):
     )
 
     workbook = openpyxl.load_workbook(output)
-    worksheet = workbook["Database Selection"]
+    worksheet = workbook["With Artifacts"]
     assert worksheet["A1"].value == "Skip Database Search (X)"
     assert worksheet["A3"].value == "X"
     workbook.close()
-    assert load_database_skip_keys(output) == {skipped_key}
+    loaded = load_database_skip_keys(output)
+    assert skipped_key in loaded
+    assert DatabaseSearchService().variant_key(result.variants[0]) in loaded
 
 
 def test_excel_export_writes_artifact_removed_sheet(tmp_path):
@@ -161,7 +159,11 @@ def test_excel_export_writes_artifact_removed_sheet(tmp_path):
     workbook = openpyxl.load_workbook(output)
     with_artifacts = workbook["With Artifacts"]
     artifacts_removed = workbook["Artifacts Removed"]
-    with_samples = [row[0] for row in with_artifacts.iter_rows(min_row=2, values_only=True)]
+    with_headers = [cell.value for cell in with_artifacts[1]]
+    with_samples = [
+        row[with_headers.index("Sample")]
+        for row in with_artifacts.iter_rows(min_row=2, values_only=True)
+    ]
     removed_samples = [row[0] for row in artifacts_removed.iter_rows(min_row=2, values_only=True)]
     headers = [cell.value for cell in artifacts_removed[1]]
     row = next(row for row in artifacts_removed.iter_rows(min_row=2, values_only=True) if row[0] == variant.sample)
@@ -186,7 +188,7 @@ def test_excel_export_keeps_row_coloring_on_raw_sheets(tmp_path):
     with_artifacts = workbook["With Artifacts"]
     artifacts_removed = workbook["Artifacts Removed"]
     by_sample = {
-        row[0].value: row[0].fill.fgColor.rgb
+        row[1].value: row[1].fill.fgColor.rgb
         for row in with_artifacts.iter_rows(min_row=2)
     }
     removed_by_sample = {
@@ -195,13 +197,13 @@ def test_excel_export_keeps_row_coloring_on_raw_sheets(tmp_path):
     }
     workbook.close()
 
-    assert by_sample["26OUM00001_VPM_S1_R1_001"] == "00FCE4D6"
+    assert by_sample["26OUM00001_VPM_S1_R1_001"] == "00FFC000"
     assert by_sample["26OUM00002_VPM_S2_R1_001"] == "00000000"
-    assert removed_by_sample["26OUM00004_VPM_S4_R1_001"] == "00FFF2CC"
+    assert removed_by_sample["26OUM00004_VPM_S4_R1_001"] == "00FFFF00"
     assert removed_by_sample["26OUM00005_VPM_S5_R1_001"] == "00E2F0D9"
 
 
-def test_excel_evidence_sheet_links_source_and_browser_screenshot(tmp_path):
+def test_excel_review_layout_hides_reference_columns_and_keeps_evidence_compact(tmp_path):
     output = tmp_path / "review.xlsx"
     screenshot = tmp_path / "browser-evidence.png"
     screenshot.write_bytes(b"placeholder")
@@ -226,11 +228,14 @@ def test_excel_evidence_sheet_links_source_and_browser_screenshot(tmp_path):
     ExcelReportWriter().write(result, output, evidence=evidence)
 
     workbook = openpyxl.load_workbook(output)
-    ws = workbook["Database Evidence"]
+    ws = workbook["With Artifacts"]
     headers = [cell.value for cell in ws[1]]
-    source_cell = ws.cell(2, headers.index("Source Page") + 1)
-    screenshot_cell = ws.cell(2, headers.index("Screenshot") + 1)
+    evidence_column = headers.index("OncoKB Evidence") + 1
+    evidence_cell = ws.cell(5, evidence_column)
+    report_column = headers.index("Report") + 1
+    assert ws.freeze_panes == "G2"
+    assert ws.column_dimensions[openpyxl.utils.get_column_letter(report_column)].hidden
+    assert all(not ws.row_dimensions[row].hidden for row in range(2, ws.max_row + 1))
+    assert not evidence_cell.alignment.wrap_text
+    assert ws.row_dimensions[5].height == 18
     workbook.close()
-
-    assert source_cell.hyperlink.target == "https://www.oncokb.org/example"
-    assert screenshot_cell.hyperlink.target == "browser-evidence.png"

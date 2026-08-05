@@ -170,15 +170,10 @@ class EdgeCdpContext:
             stderr=subprocess.DEVNULL,
             creationflags=creation_flags,
         )
-        deadline = time.monotonic() + 20
+        started_at = time.monotonic()
+        deadline = started_at + 20
         last_error: Exception | None = None
         while time.monotonic() < deadline:
-            if process.poll() is not None:
-                raise EdgeCdpError(
-                    "Microsoft Edge exited before its local DevTools endpoint opened. "
-                    "The dedicated browser profile may already be in use, or work-PC "
-                    "policy may block remote debugging."
-                )
             try:
                 _http_json(f"{endpoint}/json/version", timeout=1)
                 context = cls(process, endpoint, origin, profile_directory)
@@ -201,6 +196,16 @@ class EdgeCdpContext:
                 return context
             except Exception as exc:
                 last_error = exc
+                # Managed Edge may hand the command to its broker and let the
+                # original process exit before the broker exposes CDP. Keep
+                # probing the reserved endpoint briefly before calling that a
+                # failed launch.
+                if process.poll() is not None and time.monotonic() - started_at >= 3:
+                    raise EdgeCdpError(
+                        "Microsoft Edge exited before its local DevTools endpoint opened. "
+                        "The dedicated browser profile may already be in use, or work-PC "
+                        "policy may block remote debugging."
+                    ) from last_error
                 time.sleep(0.2)
         try:
             process.terminate()
@@ -772,6 +777,20 @@ class EdgeCdpLocator:
             "return {x:r.x,y:r.y,width:r.width,height:r.height}; })()"
         )
         return dict(value) if value else None
+
+    def scroll_into_view_if_needed(self) -> None:
+        """Bring one visible locator into the viewport before interaction/capture."""
+        scrolled = self.page._evaluate_value(
+            "(() => { const nodes=" + self.expression + "; "
+            "if(nodes.length!==1) throw new Error(`Expected one element, got ${nodes.length}`); "
+            "const el=nodes[0], style=getComputedStyle(el), rect=el.getBoundingClientRect(); "
+            "if(style.visibility==='hidden' || style.display==='none' || !rect.width || !rect.height) "
+            "throw new Error('Element is hidden'); "
+            "if(rect.top < 0 || rect.left < 0 || rect.bottom > innerHeight || rect.right > innerWidth) "
+            "el.scrollIntoView({block:'center',inline:'nearest'}); return true; })()"
+        )
+        if not scrolled:
+            raise EdgeCdpError("Edge could not scroll the selected element into view.")
 
     def evaluate(self, script: str, argument: Any = None) -> Any:
         return self.page._evaluate_value(

@@ -9,6 +9,7 @@ from archer_processor.services.browser_review import (
     FRANKLIN_ASSESSMENT_RENDER_BUFFER_MS,
     _cosmic_identifier,
     _cosmic_numeric_id,
+    _cosmic_source_url,
     _mtbp_genomic_query,
     _mtbp_query_rejected,
     _mtbp_screenshot_row_matches,
@@ -38,7 +39,7 @@ def test_browser_query_urls_use_normalized_variant_identity(tmp_path):
         "https://www.ncbi.nlm.nih.gov/clinvar/?term="
     )
     assert service.query_url("COSMIC", variant) == (
-        "https://cancer.sanger.ac.uk/cosmic/mutation/overview?id=10648"
+        "https://cancer.sanger.ac.uk/cosmic/search?q=COSM10648"
     )
     with pytest.raises(ValueError, match="Unsupported browser database"):
         service.login_url("HSMD")
@@ -69,6 +70,104 @@ def test_cosmic_identifier_uses_first_archer_cosmic_id():
     assert _cosmic_identifier("COSM476; COSV56056643") == "COSM476"
     assert _cosmic_numeric_id("COSM476; COSV56056643") == "476"
     assert _cosmic_numeric_id("") == ""
+
+
+def test_cosmic_search_resolves_canonical_internal_mutation_id(tmp_path):
+    variant = VariantRecord(
+        source_file=Path("synthetic.tsv"),
+        source_row=1,
+        sample="26OUM09411_VPM_S20_R1_001",
+        symbol="ASXL1",
+        hgvsc="NM_015338.5:c.1934dup",
+        cosmic_id="COSM1411076",
+    )
+    service = BrowserReviewService(profile_root=tmp_path, navigation_timeout_ms=500)
+    grch38 = (
+        "https://cancer.sanger.ac.uk/cosmic/mutation/overview"
+        "?id=139096009&merge=1411076"
+    )
+    grch37 = (
+        "https://cancer.sanger.ac.uk/cosmic/mutation/overview"
+        "?cosm=COSM34210&genome=37&id=43598117&trans=ASXL1"
+    )
+
+    class Links:
+        def __init__(self, values):
+            self.values = values
+
+        def evaluate_all(self, script):
+            return self.values
+
+        def wait_for(self, *, state, timeout):
+            assert state == "visible"
+
+    class Page:
+        url = "https://cancer.sanger.ac.uk/cosmic/search?q=COSM1411076"
+
+        def locator(self, selector):
+            if selector == "a[href*='/cosmic/mutation/overview']":
+                return Links([grch38])
+            if selector == "a[href*='genome=37'][href*='id=']":
+                return Links([grch37])
+            raise AssertionError(selector)
+
+        def goto(self, url, **kwargs):
+            self.url = url
+
+        def wait_for_timeout(self, milliseconds):
+            pass
+
+    page = Page()
+    service._resolve_cosmic_mutation_page(page, variant)
+
+    assert page.url == grch37
+    assert _cosmic_source_url(page.url, variant.cosmic_id) == (
+        "https://cancer.sanger.ac.uk/cosmic/mutation/overview"
+        "?id=43598117&merge=1411076"
+    )
+
+
+def test_oncokb_rejects_cookie_banner_before_capture(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path)
+
+    class RejectButton:
+        clicked = False
+
+        def count(self):
+            return 1
+
+        def is_visible(self):
+            return True
+
+        def click(self):
+            self.clicked = True
+
+    class Overlays:
+        removed = False
+
+        def evaluate_all(self, script):
+            self.removed = True
+
+    class Page:
+        def __init__(self):
+            self.reject = RejectButton()
+            self.overlays = Overlays()
+
+        def get_by_role(self, role, *, name, exact):
+            assert (role, name, exact) == ("button", "Reject all", True)
+            return self.reject
+
+        def locator(self, selector):
+            return self.overlays
+
+        def wait_for_timeout(self, milliseconds):
+            pass
+
+    page = Page()
+    service._reject_oncokb_cookies(page)
+
+    assert page.reject.clicked
+    assert page.overlays.removed
 
 
 def test_browser_safety_buffer_randomizes_queries_and_provider_switches(
@@ -774,6 +873,42 @@ def test_mtbp_reuses_proven_genomic_fallback_after_transcript_rejection(tmp_path
         "chr20:g.31022366_31022367insA",
     ]
     assert learned
+
+
+def test_mtbp_runs_each_variant_as_an_independent_report(tmp_path, monkeypatch):
+    variants = ArcherTsvReader().read(FIXTURE)[3:5]
+    service = BrowserReviewService(
+        profile_root=tmp_path,
+        request_delay_ms=0,
+        request_delay_max_ms=0,
+    )
+    submitted = []
+
+    def run_one(batch, artifact_directory, *, progress):
+        assert len(batch) == 1
+        variant = batch[0]
+        submitted.append(variant.hgvsc)
+        return {
+            service.variant_key(variant): DatabaseEvidence(
+                "MTBP",
+                "found",
+                "matched",
+                url="https://mtbp.org/patients/private/report/1/",
+                raw={
+                    "screenshots": [
+                        {"path": "one.png", "url": "https://mtbp.org/private"}
+                    ]
+                },
+            )
+        }
+
+    monkeypatch.setattr(service, "_search_mtbp_batch", run_one)
+    results = service._search_mtbp(variants, tmp_path / "mtbp", progress=None)
+
+    assert submitted == [variant.hgvsc for variant in variants]
+    assert len(results) == 2
+    assert all(item.url == "" for item in results.values())
+    assert all(item.raw["screenshots"][0]["url"] == "" for item in results.values())
 
 
 def test_mtbp_validation_error_identifies_rejected_entries():

@@ -517,8 +517,7 @@ class MainWindow(QMainWindow):
         self.total_card = MetricCard("Total variants", "0", Palette.navy)
         self.included_card = MetricCard("Included", "0", Palette.green)
         self.excluded_card = MetricCard("Excluded", "0", Palette.red)
-        self.warning_card = MetricCard("Review flags", "0", Palette.yellow)
-        for card in [self.total_card, self.included_card, self.excluded_card, self.warning_card]:
+        for card in [self.total_card, self.included_card, self.excluded_card]:
             metrics.addWidget(card)
         layout.addLayout(metrics)
 
@@ -583,7 +582,7 @@ class MainWindow(QMainWindow):
         self.run_date.setDisplayFormat("yyyy-MM-dd")
         self.run_date.setDate(QDate.currentDate())
         self.hide_excluded = QCheckBox("Hide excluded rows in workbook")
-        self.hide_excluded.setChecked(True)
+        self.hide_excluded.setChecked(False)
         grid.addWidget(QLabel("Input TSV"), 0, 0)
         grid.addWidget(self.input_edit, 0, 1)
         grid.addWidget(input_btn, 0, 2)
@@ -634,9 +633,7 @@ class MainWindow(QMainWindow):
         self.review_filter_edit.setClearButtonEnabled(True)
         self.review_filter_edit.textChanged.connect(self._apply_review_filters)
         self.review_decision_combo = QComboBox()
-        self.review_decision_combo.addItems(
-            ["All decisions", "Included", "Excluded", "Review flags"]
-        )
+        self.review_decision_combo.addItems(["All decisions", "Included", "Excluded"])
         self.review_decision_combo.currentIndexChanged.connect(self._apply_review_filters)
         self.review_count_label = QLabel("No variants loaded")
         self.review_count_label.setObjectName("HelperText")
@@ -645,12 +642,6 @@ class MainWindow(QMainWindow):
         toolbar_layout.addWidget(self.review_decision_combo)
         toolbar_layout.addWidget(self.review_count_label)
         layout.addWidget(toolbar)
-        self.review_flag_note = QLabel(
-            "Review flags identify variants with warnings or incomplete information that need manual attention; they are not automatically excluded."
-        )
-        self.review_flag_note.setObjectName("ReviewFlagNote")
-        self.review_flag_note.setWordWrap(True)
-        layout.addWidget(self.review_flag_note)
         self.variant_table = QTableWidget(0, 8)
         self.variant_table.setHorizontalHeaderLabels(
             ["Sample", "Gene", "HGVSc", "AF", "Depth", "Decision", "History", "Warnings"]
@@ -757,7 +748,7 @@ class MainWindow(QMainWindow):
         self.load_selection_btn = QPushButton("Load Selection Workbook")
         self.load_selection_btn.setEnabled(False)
         self.load_selection_btn.setToolTip(
-            "Load the processed workbook and skip rows marked X on Database Selection."
+            "Load the processed workbook and skip rows marked X on With Artifacts."
         )
         self.load_selection_btn.clicked.connect(self._load_database_selection)
         options_grid.addWidget(self.load_selection_btn, 1, 3)
@@ -1439,7 +1430,6 @@ class MainWindow(QMainWindow):
         self.total_card.set_value(self.result.total_count)
         self.included_card.set_value(len(self.result.included))
         self.excluded_card.set_value(len(self.result.excluded))
-        self.warning_card.set_value(sum(1 for variant in self.result.variants if variant.warnings))
         self._apply_review_filters()
         self._update_evidence_summary()
 
@@ -1484,12 +1474,10 @@ class MainWindow(QMainWindow):
                 for column in range(self.variant_table.columnCount())
             ).casefold()
             decision = self._table_text(self.variant_table, row, 5).casefold()
-            warnings = self._table_text(self.variant_table, row, 7)
             mode_matches = (
                 mode == "All decisions"
                 or (mode == "Included" and decision == "included")
                 or (mode == "Excluded" and decision == "excluded")
-                or (mode == "Review flags" and bool(warnings))
             )
             show = (not query or query in row_text) and mode_matches
             self.variant_table.setRowHidden(row, not show)
@@ -1806,13 +1794,6 @@ class MainWindow(QMainWindow):
                 border-radius: 6px;
                 padding: 8px;
                 font-weight: 650;
-            }}
-            QLabel#ReviewFlagNote {{
-                color: #7A5000;
-                background: {Palette.pale_yellow};
-                border: 1px solid #E7CF91;
-                border-radius: 7px;
-                padding: 8px 10px;
             }}
             QLabel#HelperText {{
                 color: {Palette.muted};

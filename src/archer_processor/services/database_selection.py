@@ -5,7 +5,8 @@ from pathlib import Path
 import openpyxl
 
 
-SELECTION_SHEET = "Database Selection"
+SELECTION_SHEET = "With Artifacts"
+LEGACY_SELECTION_SHEET = "Database Selection"
 SKIP_HEADER = "Skip Database Search (X)"
 SAMPLE_HEADER = "Sample"
 HGVSC_HEADER = "HGVSc"
@@ -15,12 +16,19 @@ def load_database_skip_keys(workbook_path: Path) -> set[str]:
     """Return variant keys explicitly marked X in a processed review workbook."""
     workbook = openpyxl.load_workbook(workbook_path, read_only=True, data_only=True)
     try:
-        if SELECTION_SHEET not in workbook.sheetnames:
+        sheet_name = (
+            SELECTION_SHEET
+            if SELECTION_SHEET in workbook.sheetnames
+            else LEGACY_SELECTION_SHEET
+            if LEGACY_SELECTION_SHEET in workbook.sheetnames
+            else ""
+        )
+        if not sheet_name:
             raise ValueError(
                 f"Workbook does not contain the '{SELECTION_SHEET}' sheet. "
                 "Create it with the current Archer Prosess version first."
             )
-        worksheet = workbook[SELECTION_SHEET]
+        worksheet = workbook[sheet_name]
         headers = {
             str(cell.value or "").strip(): index
             for index, cell in enumerate(next(worksheet.iter_rows(min_row=1, max_row=1)))
@@ -30,7 +38,7 @@ def load_database_skip_keys(workbook_path: Path) -> set[str]:
             for header in (SKIP_HEADER, SAMPLE_HEADER, HGVSC_HEADER)
         ):
             raise ValueError(
-                f"'{SELECTION_SHEET}' is missing its Sample, HGVSc, or skip column."
+                f"'{sheet_name}' is missing its Sample, HGVSc, or skip column."
             )
         skip_index = headers[SKIP_HEADER]
         sample_index = headers[SAMPLE_HEADER]

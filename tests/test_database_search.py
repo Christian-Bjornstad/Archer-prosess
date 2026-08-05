@@ -69,7 +69,7 @@ def test_database_diagnostics_reports_ready_token_and_manual_sources():
     assert diagnostics["cBioPortal"] == "ready (public cohort context)"
     assert diagnostics["OncoKB"] == "token required"
     assert diagnostics["Franklin"] == "browser login/public review (Premium API not configured)"
-    assert diagnostics["MTBP"] == "web batch (login, research-only)"
+    assert diagnostics["MTBP"] == "web one-variant reports (login, research-only)"
     assert diagnostics["HSMD"] == "manual"
 
 

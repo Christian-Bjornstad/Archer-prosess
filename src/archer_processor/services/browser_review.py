@@ -124,12 +124,12 @@ class BrowserReviewService:
     def query_url(self, database: str, variant: VariantRecord) -> str:
         self._validate_database(database)
         if database == "COSMIC":
-            cosmic_number = _cosmic_numeric_id(variant.cosmic_id)
-            if not cosmic_number:
+            cosmic_id = _cosmic_identifier(variant.cosmic_id)
+            if not cosmic_id:
                 return ""
             return (
-                "https://cancer.sanger.ac.uk/cosmic/mutation/overview?id="
-                f"{cosmic_number}"
+                "https://cancer.sanger.ac.uk/cosmic/search?q="
+                f"{quote(cosmic_id, safe='')}"
             )
         if database == "OncoKB":
             alteration = _protein_change(variant.hgvsp) or _cdna_change(variant.hgvsc)
@@ -416,6 +416,7 @@ class BrowserReviewService:
                             wait_until="domcontentloaded",
                             timeout=self.navigation_timeout_ms,
                         )
+                        self._resolve_cosmic_mutation_page(page, variant)
                         if self._login_required("COSMIC", page.url):
                             results[key] = DatabaseEvidence(
                                 "COSMIC",
@@ -447,6 +448,63 @@ class BrowserReviewService:
                 except browser_error:
                     pass
         return results
+
+    def _resolve_cosmic_mutation_page(
+        self, page: Any, variant: VariantRecord
+    ) -> None:
+        """Resolve a legacy identifier and switch the canonical page to GRCh37."""
+        cosmic_number = _cosmic_numeric_id(variant.cosmic_id)
+        if not cosmic_number:
+            raise ValueError("COSMIC identifier is missing its numeric component.")
+        if "/cosmic/mutation/overview" not in page.url:
+            links = page.locator("a[href*='/cosmic/mutation/overview']")
+            attempts = max(1, self.navigation_timeout_ms // 500)
+            for _ in range(attempts):
+                candidates = [
+                    href
+                    for href in links.evaluate_all("nodes => nodes.map(node => node.href)")
+                    if href and f"merge={cosmic_number}" in href
+                ]
+                candidates = list(dict.fromkeys(candidates))
+                if len(candidates) == 1:
+                    page.goto(
+                        candidates[0],
+                        wait_until="domcontentloaded",
+                        timeout=self.navigation_timeout_ms,
+                    )
+                    break
+                if len(candidates) > 1:
+                    raise RuntimeError(
+                        f"COSMIC returned multiple canonical pages for {variant.cosmic_id}."
+                    )
+                page.wait_for_timeout(500)
+            else:
+                raise RuntimeError(
+                    f"COSMIC did not expose a canonical mutation link for {variant.cosmic_id}."
+                )
+
+        grch37_links = page.locator("a[href*='genome=37'][href*='id=']")
+        candidates: list[str] = []
+        for _ in range(max(1, self.navigation_timeout_ms // 500)):
+            candidates = list(
+                dict.fromkeys(
+                    href
+                    for href in grch37_links.evaluate_all(
+                        "nodes => nodes.map(node => node.href)"
+                    )
+                    if href
+                )
+            )
+            if candidates:
+                break
+            page.wait_for_timeout(500)
+        if len(candidates) != 1:
+            raise RuntimeError("COSMIC GRCh37 mutation link was not uniquely available.")
+        page.goto(
+            candidates[0],
+            wait_until="domcontentloaded",
+            timeout=self.navigation_timeout_ms,
+        )
 
     def _search_clinvar(
         self,
@@ -605,7 +663,17 @@ class BrowserReviewService:
     ) -> DatabaseEvidence:
         body_text = page.locator("body").inner_text(timeout=self.navigation_timeout_ms)
         cosmic_id = _cosmic_identifier(variant.cosmic_id)
-        if cosmic_id and cosmic_id not in body_text:
+        cdna = _cdna_change(variant.hgvsc)
+        protein = _protein_change(variant.hgvsp)
+        variant_identity_matches = bool(
+            variant.symbol
+            and variant.symbol.casefold() in body_text.casefold()
+            and any(
+                value and value.casefold() in body_text.casefold()
+                for value in (cdna, protein)
+            )
+        )
+        if cosmic_id and cosmic_id not in body_text and not variant_identity_matches:
             return DatabaseEvidence(
                 "COSMIC",
                 "not_found",
@@ -625,6 +693,7 @@ class BrowserReviewService:
         page.wait_for_timeout(1_200)
         rows = [text.strip() for text in samples.locator("tbody tr").all_inner_texts()]
         visible_lymphoid_rows = [text for text in rows if "lymphoid" in text.lower()]
+        source_url = _cosmic_source_url(page.url, variant.cosmic_id)
 
         screenshot_specs = [
             ("COSMIC overview", overview, base_path),
@@ -643,7 +712,7 @@ class BrowserReviewService:
         for label, section, screenshot_path in screenshot_specs:
             section.screenshot(path=str(screenshot_path))
             screenshots.append(
-                {"label": label, "path": str(screenshot_path), "url": page.url}
+                {"label": label, "path": str(screenshot_path), "url": source_url}
             )
 
         summary = (
@@ -656,7 +725,7 @@ class BrowserReviewService:
             status="found",
             summary=summary,
             accession=cosmic_id or variant.cosmic_id,
-            url=page.url,
+            url=source_url,
             raw={
                 "captured_at": datetime.now(timezone.utc).isoformat(),
                 "screenshot": str(base_path),
@@ -934,7 +1003,41 @@ class BrowserReviewService:
         *,
         progress: Callable[[str], None] | None,
     ) -> dict[str, DatabaseEvidence]:
-        """Submit one pseudonymous MTBP batch and map report rows back to variants."""
+        """Run independent MTBP reports so each screenshot belongs to one variant."""
+        results: dict[str, DatabaseEvidence] = {}
+        for index, variant in enumerate(variants, start=1):
+            if progress:
+                progress(
+                    f"MTBP variant {index}/{len(variants)}: "
+                    f"{variant.symbol} {_protein_change(variant.hgvsp) or _cdna_change(variant.hgvsc)}"
+                )
+            current = self._search_mtbp_batch(
+                [variant], artifact_directory, progress=progress
+            )
+            for evidence in current.values():
+                evidence.url = ""
+                for record in evidence.raw.get("screenshots", []):
+                    if isinstance(record, dict):
+                        record["url"] = ""
+            results.update(current)
+            if index < len(variants):
+                delay_ms = self._next_request_delay_ms()
+                if delay_ms > 0:
+                    if progress:
+                        progress(
+                            f"MTBP: safety buffer {delay_ms / 1_000:.1f}s before next variant"
+                        )
+                    time.sleep(delay_ms / 1_000)
+        return results
+
+    def _search_mtbp_batch(
+        self,
+        variants: list[VariantRecord],
+        artifact_directory: Path,
+        *,
+        progress: Callable[[str], None] | None,
+    ) -> dict[str, DatabaseEvidence]:
+        """Submit one pseudonymous MTBP analysis and parse its report."""
         results: dict[str, DatabaseEvidence] = {}
         query_pairs: list[tuple[VariantRecord, str]] = []
         initial_query_attempts: dict[str, list[str]] = {}
@@ -1124,8 +1227,6 @@ class BrowserReviewService:
                     version_html = version_tooltip.first.get_attribute("data-tooltip-html") or ""
                     body_text += "\n" + re.sub(r"<br\s*/?>", "\n", version_html, flags=re.IGNORECASE)
                 report_rows = self._extract_mtbp_rows(page)
-                overview_path = artifact_directory / f"{analysis_id.lower()}.png"
-                page.screenshot(path=str(overview_path), full_page=False)
                 parsed = parse_mtbp_report(
                     body_text,
                     report_rows,
@@ -1149,9 +1250,24 @@ class BrowserReviewService:
                     key = self.variant_key(variant)
                     evidence = parsed[key]
                     evidence.accession = query
-                    screenshot_path = self._capture_mtbp_variant_screenshot(
-                        page, variant, artifact_directory
-                    ) or overview_path
+                    screenshot_path = (
+                        self._capture_mtbp_variant_screenshot(
+                            page, variant, artifact_directory
+                        )
+                        if evidence.status == "found"
+                        else None
+                    )
+                    screenshot_records = (
+                        [
+                            {
+                                "label": "Alteration-centric functional evidence",
+                                "path": str(screenshot_path),
+                                "url": "",
+                            }
+                        ]
+                        if screenshot_path is not None
+                        else []
+                    )
                     evidence.raw.update(
                         {
                             "analysis_id": analysis_id,
@@ -1159,14 +1275,8 @@ class BrowserReviewService:
                             "query_attempts": query_attempts[key],
                             "captured_at": captured_at,
                             "remote_report_preflight_cleanup": preflight_cleanup,
-                            "screenshot": str(screenshot_path),
-                            "screenshots": [
-                                {
-                                    "label": "Alteration-centric functional evidence",
-                                    "path": str(screenshot_path),
-                                    "url": page.url,
-                                }
-                            ],
+                            "screenshot": str(screenshot_path or ""),
+                            "screenshots": screenshot_records,
                             "visible_text_preview": body_text[:12_000],
                         }
                     )
@@ -1595,6 +1705,8 @@ class BrowserReviewService:
         page: Any,
         artifact_directory: Path,
     ) -> DatabaseEvidence:
+        if database == "OncoKB":
+            self._reject_oncokb_cookies(page)
         current_url = page.url
         if self._login_required(database, current_url):
             return DatabaseEvidence(
@@ -1645,6 +1757,19 @@ class BrowserReviewService:
         audit_path = screenshot_path.with_suffix(".audit.json")
         self._write_audit(evidence, audit_path)
         return evidence
+
+    def _reject_oncokb_cookies(self, page: Any) -> None:
+        """Persist the privacy-preserving choice and keep overlays out of captures."""
+        reject = page.get_by_role("button", name="Reject all", exact=True)
+        if reject.count() == 1 and reject.is_visible():
+            reject.click()
+            page.wait_for_timeout(350)
+        page.locator(
+            "#onetrust-banner-sdk, #onetrust-consent-sdk, "
+            ".onetrust-pc-dark-filter, [class*='cookie-consent']"
+        ).evaluate_all(
+            "nodes => nodes.forEach(node => node.remove())"
+        )
 
     def _capture_franklin_somatic_pages(
         self,
@@ -1922,26 +2047,66 @@ class BrowserReviewService:
         page: Any,
         variant: VariantRecord,
         artifact_directory: Path,
-    ) -> Path | None:
+    ) -> Path:
         rows = page.locator("table tr")
         row_texts = rows.all_inner_texts()
+        alteration_texts: list[str] = []
+        for index, text in enumerate(row_texts):
+            cells = rows.nth(index).locator("td")
+            alteration_texts.append(
+                cells.nth(2).inner_text() if cells.count() > 2 else text
+            )
         matches = [
             index
-            for index, text in enumerate(row_texts)
+            for index, text in enumerate(alteration_texts)
             if _mtbp_screenshot_row_matches(text, variant)
         ]
+        visible_matches = [
+            index for index in matches if rows.nth(index).is_visible()
+        ]
+        if len(visible_matches) == 1:
+            matches = visible_matches
         if len(matches) != 1:
-            return None
+            gene = (variant.symbol or "").casefold()
+            matches = [
+                index
+                for index, text in enumerate(row_texts)
+                if gene and _mtbp_gene_symbol(text).casefold() == gene
+            ]
+            visible_matches = [
+                index for index in matches if rows.nth(index).is_visible()
+            ]
+            if len(visible_matches) == 1:
+                matches = visible_matches
+        if len(matches) != 1:
+            raise RuntimeError(
+                "MTBP could not identify one unique evidence row for the screenshot."
+            )
         row = rows.nth(matches[0])
         accordion = row.locator(
             "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), "
             "' accordion-item ')][1]"
         )
-        target = accordion if accordion.count() == 1 else row
+        if accordion.count() == 1 and not row.is_visible():
+            toggle = accordion.locator("button.accordion-button")
+            if toggle.count() >= 1:
+                toggle.first.click()
+        row.wait_for(state="visible", timeout=self.navigation_timeout_ms)
+        target = accordion if accordion.count() == 1 and accordion.is_visible() else row
+        target.scroll_into_view_if_needed()
+        page.wait_for_timeout(250)
         screenshot_path = self._screenshot_path(
             artifact_directory, "MTBP", variant
         )
-        target.screenshot(path=str(screenshot_path))
+        try:
+            target.screenshot(path=str(screenshot_path))
+        except Exception:
+            box = row.bounding_box()
+            if box is None:
+                raise RuntimeError(
+                    "MTBP matched the evidence row, but it was not visible for capture."
+                )
+            page.screenshot(path=str(screenshot_path), clip=box)
         return screenshot_path
 
     @staticmethod
@@ -2139,6 +2304,18 @@ def _cosmic_numeric_id(value: str | None) -> str:
     identifier = _cosmic_identifier(value)
     match = re.search(r"\d+", identifier)
     return match.group(0) if match else ""
+
+
+def _cosmic_source_url(current_url: str, cosmic_id: str | None) -> str:
+    """Expose the GRCh37 internal id together with Archer's legacy identifier."""
+    internal = re.search(r"[?&]id=(\d+)", current_url)
+    legacy = _cosmic_numeric_id(cosmic_id)
+    if not internal or not legacy:
+        return current_url
+    return (
+        "https://cancer.sanger.ac.uk/cosmic/mutation/overview"
+        f"?id={internal.group(1)}&merge={legacy}"
+    )
 
 
 def parse_oncokb_page(

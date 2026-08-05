@@ -95,7 +95,7 @@ class DatabaseSearchService:
         diagnostics = {}
         for database in databases:
             if database == "MTBP":
-                diagnostics[database] = "web batch (login, research-only)"
+                diagnostics[database] = "web one-variant reports (login, research-only)"
             elif database in MANUAL_DATABASES:
                 diagnostics[database] = "manual"
             elif database == "OncoKB" and not self.settings.oncokb_api_key:

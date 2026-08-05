@@ -73,8 +73,11 @@ def test_review_filters_and_search_progress_are_visible(qt_app, tmp_path):
     )
     window._refresh_variant_table()
 
-    assert "manual attention" in window.review_flag_note.text()
-    assert "not automatically excluded" in window.review_flag_note.text()
+    assert not hasattr(window, "review_flag_note")
+    assert "Review flags" not in [
+        window.review_decision_combo.itemText(index)
+        for index in range(window.review_decision_combo.count())
+    ]
 
     window.review_filter_edit.setText(window.result.variants[0].symbol)
     assert "Showing" in window.review_count_label.text()
@@ -184,7 +187,7 @@ def test_database_diagnostics_cover_token_and_manual_statuses(qt_app):
     window = MainWindow()
     diagnostics = DatabaseSearchService(window.settings).database_diagnostics(window.databases)
 
-    assert diagnostics["MTBP"] == "web batch (login, research-only)"
+    assert diagnostics["MTBP"] == "web one-variant reports (login, research-only)"
     assert diagnostics["OncoKB"] in {"token required", "ready"}
     assert diagnostics["Franklin"] in {
         "browser login/public review (Premium API not configured)",

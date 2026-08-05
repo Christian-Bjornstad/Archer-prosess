@@ -22,6 +22,65 @@ DEFAULT_DATABASE_COLUMNS = [
     "COSMIC",
 ]
 
+REFERENCE_HIDDEN_COLUMNS = {
+    "Report",
+    "Primer Alt Reads +",
+    "Primer Alt Reads -",
+    "Primer Ref Reads +",
+    "Primer Ref Reads -",
+    "UDP",
+    "DRO",
+    "URO",
+    "Seq Alt Reads +",
+    "Seq Alt Reads -",
+    "Seq Ref Reads +",
+    "Seq Ref Reads -",
+    "Variant Name",
+    "Variant Call",
+    "FATHMM",
+    "RO",
+    "Has Seq Dir Bias",
+    "MA Match",
+    "Quality Rating",
+    "FEDSP",
+    "FEDSR",
+    "Intra Job BN",
+    "Intra Job MDAF",
+    "Intra Job AOC",
+    "Intra Job AFC",
+    "ND BN",
+    "ND MDAF",
+    "ND AOC",
+    "ND AFC",
+    "ND DAF Outlier P Value",
+    "ND DBN",
+    "ND DMDAF",
+    "ND D95MDAF",
+    "ND DAOC",
+    "ND DAFC",
+    "ND SAF Outlier P Value",
+    "ND SBN",
+    "ND SMDAF",
+    "ND S95MDAF",
+    "ND SAOC",
+    "ND SAFC",
+    "Min Outlier P Value",
+    "Intra Job DBN",
+    "Intra Job DAF Outlier P Value",
+    "Intra Job DMDAF",
+    "Intra Job D95MDAF",
+    "Intra Job DAOC",
+    "Intra Job DAFC",
+    "Intra Job SAF Outlier P Value",
+    "Intra Job SBN",
+    "Intra Job SMDAF",
+    "Intra Job S95MDAF",
+    "Intra Job SAOC",
+    "Intra Job SAFC",
+    "AF Outlier P Value",
+    "95MDAF",
+}
+
 
 class ExcelReportWriter:
     colors = {
@@ -29,8 +88,8 @@ class ExcelReportWriter:
         "blue": "2F75B5",
         "pale_blue": "D9EAF7",
         "green": "E2F0D9",
-        "yellow": "FFF2CC",
-        "orange": "FCE4D6",
+        "yellow": "FFFF00",
+        "orange": "FFC000",
         "red": "C00000",
         "red_text": "FFFFFF",
         "gray": "F2F2F2",
@@ -43,22 +102,20 @@ class ExcelReportWriter:
         result: ProcessingResult,
         output_path: Path,
         evidence: dict[str, list[DatabaseEvidence]] | None = None,
-        hide_excluded: bool = True,
+        hide_excluded: bool = False,
         database_skip_keys: set[str] | None = None,
     ) -> Path:
         evidence = evidence or {}
         workbook = Workbook()
         workbook.remove(workbook.active)
-        self._summary_sheet(workbook, result, evidence)
-        self._included_sheet(workbook, result.included, evidence)
-        self._database_selection_sheet(
-            workbook, result.variants, database_skip_keys or set()
-        )
-        self._database_sheet(
-            workbook, result.variants, evidence, output_path.parent
-        )
         self._raw_variant_sheet(
-            workbook, "With Artifacts", result.variants, evidence, hide_excluded
+            workbook,
+            "With Artifacts",
+            result.variants,
+            evidence,
+            hide_excluded,
+            include_selection=True,
+            database_skip_keys=database_skip_keys or set(),
         )
         self._raw_variant_sheet(
             workbook,
@@ -67,9 +124,6 @@ class ExcelReportWriter:
             evidence,
             hide_excluded,
         )
-        if any(variant.history_matches for variant in result.variants):
-            self._history_sheet(workbook, result.variants)
-        self._rules_sheet(workbook, result)
         for ws in workbook.worksheets:
             ws.sheet_view.showGridLines = False
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -185,7 +239,6 @@ class ExcelReportWriter:
             ("Input file", str(result.input_path)),
             ("Run date", result.run_date),
             ("Processing time", f"{result.duration_seconds:.2f} s"),
-            ("Review flags", len(result.flagged)),
             (
                 "Sources queried",
                 ", ".join(dict.fromkeys(item.database for item in evidence_items))
@@ -470,33 +523,77 @@ class ExcelReportWriter:
         variants: list[VariantRecord],
         evidence: dict[str, list[DatabaseEvidence]],
         hide_excluded: bool = False,
+        *,
+        include_selection: bool = False,
+        database_skip_keys: set[str] | None = None,
     ) -> None:
         ws = workbook.create_sheet(title)
         raw_columns = self._raw_columns(variants)
         database_columns = self._database_columns(evidence)
-        headers = raw_columns + [f"{database} Evidence" for database in database_columns]
+        headers = (
+            (["Skip Database Search (X)"] if include_selection else [])
+            + raw_columns
+            + [f"{database} Evidence" for database in database_columns]
+        )
         self._headers(ws, headers)
-        evidence_start = len(raw_columns) + 1
+        raw_offset = 1 if include_selection else 0
+        evidence_start = raw_offset + len(raw_columns) + 1
         evidence_columns = set(range(evidence_start, evidence_start + len(database_columns)))
+        skip_keys = database_skip_keys or set()
 
         for row_index, variant in enumerate(variants, start=2):
             evidence_by_database = self._evidence_by_database(evidence.get(self._key(variant), []))
             values = [
+                *(
+                    [
+                        "X"
+                        if self._key(variant) in skip_keys
+                        or variant_highlight(variant) == "artifact"
+                        else ""
+                    ]
+                    if include_selection
+                    else []
+                ),
                 *[self._raw_value(variant.raw.get(column)) for column in raw_columns],
                 *[self._evidence_cell(evidence_by_database.get(database, [])) for database in database_columns],
             ]
             for col_index, value in enumerate(values, start=1):
                 cell = ws.cell(row_index, col_index, value)
                 cell.border = self._border()
-                cell.alignment = Alignment(vertical="top", wrap_text=col_index in evidence_columns)
-                if col_index <= len(raw_columns) and raw_columns[col_index - 1] == "AF" and value not in [None, ""]:
+                cell.alignment = Alignment(vertical="center", wrap_text=False)
+                raw_index = col_index - raw_offset - 1
+                if 0 <= raw_index < len(raw_columns) and raw_columns[raw_index] == "AF" and value not in [None, ""]:
                     cell.number_format = "0.0000"
+            if include_selection:
+                ws.cell(row_index, 1).fill = PatternFill(
+                    "solid", fgColor=self.colors["yellow"]
+                )
+                ws.cell(row_index, 1).font = Font(bold=True, color=self.colors["navy"])
+                ws.cell(row_index, 1).alignment = Alignment(
+                    horizontal="center", vertical="center"
+                )
             self._style_variant_row(ws, row_index, variant)
+            if include_selection:
+                ws.cell(row_index, 1).fill = PatternFill(
+                    "solid", fgColor=self.colors["yellow"]
+                )
+            ws.row_dimensions[row_index].height = 18
             if hide_excluded and variant.decision == "excluded":
                 ws.row_dimensions[row_index].hidden = True
-        ws.freeze_panes = "A2"
+        ws.freeze_panes = "G2" if include_selection else "F2"
         ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{len(variants) + 1}"
         self._fit(ws, max_width=46)
+        if include_selection:
+            ws.column_dimensions["A"].width = 25
+            ws["A1"].fill = PatternFill("solid", fgColor=self.colors["yellow"])
+            ws["A1"].font = Font(bold=True, color=self.colors["navy"])
+        for index, header in enumerate(headers, start=1):
+            letter = get_column_letter(index)
+            if header in REFERENCE_HIDDEN_COLUMNS:
+                ws.column_dimensions[letter].hidden = True
+            elif header.endswith(" Evidence"):
+                ws.column_dimensions[letter].width = 34
+        ws.row_dimensions[1].height = 34
 
     def _raw_columns(self, variants: list[VariantRecord]) -> list[str]:
         columns: list[str] = []

@@ -353,16 +353,6 @@ class PatientPdfReportWriter:
         )
 
         lead: list[Any] = [self._p(heading, "h2"), detail_table]
-        if variant.warnings:
-            lead.extend(
-                [
-                    Spacer(1, 0.08 * cm),
-                    self._callout(
-                        "Review flags: " + "; ".join(variant.warnings),
-                        self.pale_orange,
-                    ),
-                ]
-            )
         return [
             KeepTogether(lead),
             Spacer(1, 0.1 * cm),
@@ -454,8 +444,6 @@ class PatientPdfReportWriter:
             items.append(
                 "Different classifications/significance labels are present across sources and require reconciliation."
             )
-        if any(variant.warnings for variant in variants):
-            items.append("One or more Archer review flags are present in the variant sections.")
         story: list[Any] = [self._p("Clinical review checklist", "h1")]
         for item in items:
             story.append(Paragraph(escape(item), self.styles["body"], bulletText="-"))

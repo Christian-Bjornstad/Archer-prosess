@@ -17,7 +17,7 @@ Current database status:
 - COSMIC: authenticated browser lookup by the Archer `COSMICID`, capturing the mutation Overview, Tissue distribution, and Samples filtered to `lymphoid`. The older NLM Clinical Tables v4 lookup remains in the service for basic/public records, but it does not provide these full website panels.
 - OncoKB: signed-in website lookup using the serial Microsoft Edge workflow.
 - Franklin: signed-in website lookup that explicitly searches GRCh37/hg19 in Somatic mode, verifies the returned variant identity, and imports only the suggested classification. It captures the complete Somatic Clinical Evidence scroller, then Computed Classification through De Novo Data (excluding Add More Evidence), followed by the prediction/population panels after their render buffer.
-- MTBP: login-assisted visible-browser batch submission and report parsing. Transcript HGVS is tried first; entries rejected by MTBP are retried as GRCh37 genomic HGVS derived from Archer coordinates/ref/alt. The app submits only gene/variant strings under a pseudonymous analysis ID, validates every returned row, and records pipeline/database versions. Its public instance is research-only.
+- MTBP: login-assisted visible-browser submission and report parsing, one variant per pseudonymous report. Transcript HGVS is tried first; an entry rejected by MTBP is retried as GRCh37 genomic HGVS derived from Archer coordinates/ref/alt. The app validates the returned row, records pipeline/database versions, and captures one alteration-centric screenshot. Its public instance is research-only.
 
 Evidence searches run patient-by-patient. For each patient, the selected
 websites run serially, with MTBP kept last for operational safety;
@@ -73,35 +73,32 @@ More Evidence. It also captures a tightly cropped assessment-tools view containi
 Population Frequencies. ClinVar captures only the title and classification-summary
 region above Variant Details. OncoKB captures the variant overview and mutation-effect
 view. The app saves screenshots and a JSON audit record beside the review workbook,
-using a hash or pseudonymous batch ID instead of the sample ID in artifact filenames.
+using a hash or pseudonymous report ID instead of the sample ID in artifact filenames.
 MTBP captures the exact alteration-centric evidence section for each safely matched
-variant. MTBP runs after the other browser sources, submits one
-de-duplicated batch, retries mapper failures using GRCh37 genomic HGVS, removes
-only entries that MTBP still rejects, and waits up to the configured timeout for
-the report. Generated reports remain available in MTBP until the app detects six
+variant. MTBP runs after the other browser sources and submits each variant as a
+separate pseudonymous report. It retries mapper failures using GRCh37 genomic HGVS
+and waits up to the configured timeout for each report. Generated reports remain
+available in MTBP until the app detects six
 `ARCHER-` reports; it then deletes all six as one housekeeping batch. The same
 safe cleanup runs before submission if MTBP's ten-report capacity is already full.
 Local screenshots and audit evidence are written before any post-analysis cleanup,
 and manually named reports are never automatically deleted. It imports functional relevance, evidence category, actionability
-tier, source links and version provenance. Never enter patient or sample
+tier, supporting source links and version provenance. The personal MTBP report URL
+is never exported. Never enter patient or sample
 identifiers in the MTBP cancer-type setting or browser form.
 
 ## Workbook report
 
-The exported workbook opens with a compact summary dashboard, followed by an
-**Included Variants** review table, an editable **Database Selection** sheet, and
-a normalized **Database Evidence** table. Review the full variant list and place
-`X` in **Skip Database Search (X)** for variants that should not be submitted;
+The exported review workbook contains exactly two Archer-style data sheets:
+**With Artifacts** and **Artifacts Removed**. Low-priority technical columns are
+hidden to match the laboratory review layout, the leading identifier columns stay
+frozen, and compact database evidence columns are appended at the far right.
+Review the full variant list in **With Artifacts** and place `X` in
+**Skip Database Search (X)** for variants that should not be submitted. Known
+artifacts are marked automatically;
 then use **Load X Selections** in the app before collecting evidence.
-Evidence rows use readable status coloring and include clickable links to the
-source page and any browser screenshot captured during COSMIC, OncoKB, Franklin or MTBP
-review. Screenshots remain beside the workbook instead of being embedded at
-full resolution, which keeps large batch reports responsive. Keep the generated
-`*_browser_evidence` folder beside the workbook when moving or archiving a
-report so its relative screenshot links remain valid. The original
-**With Artifacts** and **Artifacts Removed** Archer tables remain available as
-the detailed audit/raw-data views, along with the applied rules and local
-history when present. The workbook is rewritten automatically when the selected
+The orange and yellow row colors match the established workbook, and evidence
+does not increase row height. The workbook is rewritten automatically when the selected
 database/browser phases finish; the manual rewrite button remains available if
 the file was open in Excel during that save.
 
