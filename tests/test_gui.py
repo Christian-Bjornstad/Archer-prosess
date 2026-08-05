@@ -4,6 +4,7 @@ from PIL import Image
 
 from archer_processor.core import DatabaseEvidence, VariantProcessor
 from archer_processor.gui.app import DatabaseWorker, MainWindow
+from archer_processor.reports import ExcelReportWriter
 from archer_processor.services import DatabaseSearchService
 
 
@@ -139,6 +140,56 @@ def test_completed_search_reports_pending_workbook_save(qt_app):
 
     assert "still open in Excel" in window.run_progress.detail.text()
     assert window.status_badge.text() == "Search complete · save pending"
+
+
+def test_processed_workbook_can_resume_into_review_pages(qt_app, tmp_path, monkeypatch):
+    output = tmp_path / "resume.xlsx"
+    result = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-08-05",
+        output,
+    )
+    ExcelReportWriter().write(result, output)
+    messages = []
+    monkeypatch.setattr(
+        "archer_processor.gui.app.QMessageBox.information",
+        lambda *args: messages.append(args),
+    )
+    window = MainWindow()
+
+    window._load_processed_workbook(output)
+
+    assert window.result is not None
+    assert window.result.total_count == result.total_count
+    assert window.tabs.currentIndex() == 1
+    assert window.status_badge.text() == "Workbook loaded"
+    assert window.resume_edit.text() == str(output)
+    assert "Restored 5 variants" in window.resume_status.text()
+    assert not window.included_only_check.isChecked()
+    assert messages[0][1] == "Analysis restored"
+
+
+def test_new_search_results_merge_with_restored_evidence(qt_app, tmp_path, monkeypatch):
+    window = MainWindow()
+    variant = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-08-05",
+        tmp_path / "resume.xlsx",
+    ).variants[0]
+    key = f"{variant.sample}|{variant.hgvsc}"
+    window.result = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-08-05",
+        tmp_path / "resume.xlsx",
+    )
+    window.evidence = {key: [DatabaseEvidence("ClinVar", "found", "Existing")]}
+    monkeypatch.setattr(window, "_auto_rewrite_workbook", lambda: None)
+
+    window._database_finished(
+        {key: [DatabaseEvidence("OncoKB", "found", "New result")]}
+    )
+
+    assert {item.database for item in window.evidence[key]} == {"ClinVar", "OncoKB"}
 
 
 def test_application_icon_is_packaged_and_loaded(qt_app):

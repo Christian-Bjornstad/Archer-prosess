@@ -49,6 +49,7 @@ from archer_processor.services import (
     BROWSER_DATABASES,
     BrowserReviewService,
     DatabaseSearchService,
+    ProcessedWorkbookLoader,
     load_database_skip_keys,
 )
 
@@ -492,9 +493,11 @@ class MainWindow(QMainWindow):
         title_box = QVBoxLayout()
         self.page_eyebrow = QLabel("VPM INTERPRETATION  /  IMPORT")
         self.page_eyebrow.setObjectName("PageEyebrow")
-        self.page_title = QLabel("New analysis")
+        self.page_title = QLabel("Analysis workspace")
         self.page_title.setObjectName("PageTitle")
-        self.page_subtitle = QLabel("Load a variant dataset and create the clinical review workbook")
+        self.page_subtitle = QLabel(
+            "Start from a variant dataset or resume a processed review workbook"
+        )
         self.page_subtitle.setObjectName("PageSubtitle")
         title_box.addWidget(self.page_eyebrow)
         title_box.addWidget(self.page_title)
@@ -547,7 +550,7 @@ class MainWindow(QMainWindow):
 
     def _switch_page(self, index: int) -> None:
         pages = [
-            ("IMPORT", "New analysis", "Load a variant dataset and create the clinical review workbook"),
+            ("IMPORT", "Analysis workspace", "Start from a variant dataset or resume a processed review workbook"),
             ("VARIANTS", "Variant review", "Filter, inspect, and prioritise calls for evidence research"),
             ("EVIDENCE", "Evidence search", "Research selected variants across clinical and cancer databases"),
             ("SETTINGS", "Configuration", "Manage local files, provider access, and search safeguards"),
@@ -607,6 +610,35 @@ class MainWindow(QMainWindow):
         actions.addWidget(self.validate_btn)
         actions.addWidget(self.process_btn)
         layout.addLayout(actions)
+
+        resume = QGroupBox("Continue previous analysis")
+        resume_layout = QVBoxLayout(resume)
+        resume_layout.setSpacing(8)
+        resume_help = QLabel(
+            "Restore variants, X selections, and collected evidence from a processed VPM workbook."
+        )
+        resume_help.setObjectName("HelperText")
+        resume_help.setWordWrap(True)
+        resume_row = QHBoxLayout()
+        self.resume_edit = QLineEdit()
+        self.resume_edit.setReadOnly(True)
+        self.resume_edit.setPlaceholderText("No processed workbook loaded")
+        self.resume_edit.setAccessibleName("Processed VPM workbook")
+        self.resume_btn = QPushButton("Open Processed Workbook")
+        self.resume_btn.setObjectName("OutlineButton")
+        self.resume_btn.setMinimumHeight(44)
+        self.resume_btn.setToolTip(
+            "Resume a workbook created by VPM Tolkning without reprocessing the TSV."
+        )
+        self.resume_btn.clicked.connect(self._browse_processed_workbook)
+        resume_row.addWidget(self.resume_edit, 1)
+        resume_row.addWidget(self.resume_btn)
+        self.resume_status = QLabel("Ready to restore an existing review session.")
+        self.resume_status.setObjectName("HelperText")
+        resume_layout.addWidget(resume_help)
+        resume_layout.addLayout(resume_row)
+        resume_layout.addWidget(self.resume_status)
+        layout.addWidget(resume)
 
         activity = QGroupBox("Activity")
         activity.setMaximumHeight(190)
@@ -1086,7 +1118,10 @@ class MainWindow(QMainWindow):
 
     def _processing_finished(self, result: ProcessingResult) -> None:
         self.result = result
+        self.evidence = {}
         self.database_skip_keys = set()
+        self.resume_edit.clear()
+        self.resume_status.setText("New review workbook created from the selected TSV.")
         self.selection_status.setText("No skip list loaded")
         self._log(f"Complete: {result.total_count} variants, {len(result.included)} included, {len(result.excluded)} excluded")
         self._refresh_metrics()
@@ -1112,7 +1147,6 @@ class MainWindow(QMainWindow):
         self._log(f"Search scope: {len(variants)}/{self.result.total_count} variants")
         browser_databases = self._selected_browser_databases()
         api_databases: list[str] = []
-        self.evidence = {}
         worker = DatabaseWorker(
             variants,
             api_databases,
@@ -1137,7 +1171,7 @@ class MainWindow(QMainWindow):
         thread.start()
 
     def _database_finished(self, evidence: dict) -> None:
-        self.evidence = evidence
+        _merge_evidence_results(self.evidence, evidence)
         self._refresh_evidence_table()
         self._auto_rewrite_workbook()
         self._set_ready()
@@ -1277,6 +1311,85 @@ class MainWindow(QMainWindow):
         self.selection_status.setText(message)
         self._update_evidence_summary()
         self._log(f"Database selection loaded: {message}")
+
+    def _browse_processed_workbook(self) -> None:
+        start_dir = (
+            self.result.output_path.parent
+            if self.result and self.result.output_path
+            else Path(self.settings.default_output_dir)
+        )
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Processed VPM Workbook",
+            str(start_dir),
+            "Excel Workbook (*.xlsx)",
+        )
+        if path:
+            self._load_processed_workbook(Path(path))
+
+    def _load_processed_workbook(self, workbook_path: Path) -> None:
+        self._set_busy("Loading workbook")
+        QApplication.processEvents()
+        try:
+            history_path = Path(self.settings.history_workbook)
+            history = (
+                VariantHistoryRepository(history_path)
+                if history_path.exists()
+                else None
+            )
+            state = ProcessedWorkbookLoader(
+                filter_engine=FilterEngine(
+                    production_rules(self.settings.artifact_rules)
+                ),
+                history=history,
+            ).load(workbook_path)
+        except Exception as exc:
+            self._set_ready()
+            self._log(f"Could not resume processed workbook: {exc}")
+            QMessageBox.critical(
+                self,
+                "Processed workbook could not be loaded",
+                f"{exc}\n\nChoose a workbook created by the current VPM Tolkning review workflow.",
+            )
+            return
+
+        self.result = state.result
+        self.evidence = state.evidence
+        self.database_skip_keys = state.database_skip_keys
+        self.workbook_write_pending = False
+        self._workbook_lock_warning_shown = False
+        self.output_edit.setText(str(workbook_path))
+        self.resume_edit.setText(str(workbook_path))
+        self.included_only_check.setChecked(False)
+        evidence_count = sum(len(items) for items in self.evidence.values())
+        searched = self.result.total_count - len(self.database_skip_keys)
+        self.selection_status.setText(
+            f"{len(self.database_skip_keys)} marked X; {searched} variants will be searched"
+        )
+        self.resume_status.setText(
+            f"Restored {self.result.total_count} variants, "
+            f"{len(self.database_skip_keys)} X selection(s), and "
+            f"{evidence_count} evidence result(s)."
+        )
+        self._refresh_metrics()
+        self._refresh_variant_table()
+        self._refresh_evidence_table()
+        self.load_selection_btn.setEnabled(True)
+        self._set_ready()
+        self.status_badge.setText("Workbook loaded")
+        self.status_badge.setStyleSheet(
+            f"background: {Palette.pale_green}; color: {Palette.green}; "
+            f"border: 1px solid {Palette.green}; border-radius: 12px; "
+            "padding: 5px 12px; font-weight: 700;"
+        )
+        self._log(f"Processed workbook restored: {workbook_path}")
+        self._switch_page(1)
+        QMessageBox.information(
+            self,
+            "Analysis restored",
+            f"Loaded {self.result.total_count} variants and {evidence_count} evidence result(s).\n\n"
+            "The analysis is ready in Variants and Evidence.",
+        )
 
     def _browser_review_finished(self, browser_evidence: dict) -> None:
         self._merge_browser_evidence(browser_evidence)
@@ -1632,6 +1745,7 @@ class MainWindow(QMainWindow):
         self.browser_review_btn.setEnabled(False)
         self.rewrite_btn.setEnabled(False)
         self.patient_excel_btn.setEnabled(False)
+        self.resume_btn.setEnabled(False)
         self.status_bar.showMessage(label)
 
     def _set_ready(self) -> None:
@@ -1644,6 +1758,7 @@ class MainWindow(QMainWindow):
         self.browser_review_btn.setEnabled(self.result is not None)
         self.rewrite_btn.setEnabled(self.result is not None)
         self.patient_excel_btn.setEnabled(self.result is not None)
+        self.resume_btn.setEnabled(True)
         self.status_bar.showMessage("Ready", 3000)
 
     def _update_process_state(self) -> None:

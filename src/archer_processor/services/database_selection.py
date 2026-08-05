@@ -48,7 +48,7 @@ def load_database_skip_keys(workbook_path: Path) -> set[str]:
             sample = str(row[sample_index] or "").strip()
             hgvsc = str(row[hgvsc_index] or "").strip()
             marker = str(row[skip_index] or "").strip().casefold()
-            if sample and hgvsc and marker == "x":
+            if sample and marker == "x":
                 skipped.add(f"{sample}|{hgvsc}")
         return skipped
     finally:

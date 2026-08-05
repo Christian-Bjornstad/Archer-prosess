@@ -46,7 +46,15 @@ class ArcherTsvReader:
         if not ok:
             raise ValueError("; ".join(errors))
         frame = pd.read_csv(path, sep="\t", low_memory=False)
-        return [self._row_to_variant(path, index, row.to_dict()) for index, row in frame.iterrows()]
+        return [
+            self.row_to_variant(path, index + 2, row.to_dict())
+            for index, row in frame.iterrows()
+        ]
+
+    def row_to_variant(
+        self, path: Path, source_row: int, row: dict[str, Any]
+    ) -> VariantRecord:
+        return self._row_to_variant(path, source_row - 2, row)
 
     def _row_to_variant(self, path: Path, index: int, row: dict[str, Any]) -> VariantRecord:
         ref, alt = self._parse_ref_alt(row.get("Ref/Alt Allele"))

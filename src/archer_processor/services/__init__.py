@@ -5,6 +5,7 @@ from .browser_review import (
 )
 from .database_search import DatabaseSearchService
 from .database_selection import load_database_skip_keys
+from .processed_workbook import ProcessedWorkbookLoader, ProcessedWorkbookState
 from .settings import AppSettings
 
 __all__ = [
@@ -13,5 +14,7 @@ __all__ = [
     "BrowserAutomationUnavailable",
     "BrowserReviewService",
     "DatabaseSearchService",
+    "ProcessedWorkbookLoader",
+    "ProcessedWorkbookState",
     "load_database_skip_keys",
 ]

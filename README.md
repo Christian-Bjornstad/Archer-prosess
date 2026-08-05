@@ -106,6 +106,15 @@ the file and retry, and the completed-search card shows **save pending** until t
 manual rewrite succeeds. The completed-search card otherwise remains visible so it
 is clear that every queued patient has finished.
 
+Use **Open Processed Workbook** on the Import page to resume a previous VPM
+session after restarting the application. The loader restores the original
+variant rows, recalculates the current include/exclude rules, reads all `X`
+selections from **With Artifacts**, and restores full evidence records and
+screenshot paths from the matching `*_browser_evidence` directory. When an audit
+file is unavailable, the compact evidence stored in the workbook is retained as
+a fallback. Subsequent evidence searches merge new source results with the
+restored sources instead of discarding earlier work.
+
 ## Patient Excel reports
 
 Use **Export Patient Excel Reports** to create one image-led workbook per DIT

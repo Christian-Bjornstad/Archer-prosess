@@ -26,6 +26,10 @@ the master design system.
 - Provider configuration is website-only. Do not expose API token controls or
   API readiness diagnostics in the application.
 - Patient output actions are Excel workbooks only; do not show PDF export.
+- The Import page offers two clearly separated paths: create a new review from
+  TSV as the primary action, or resume an existing processed VPM workbook in a
+  compact secondary card. A successful resume confirms what was restored and
+  moves the user directly to Variants.
 
 ## Visual language
 
