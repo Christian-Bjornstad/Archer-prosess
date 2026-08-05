@@ -100,7 +100,11 @@ then use **Load X Selections** in the app before collecting evidence.
 The orange and yellow row colors match the established workbook, and evidence
 does not increase row height. The workbook is rewritten automatically when the selected
 database/browser phases finish; the manual rewrite button remains available if
-the file was open in Excel during that save.
+the file was open in Excel during that save. A locked workbook no longer interrupts
+the application: the evidence remains in memory, one warning explains how to close
+the file and retry, and the completed-search card shows **save pending** until the
+manual rewrite succeeds. The completed-search card otherwise remains visible so it
+is clear that every queued patient has finished.
 
 ## Patient Excel reports
 

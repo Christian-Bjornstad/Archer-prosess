@@ -93,6 +93,54 @@ def test_review_filters_and_search_progress_are_visible(qt_app, tmp_path):
     assert window.run_progress.detail.text() == "Patient 3 is running"
 
 
+def test_locked_workbook_shows_warning_without_raising(qt_app, tmp_path, monkeypatch):
+    window = MainWindow()
+    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+    window.result = VariantProcessor().process(
+        fixture, "2026-08-01", tmp_path / "review.xlsx"
+    )
+    warnings = []
+
+    def locked_write():
+        raise PermissionError(13, "Permission denied", str(window.result.output_path))
+
+    monkeypatch.setattr(window, "_write_evidence_workbook", locked_write)
+    monkeypatch.setattr(
+        "archer_processor.gui.app.QMessageBox.warning",
+        lambda *args: warnings.append(args),
+    )
+
+    window._rewrite_workbook()
+
+    assert window.workbook_write_pending
+    assert len(warnings) == 1
+    assert warnings[0][1] == "Workbook is open in Excel"
+    assert "Evidence remains available in the app" in window.log.toPlainText()
+
+
+def test_completed_search_status_remains_visible(qt_app):
+    window = MainWindow()
+    window._update_run_progress(2, 2, "Completed patient")
+
+    window._complete_run_progress("Evidence search complete")
+
+    assert not window.run_progress.isHidden()
+    assert window.run_progress.title.text() == "Evidence search complete"
+    assert "ready for review" in window.run_progress.detail.text()
+    assert window.status_badge.text() == "Search complete"
+
+
+def test_completed_search_reports_pending_workbook_save(qt_app):
+    window = MainWindow()
+    window.workbook_write_pending = True
+    window._update_run_progress(1, 1, "Completed patient")
+
+    window._complete_run_progress("Evidence search complete")
+
+    assert "still open in Excel" in window.run_progress.detail.text()
+    assert window.status_badge.text() == "Search complete · save pending"
+
+
 def test_application_icon_is_packaged_and_loaded(qt_app):
     window = MainWindow()
 

@@ -407,6 +407,8 @@ class MainWindow(QMainWindow):
         self.processing_worker: ProcessingWorker | None = None
         self.database_worker: DatabaseWorker | None = None
         self.browser_worker: BrowserLoginWorker | BrowserReviewWorker | None = None
+        self.workbook_write_pending = False
+        self._workbook_lock_warning_shown = False
         self.setWindowTitle("VPM Tolkning")
         self.app_icon_path = (
             Path(__file__).resolve().parents[1] / "assets" / "vpm-tolkning-icon.png"
@@ -1315,7 +1317,13 @@ class MainWindow(QMainWindow):
     def _rewrite_workbook(self) -> None:
         if not self.result or not self.result.output_path:
             return
-        self._write_evidence_workbook()
+        if not self._try_write_evidence_workbook(show_errors=True):
+            return
+        if not self.run_progress.isHidden() and "complete" in self.run_progress.title.text().casefold():
+            self.run_progress.detail.setText(
+                "All queued patients have been processed and the workbook is updated."
+            )
+            self._set_search_complete_status(save_pending=False)
         QMessageBox.information(self, "Workbook Updated", f"Evidence written to:\n{self.result.output_path}")
 
     def _export_patient_excels(self) -> None:
@@ -1373,15 +1381,48 @@ class MainWindow(QMainWindow):
         )
 
     def _auto_rewrite_workbook(self) -> None:
-        try:
-            self._write_evidence_workbook()
+        if self._try_write_evidence_workbook(show_errors=False):
             if self.result and self.result.output_path:
                 self._log(f"Evidence workbook updated: {self.result.output_path}")
+
+    def _try_write_evidence_workbook(self, *, show_errors: bool) -> bool:
+        try:
+            self._write_evidence_workbook()
+        except OSError as exc:
+            if self._is_workbook_lock_error(exc):
+                self.workbook_write_pending = True
+                self._log(
+                    "Workbook update pending: close the file in Excel, then click "
+                    "Rewrite Workbook With Evidence. Evidence remains available in the app."
+                )
+                if show_errors or not self._workbook_lock_warning_shown:
+                    QMessageBox.warning(
+                        self,
+                        "Workbook is open in Excel",
+                        "The workbook could not be updated because it is open or locked.\n\n"
+                        "The evidence search will continue and the results remain in the app. "
+                        "Close the workbook in Excel, then click Rewrite Workbook With Evidence.",
+                    )
+                    self._workbook_lock_warning_shown = True
+                return False
+            self._report_workbook_write_error(exc, show_errors=show_errors)
+            return False
         except Exception as exc:
-            self._log(
-                "Could not update the workbook automatically. Close it in Excel "
-                f"and use Rewrite Workbook With Evidence. ({exc})"
-            )
+            self._report_workbook_write_error(exc, show_errors=show_errors)
+            return False
+        self.workbook_write_pending = False
+        self._workbook_lock_warning_shown = False
+        return True
+
+    @staticmethod
+    def _is_workbook_lock_error(exc: OSError) -> bool:
+        return isinstance(exc, PermissionError) or getattr(exc, "winerror", None) in {32, 33}
+
+    def _report_workbook_write_error(self, exc: Exception, *, show_errors: bool) -> None:
+        message = f"Could not update the evidence workbook: {exc}"
+        self._log(message)
+        if show_errors:
+            QMessageBox.critical(self, "Workbook update failed", message)
 
     def _worker_failed(self, message: str) -> None:
         self._set_ready()
@@ -1503,10 +1544,35 @@ class MainWindow(QMainWindow):
         self.run_progress.update_progress(current, total, detail)
 
     def _complete_run_progress(self, title: str) -> None:
+        self.run_progress.show()
         self.run_progress.title.setText(title)
-        self.run_progress.detail.setText("All queued patients have been processed.")
+        detail = "All queued patients have been processed. Results are ready for review."
+        if self.workbook_write_pending:
+            detail = (
+                "Search finished, but the workbook is still open in Excel. Close it, "
+                "then click Rewrite Workbook With Evidence."
+            )
+        self.run_progress.detail.setText(detail)
         self.run_progress.bar.setValue(self.run_progress.bar.maximum())
-        QTimer.singleShot(3500, self.run_progress.hide)
+        self._set_search_complete_status(save_pending=self.workbook_write_pending)
+
+    def _set_search_complete_status(self, *, save_pending: bool) -> None:
+        if save_pending:
+            self.status_badge.setText("Search complete · save pending")
+            self.status_badge.setStyleSheet(
+                f"background: {Palette.pale_yellow}; color: {Palette.yellow}; "
+                "border: 1px solid #E7CF91; border-radius: 12px; "
+                "padding: 5px 12px; font-weight: 700;"
+            )
+            self.status_bar.showMessage("Evidence search complete — workbook update pending")
+            return
+        self.status_badge.setText("Search complete")
+        self.status_badge.setStyleSheet(
+            f"background: {Palette.pale_green}; color: {Palette.green}; "
+            f"border: 1px solid {Palette.green}; border-radius: 12px; "
+            "padding: 5px 12px; font-weight: 700;"
+        )
+        self.status_bar.showMessage("Evidence search complete — results are ready")
 
     def _refresh_evidence_table(self) -> None:
         self.evidence_table.setRowCount(0)
@@ -1552,6 +1618,7 @@ class MainWindow(QMainWindow):
             )
 
     def _set_busy(self, label: str) -> None:
+        self.run_progress.hide()
         self.status_badge.setText(label)
         self.status_badge.setStyleSheet(
             f"background: {Palette.pale_blue}; color: {Palette.blue}; "
