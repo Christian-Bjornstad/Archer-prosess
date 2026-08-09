@@ -39,6 +39,8 @@ def test_database_tab_contains_current_sources(qt_app):
     assert window.database_scroll.widgetResizable()
     assert window.browser_signin_btn.isEnabled()
     assert not window.browser_review_btn.isEnabled()
+    assert not window.stop_search_btn.isEnabled()
+    assert window.stop_search_btn.text() == "Stop Search"
     assert not window.patient_excel_btn.isEnabled()
     assert not hasattr(window, "patient_pdf_btn")
     assert not hasattr(window, "clinvar_key_edit")
@@ -379,5 +381,41 @@ def test_database_worker_completes_all_sources_before_next_patient(
     assert progress[0][:2] == (0, 2)
     assert progress[-1][:2] == (2, 2)
     # No API query is delayed; the only pause is before patient 2's website phase.
-    assert len(slept) == 1
-    assert 10 <= slept[0] <= 20
+    assert 10 <= sum(slept) <= 20
+    assert all(delay <= 0.25 for delay in slept)
+
+
+def test_stop_search_requests_safe_interruption_and_keeps_status(
+    qt_app, tmp_path, monkeypatch
+):
+    window = MainWindow()
+    worker = DatabaseWorker([], [], [], tmp_path / "evidence", window.settings)
+
+    class ActiveThread:
+        def __init__(self):
+            self.interrupted = False
+
+        def isRunning(self):
+            return True
+
+        def requestInterruption(self):
+            self.interrupted = True
+
+    thread = ActiveThread()
+    window.database_worker = worker
+    window.database_thread = thread
+    monkeypatch.setattr(window, "_auto_rewrite_workbook", lambda: None)
+
+    window._set_busy("Searching")
+    assert window.stop_search_btn.isEnabled()
+    window._stop_evidence_search()
+
+    assert thread.interrupted
+    assert window.stop_search_btn.text() == "Stopping…"
+    assert "already collected" in window.run_progress.detail.text()
+
+    window._search_cancelled()
+
+    assert not window.stop_search_btn.isEnabled()
+    assert window.status_badge.text() == "Search stopped"
+    assert "kept" in window.run_progress.detail.text()

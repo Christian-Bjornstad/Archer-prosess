@@ -44,6 +44,10 @@ class BrowserAutomationUnavailable(RuntimeError):
     """The optional visible-browser runtime is not installed or cannot start."""
 
 
+class BrowserReviewCancelled(BaseException):
+    """A cooperative browser review cancellation requested by the user."""
+
+
 class MtbpReportTimeout(TimeoutError):
     """MTBP accepted a batch but did not publish its report before the deadline."""
 
@@ -77,6 +81,7 @@ class BrowserReviewService:
         franklin_attempts: int = 3,
         request_delay_ms: int = 10_000,
         request_delay_max_ms: int | None = 20_000,
+        stop_requested: Callable[[], bool] | None = None,
     ) -> None:
         self.profile_root = profile_root or Path.home() / ".archer-prosess" / "browser_profiles"
         self.channel = channel
@@ -100,6 +105,7 @@ class BrowserReviewService:
             if request_delay_max_ms is None
             else request_delay_max_ms,
         )
+        self.stop_requested = stop_requested or (lambda: False)
         self._cosmic_cache: dict[str, DatabaseEvidence] = {}
         self._mtbp_rejected_transcript_queries: set[str] = set()
 
@@ -209,6 +215,7 @@ class BrowserReviewService:
         }
         artifact_root.mkdir(parents=True, exist_ok=True)
         for database_index, database in enumerate(database_list):
+            self._check_cancelled()
             if progress:
                 progress(f"Browser review: starting {database}")
             database_results = self._search_database(
@@ -219,6 +226,7 @@ class BrowserReviewService:
             )
             for key, evidence in database_results.items():
                 results[key].append(evidence)
+            self._check_cancelled()
             if database_index < len(database_list) - 1:
                 self._wait_between_databases(
                     database,
@@ -297,6 +305,7 @@ class BrowserReviewService:
                             for variant in variants
                         }
                 for index, variant in enumerate(variants, start=1):
+                    self._check_cancelled()
                     key = self.variant_key(variant)
                     query_url = self.query_url(database, variant)
                     if not query_url:
@@ -390,6 +399,7 @@ class BrowserReviewService:
                     }
 
                 for index, variant in enumerate(variants, start=1):
+                    self._check_cancelled()
                     key = self.variant_key(variant)
                     query_url = self.query_url("COSMIC", variant)
                     if not query_url:
@@ -540,6 +550,7 @@ class BrowserReviewService:
             page = context.pages[0] if context.pages else context.new_page()
             try:
                 for index, variant in enumerate(variants, start=1):
+                    self._check_cancelled()
                     key = self.variant_key(variant)
                     if progress:
                         progress(
@@ -797,6 +808,7 @@ class BrowserReviewService:
                         }
 
                 for index, variant in enumerate(variants, start=1):
+                    self._check_cancelled()
                     key = self.variant_key(variant)
                     query = _franklin_search_query(variant)
                     if not query:
@@ -829,6 +841,7 @@ class BrowserReviewService:
                             search.press("Enter")
                             self._open_franklin_resolved_variant(page, variant)
                             for _ in range(60):
+                                self._check_cancelled()
                                 last_text = page.locator("body").inner_text()
                                 if (
                                     self._franklin_result_ready(page, last_text)
@@ -845,7 +858,7 @@ class BrowserReviewService:
                                     assessment = self._capture_franklin_assessment(
                                         page, variant, artifact_directory
                                     )
-                                    evidence.raw.setdefault("screenshots", []).append(
+                                    evidence.raw.setdefault("screenshots", []).extend(
                                         assessment
                                     )
                                 except Exception as exc:
@@ -1006,6 +1019,7 @@ class BrowserReviewService:
         """Run independent MTBP reports so each screenshot belongs to one variant."""
         results: dict[str, DatabaseEvidence] = {}
         for index, variant in enumerate(variants, start=1):
+            self._check_cancelled()
             if progress:
                 progress(
                     f"MTBP variant {index}/{len(variants)}: "
@@ -1027,7 +1041,7 @@ class BrowserReviewService:
                         progress(
                             f"MTBP: safety buffer {delay_ms / 1_000:.1f}s before next variant"
                         )
-                    time.sleep(delay_ms / 1_000)
+                    self._interruptible_sleep(delay_ms / 1_000)
         return results
 
     def _search_mtbp_batch(
@@ -1573,6 +1587,7 @@ class BrowserReviewService:
         deadline = time.monotonic() + self.analysis_timeout_ms / 1_000
         next_update = time.monotonic() + 60
         while time.monotonic() < deadline:
+            self._check_cancelled()
             if report_pattern.fullmatch(page.url):
                 return
             remaining_ms = max(1, int((deadline - time.monotonic()) * 1_000))
@@ -1717,13 +1732,12 @@ class BrowserReviewService:
                 url=current_url,
             )
         if database == "Franklin":
-            screenshots = self._capture_franklin_somatic_pages(
+            screenshots = self._capture_franklin_computed_pages(
                 page, variant, artifact_directory
             )
             screenshot_path = Path(screenshots[0]["path"])
-            # The somatic route opens on clinical evidence. Capture that tab,
-            # switch to Computed Classification, and only then parse the visible
-            # suggested classification text.
+            # Parse the ACMG view after both Computed Classification subtabs have
+            # been captured and the ACMG subtab has been restored.
             body_text = page.locator("body").inner_text(
                 timeout=self.navigation_timeout_ms
             )
@@ -1771,20 +1785,14 @@ class BrowserReviewService:
             "nodes => nodes.forEach(node => node.remove())"
         )
 
-    def _capture_franklin_somatic_pages(
+    def _capture_franklin_computed_pages(
         self,
         page: Any,
         variant: VariantRecord,
         artifact_directory: Path,
     ) -> list[dict[str, str]]:
-        """Capture both opening somatic tabs in their visible order."""
-        base_path = self._screenshot_path(
-            artifact_directory, "Franklin", variant
-        )
+        """Capture the ACMG and oncogenic Computed Classification subtabs."""
         try:
-            somatic_tab = page.get_by_role(
-                "tab", name="Somatic Clinical Evidence", exact=True
-            )
             computed_tab = page.get_by_role(
                 "tab", name="Computed Classification", exact=True
             )
@@ -1792,35 +1800,65 @@ class BrowserReviewService:
             return self._capture_franklin_classification(
                 page, variant, artifact_directory
             )
-        if somatic_tab.count() != 1 or computed_tab.count() != 1:
+        if computed_tab.count() != 1:
             return self._capture_franklin_classification(
                 page, variant, artifact_directory
             )
-
-        somatic_tab.click()
-        somatic_scroller = page.locator("div.evidences-container")
-        somatic_scroller.wait_for(
-            state="visible", timeout=self.navigation_timeout_ms
-        )
-        page.wait_for_timeout(500)
-        screenshots = self._capture_franklin_scroll_tiles(
-            page,
-            somatic_scroller,
-            base_path,
-            "Somatic clinical evidence",
-        )
 
         computed_tab.click()
         page.get_by_text("Suggested classification", exact=True).first.wait_for(
             state="visible", timeout=self.navigation_timeout_ms
         )
         page.wait_for_timeout(500)
+        self._close_franklin_side_panel(page)
+        self._activate_franklin_classification_subtab(page, "ACMG Classification")
+        screenshots = self._capture_franklin_classification(
+            page, variant, artifact_directory
+        )
+        self._activate_franklin_classification_subtab(
+            page, "Oncogenic Classification"
+        )
         screenshots.extend(
-            self._capture_franklin_classification(
+            self._capture_franklin_oncogenic_classification(
                 page, variant, artifact_directory
             )
         )
+        # Keep ACMG visible so the existing parser reads the germline-style
+        # suggested classification rather than the oncogenic label.
+        self._activate_franklin_classification_subtab(page, "ACMG Classification")
         return screenshots
+
+    def _close_franklin_side_panel(self, page: Any) -> None:
+        try:
+            close_button = page.locator("gnx-mini-app-header img.close-btn")
+            if close_button.count() == 1 and close_button.is_visible():
+                close_button.click()
+                page.wait_for_timeout(150)
+        except Exception:
+            pass
+        page.evaluate("window.scrollTo(0, window.scrollY)")
+
+    def _activate_franklin_classification_subtab(
+        self, page: Any, label: str
+    ) -> None:
+        tab = page.get_by_text(label, exact=True)
+        if tab.count() != 1:
+            raise RuntimeError(f"Franklin subtab was not uniquely available: {label}")
+        # Franklin attaches the subtab handler to the parent span. A physical
+        # click on the child text becomes unreliable after the internal ACMG
+        # evidence scroller has moved, while clicking the owning tab container
+        # consistently switches the Angular view.
+        tab.evaluate("el => { el.parentElement.click(); return true; }")
+        target_selector = (
+            "gnx-result-page"
+            if label == "ACMG Classification"
+            else "gnx-oncogenic-classification-app"
+        )
+        page.locator(target_selector).wait_for(
+            state="visible", timeout=self.navigation_timeout_ms
+        )
+        page.evaluate("window.scrollTo(0, window.scrollY)")
+        page.wait_for_timeout(250)
 
     def _capture_franklin_classification(
         self,
@@ -1828,68 +1866,90 @@ class BrowserReviewService:
         variant: VariantRecord,
         artifact_directory: Path,
     ) -> list[dict[str, str]]:
-        """Capture computed ACMG evidence through De Novo Data only."""
+        """Capture the ACMG overview and complete evidence cards through De Novo."""
         original_path = self._screenshot_path(
             artifact_directory, "Franklin", variant
         )
         base_path = original_path.with_name(
             f"{original_path.stem}-computed{original_path.suffix}"
         )
-        try:
-            close_button = page.locator("gnx-mini-app-header img.close-btn")
-            if close_button.count() == 1 and close_button.is_visible():
-                close_button.click()
-                page.wait_for_timeout(150)
-        except Exception:
-            # The side panel is optional; evidence capture must still proceed.
-            pass
         panel = page.locator("gnx-result-page")
         if panel.count() != 1:
             page.screenshot(path=str(base_path), full_page=True)
             return [
                 {
-                    "label": "Full computed-classification page",
+                    "label": "Full ACMG classification page",
                     "path": str(base_path),
                     "url": page.url,
                 }
             ]
 
         panel.wait_for(state="visible", timeout=self.navigation_timeout_ms)
-        de_novo = page.get_by_text("De Novo Data", exact=True)
-        if de_novo.count() != 1:
+        panel.evaluate("el => { el.scrollTop = 0; }")
+        panel.screenshot(path=str(base_path))
+        screenshots = [
+            {
+                "label": "ACMG classification overview",
+                "path": str(base_path),
+                "url": page.url,
+            }
+        ]
+        categories = panel.locator("gnx-result-category")
+        category_texts = categories.all_inner_texts()
+        de_novo_indexes = [
+            index
+            for index, text in enumerate(category_texts)
+            if text.strip().splitlines()[0].strip() == "De Novo Data"
+        ]
+        if len(de_novo_indexes) != 1:
             page.screenshot(path=str(base_path), full_page=True)
             return [
                 {
-                    "label": "Computed classification (De Novo boundary unavailable)",
+                    "label": "ACMG classification (De Novo boundary unavailable)",
                     "path": str(base_path),
                     "url": page.url,
                 }
             ]
-        capture_height = int(
-            de_novo.evaluate(
-                """
-                el => {
-                  const card = el.closest('.category-box') || el;
-                  const panel = el.closest('gnx-result-page');
-                  if (!panel) return 0;
-                  return Math.ceil(
-                    card.getBoundingClientRect().bottom
-                    - panel.getBoundingClientRect().top
-                    + panel.scrollTop
-                  );
-                }
-                """
+        for index in range(de_novo_indexes[0] + 1):
+            category = categories.nth(index)
+            title = category_texts[index].strip().splitlines()[0].strip()
+            screenshot_path = base_path.with_name(
+                f"{base_path.stem}-evidence-{index + 1:02d}{base_path.suffix}"
             )
-            or 0
+            category.scroll_into_view_if_needed()
+            page.wait_for_timeout(200)
+            category.screenshot(path=str(screenshot_path))
+            screenshots.append(
+                {
+                    "label": f"ACMG evidence: {title}",
+                    "path": str(screenshot_path),
+                    "url": page.url,
+                }
+            )
+        panel.evaluate("el => { el.scrollTop = 0; }")
+        return screenshots
+
+    def _capture_franklin_oncogenic_classification(
+        self,
+        page: Any,
+        variant: VariantRecord,
+        artifact_directory: Path,
+    ) -> list[dict[str, str]]:
+        """Capture the complete visible oncogenic-classification scroller."""
+        original_path = self._screenshot_path(
+            artifact_directory, "Franklin", variant
         )
-        if capture_height <= 0:
-            raise RuntimeError("Franklin De Novo Data boundary could not be measured.")
+        base_path = original_path.with_name(
+            f"{original_path.stem}-oncogenic{original_path.suffix}"
+        )
+        panel = page.locator("gnx-oncogenic-classification-app")
+        if panel.count() != 1:
+            raise RuntimeError("Franklin oncogenic classification panel was unavailable.")
         return self._capture_franklin_scroll_tiles(
             page,
             panel,
             base_path,
-            "Computed classification through De Novo Data",
-            capture_height=capture_height,
+            "Oncogenic classification",
         )
 
     def _capture_franklin_scroll_tiles(
@@ -1898,8 +1958,6 @@ class BrowserReviewService:
         scroller: Any,
         base_path: Path,
         label: str,
-        *,
-        capture_height: int | None = None,
     ) -> list[dict[str, str]]:
         """Capture unique, contiguous slices from an internal Franklin scroller."""
         scroller.wait_for(state="visible", timeout=self.navigation_timeout_ms)
@@ -1909,7 +1967,7 @@ class BrowserReviewService:
         box = scroller.bounding_box()
         client_height = int(dimensions.get("clientHeight") or 0)
         scroll_height = int(dimensions.get("scrollHeight") or 0)
-        limit = min(scroll_height, int(capture_height or scroll_height))
+        limit = scroll_height
         if box is None or client_height <= 0 or limit <= 0:
             raise RuntimeError("Franklin scrollable evidence panel could not be measured.")
 
@@ -1917,18 +1975,27 @@ class BrowserReviewService:
         screenshots: list[dict[str, str]] = []
         try:
             for index, start in enumerate(starts, start=1):
-                actual_scroll = int(
-                    scroller.evaluate(
-                        "(el, top) => { el.scrollTop = top; return el.scrollTop; }",
-                        start,
-                    )
-                    or 0
+                scroller.evaluate(
+                    "(el, top) => { el.scrollTop = top; return el.scrollTop; }",
+                    start,
                 )
                 page.wait_for_timeout(200)
+                # Franklin may snap the internal panel to a category boundary
+                # after the assignment. Measure the settled position so the
+                # last tile ends exactly at the requested evidence boundary.
+                actual_scroll = int(
+                    scroller.evaluate("el => el.scrollTop") or 0
+                )
+                current_box = scroller.bounding_box()
+                if current_box is None:
+                    raise RuntimeError(
+                        "Franklin evidence panel became hidden during capture."
+                    )
                 clip_offset = max(0, start - actual_scroll)
+                content_start = max(start, actual_scroll)
                 clip_height = min(
                     client_height - clip_offset,
-                    limit - start,
+                    limit - content_start,
                 )
                 if clip_height <= 0:
                     continue
@@ -1942,9 +2009,9 @@ class BrowserReviewService:
                 page.screenshot(
                     path=str(screenshot_path),
                     clip={
-                        "x": box["x"],
-                        "y": box["y"] + clip_offset,
-                        "width": box["width"],
+                        "x": current_box["x"],
+                        "y": current_box["y"] + clip_offset,
+                        "width": current_box["width"],
                         "height": clip_height,
                     },
                 )
@@ -1971,7 +2038,7 @@ class BrowserReviewService:
         page: Any,
         variant: VariantRecord,
         artifact_directory: Path,
-    ) -> dict[str, str]:
+    ) -> list[dict[str, str]]:
         variant_url = page.url.split("?", 1)[0]
         if not re.search(r"/clinical-db/variant/snp(?:Tumor)?/", variant_url):
             raise ValueError("Franklin did not resolve to a variant page.")
@@ -2006,41 +2073,98 @@ class BrowserReviewService:
             raise ValueError(
                 "Franklin prediction/population evidence panels were ambiguous."
             )
-        prediction_heading.evaluate(
-            "el => el.scrollIntoView({block: 'start'})"
-        )
-        page.evaluate("window.scrollBy(0, -20)")
-        boxes = [
-            prediction_section.bounding_box(),
-            population_section.bounding_box(),
-        ]
-        if any(box is None for box in boxes):
-            raise ValueError("Franklin assessment panels were not visible.")
-        visible_boxes = [box for box in boxes if box is not None]
-        left = min(box["x"] for box in visible_boxes)
-        top = min(box["y"] for box in visible_boxes)
-        right = max(box["x"] + box["width"] for box in visible_boxes)
-        bottom = max(box["y"] + box["height"] for box in visible_boxes)
         base_path = self._screenshot_path(
             artifact_directory, "Franklin", variant
         )
-        screenshot_path = base_path.with_name(
-            f"{base_path.stem}-assessment{base_path.suffix}"
-        )
-        page.screenshot(
-            path=str(screenshot_path),
-            clip={
-                "x": left,
-                "y": top,
-                "width": right - left,
-                "height": bottom - top,
-            },
-        )
-        return {
-            "label": "Predictions and population frequencies",
-            "path": str(screenshot_path),
-            "url": assessment_url,
-        }
+        screenshots: list[dict[str, str]] = []
+        for label, heading, section, suffix in (
+            ("Predictions", prediction_heading, prediction_section, "predictions"),
+            (
+                "Population frequencies",
+                population_heading,
+                population_section,
+                "population-frequencies",
+            ),
+        ):
+            self._wait_for_franklin_section_stability(page, section)
+            heading.evaluate("el => el.scrollIntoView({block: 'start'})")
+            page.evaluate("window.scrollTo(0, Math.max(0, window.scrollY - 20))")
+            screenshot_path = base_path.with_name(
+                f"{base_path.stem}-{suffix}{base_path.suffix}"
+            )
+            heading_box = heading.bounding_box()
+            section_box = section.bounding_box()
+            if heading_box is None or section_box is None:
+                raise ValueError(f"Franklin {label} panel was not visible.")
+            dimensions = section.evaluate(
+                """
+                el => {
+                  const root = el.getBoundingClientRect();
+                  const descendants = [el, ...el.querySelectorAll('*')]
+                    .map(node => node.getBoundingClientRect())
+                    .filter(rect => rect.width > 0 && rect.height > 0);
+                  return {
+                    width: Math.max(
+                      el.scrollWidth,
+                      ...descendants.map(rect => rect.right - root.left)
+                    ),
+                    height: Math.max(
+                      el.scrollHeight,
+                      ...descendants.map(rect => rect.bottom - root.top)
+                    )
+                  };
+                }
+                """
+            )
+            left = min(float(heading_box["x"]), float(section_box["x"]))
+            top = min(float(heading_box["y"]), float(section_box["y"]))
+            right = max(
+                float(heading_box["x"] + heading_box["width"]),
+                float(section_box["x"])
+                + max(float(section_box["width"]), float(dimensions.get("width") or 0)),
+            )
+            bottom = max(
+                float(heading_box["y"] + heading_box["height"]),
+                float(section_box["y"])
+                + max(float(section_box["height"]), float(dimensions.get("height") or 0)),
+            )
+            clip_top = max(0, top - 64)
+            clip_left = max(0, left)
+            page.screenshot(
+                path=str(screenshot_path),
+                clip={
+                    "x": clip_left,
+                    "y": clip_top,
+                    "width": right - clip_left + 16,
+                    "height": bottom - clip_top,
+                },
+            )
+            screenshots.append(
+                {"label": label, "path": str(screenshot_path), "url": assessment_url}
+            )
+        return screenshots
+
+    def _wait_for_franklin_section_stability(self, page: Any, section: Any) -> None:
+        """Wait until a dynamic Franklin assessment panel stops changing."""
+        previous: tuple[int, int] | None = None
+        stable_reads = 0
+        for _ in range(8):
+            self._check_cancelled()
+            state = section.evaluate(
+                "el => ({height: el.scrollHeight, textLength: el.innerText.trim().length})"
+            )
+            current = (
+                int(state.get("height") or 0),
+                int(state.get("textLength") or 0),
+            )
+            if current == previous and current[0] > 0 and current[1] > 0:
+                stable_reads += 1
+                if stable_reads >= 2:
+                    return
+            else:
+                stable_reads = 0
+            previous = current
+            page.wait_for_timeout(500)
 
     def _capture_mtbp_variant_screenshot(
         self,
@@ -2136,7 +2260,7 @@ class BrowserReviewService:
             progress(
                 f"{database}: safety buffer {delay_ms / 1_000:.1f}s before next variant"
             )
-        page.wait_for_timeout(delay_ms)
+        self._interruptible_page_wait(page, delay_ms)
 
     def _wait_between_databases(
         self,
@@ -2153,7 +2277,29 @@ class BrowserReviewService:
                 f"Safety buffer {delay_ms / 1_000:.1f}s between "
                 f"{current_database} and {next_database}"
             )
-        time.sleep(delay_ms / 1_000)
+        self._interruptible_sleep(delay_ms / 1_000)
+
+    def _check_cancelled(self) -> None:
+        if self.stop_requested():
+            raise BrowserReviewCancelled("Evidence search stopped by user.")
+
+    def _interruptible_page_wait(self, page: Any, milliseconds: int) -> None:
+        remaining = max(0, int(milliseconds))
+        while remaining:
+            self._check_cancelled()
+            chunk = min(250, remaining)
+            page.wait_for_timeout(chunk)
+            remaining -= chunk
+        self._check_cancelled()
+
+    def _interruptible_sleep(self, seconds: float) -> None:
+        remaining = max(0.0, seconds)
+        while remaining > 0:
+            self._check_cancelled()
+            chunk = min(0.25, remaining)
+            time.sleep(chunk)
+            remaining -= chunk
+        self._check_cancelled()
 
     def _screenshot_path(
         self, artifact_directory: Path, database: str, variant: VariantRecord

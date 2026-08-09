@@ -47,6 +47,10 @@ the master design system.
 - Primary actions remain textual, keyboard reachable, and at least 44 px high.
 - Long evidence searches show patient-level determinate progress plus the
   active patient, variant count, and source count.
+- Place a textual red-outline **Stop Search** control beside the evidence run
+  action. Keep it disabled while idle, change it to **Stopping…** after use,
+  interrupt cooperatively, and retain completed evidence with a persistent
+  stopped-state explanation.
 - Source selection, state, and warnings are communicated by text as well as
   colour.
 - The Variants page shows only total, included, and excluded counts. Do not add

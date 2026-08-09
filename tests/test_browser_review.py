@@ -5,6 +5,7 @@ import pytest
 from archer_processor.io import ArcherTsvReader
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
 from archer_processor.services.browser_review import (
+    BrowserReviewCancelled,
     BrowserReviewService,
     FRANKLIN_ASSESSMENT_RENDER_BUFFER_MS,
     _cosmic_identifier,
@@ -203,8 +204,10 @@ def test_browser_safety_buffer_randomizes_queries_and_provider_switches(
     )
 
     assert random_bounds == [(15_000, 30_000), (15_000, 30_000)]
-    assert page.waits == [23_400]
-    assert slept == [23.4]
+    assert sum(page.waits) == 23_400
+    assert all(wait <= 250 for wait in page.waits)
+    assert sum(slept) == pytest.approx(23.4)
+    assert all(wait <= 0.25 for wait in slept)
     assert "23.4s before next variant" in progress[0]
     assert "23.4s between OncoKB and Franklin" in progress[1]
 
@@ -450,9 +453,7 @@ def test_franklin_primary_capture_uses_full_page(tmp_path):
 
     assert evidence.status == "found"
     assert page.capture["full_page"] is True
-    assert evidence.raw["screenshots"][0]["label"] == (
-        "Full computed-classification page"
-    )
+    assert evidence.raw["screenshots"][0]["label"] == "Full ACMG classification page"
 
 
 def test_franklin_assessment_waits_for_dynamic_panels_before_capture(tmp_path):
@@ -469,9 +470,14 @@ def test_franklin_assessment_waits_for_dynamic_panels_before_capture(tmp_path):
         def evaluate(self, script):
             pass
 
+        def bounding_box(self):
+            top = 80 if self.name == "Predictions" else 280
+            return {"x": 0, "y": top, "width": 900, "height": 40}
+
     class Section:
         def __init__(self, heading):
             self.heading = heading
+            self.captures = []
 
         def count(self):
             return 1
@@ -479,6 +485,14 @@ def test_franklin_assessment_waits_for_dynamic_panels_before_capture(tmp_path):
         def bounding_box(self):
             top = 100 if self.heading.name == "Predictions" else 300
             return {"x": 20, "y": top, "width": 900, "height": 180}
+
+        def evaluate(self, script):
+            if "scrollWidth" in script:
+                return {"width": 980, "height": 180}
+            return {"height": 180, "textLength": 250}
+
+        def screenshot(self, **kwargs):
+            self.captures.append(kwargs)
 
     class Sections:
         def filter(self, *, has):
@@ -489,7 +503,7 @@ def test_franklin_assessment_waits_for_dynamic_panels_before_capture(tmp_path):
 
         def __init__(self):
             self.waits = []
-            self.capture = None
+            self.capture = []
 
         def goto(self, url, **kwargs):
             self.url = url
@@ -508,25 +522,151 @@ def test_franklin_assessment_waits_for_dynamic_panels_before_capture(tmp_path):
             pass
 
         def screenshot(self, **kwargs):
-            self.capture = kwargs
+            self.capture.append(kwargs)
 
     page = Page()
 
-    screenshot = service._capture_franklin_assessment(page, variant, tmp_path)
+    screenshots = service._capture_franklin_assessment(page, variant, tmp_path)
 
-    assert page.waits == [FRANKLIN_ASSESSMENT_RENDER_BUFFER_MS]
+    assert page.waits[0] == FRANKLIN_ASSESSMENT_RENDER_BUFFER_MS
+    assert page.waits[1:] == [500, 500, 500, 500]
     assert FRANKLIN_ASSESSMENT_RENDER_BUFFER_MS == 5_000
-    assert page.capture is not None
-    assert screenshot["label"] == "Predictions and population frequencies"
+    assert [item["label"] for item in screenshots] == [
+        "Predictions",
+        "Population frequencies",
+    ]
+    assert screenshots[0]["path"].endswith("-predictions.png")
+    assert screenshots[1]["path"].endswith("-population-frequencies.png")
+    assert len(page.capture) == 2
+    assert all(item["clip"]["width"] == 1016 for item in page.capture)
 
 
-def test_franklin_classification_capture_scrolls_complete_panel(tmp_path):
+def test_franklin_computed_capture_uses_both_subtabs_and_skips_somatic(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+    selected = []
+    requested_tabs = []
+
+    class Locator:
+        def __init__(self, label=""):
+            self.label = label
+
+        @property
+        def first(self):
+            return self
+
+        def count(self):
+            return 1
+
+        def is_visible(self):
+            return False
+
+        def click(self):
+            selected.append(self.label)
+
+        def click_physical(self):
+            selected.append(self.label)
+
+        def evaluate(self, script):
+            selected.append(self.label)
+            return True
+
+        def wait_for(self, **kwargs):
+            pass
+
+    class Page:
+        url = "https://franklin.genoox.com/clinical-db/variant/snpTumor/example"
+
+        def get_by_role(self, role, *, name, exact):
+            requested_tabs.append(name)
+            return Locator(name)
+
+        def get_by_text(self, text, *, exact):
+            return Locator(text)
+
+        def locator(self, selector):
+            assert selector in {
+                "gnx-mini-app-header img.close-btn",
+                "gnx-result-page",
+                "gnx-oncogenic-classification-app",
+            }
+            return Locator()
+
+        def wait_for_timeout(self, milliseconds):
+            pass
+
+        def evaluate(self, script):
+            pass
+
+    monkeypatch.setattr(
+        service,
+        "_capture_franklin_classification",
+        lambda *args: [{"label": "ACMG", "path": "acmg.png", "url": Page.url}],
+    )
+    monkeypatch.setattr(
+        service,
+        "_capture_franklin_oncogenic_classification",
+        lambda *args: [
+            {"label": "Oncogenic", "path": "oncogenic.png", "url": Page.url}
+        ],
+    )
+
+    screenshots = service._capture_franklin_computed_pages(
+        Page(), variant, tmp_path
+    )
+
+    assert requested_tabs == ["Computed Classification"]
+    assert "Somatic Clinical Evidence" not in requested_tabs
+    assert selected == [
+        "Computed Classification",
+        "ACMG Classification",
+        "Oncogenic Classification",
+        "ACMG Classification",
+    ]
+    assert [item["label"] for item in screenshots] == ["ACMG", "Oncogenic"]
+
+
+def test_browser_review_can_be_cancelled_before_opening_edge(tmp_path):
+    variant = ArcherTsvReader().read(FIXTURE)[0]
+    service = BrowserReviewService(
+        profile_root=tmp_path,
+        stop_requested=lambda: True,
+    )
+
+    with pytest.raises(BrowserReviewCancelled):
+        service.search_variants([variant], ["Franklin"], tmp_path / "evidence")
+
+
+def test_franklin_classification_capture_ends_with_complete_de_novo_card(tmp_path):
     variant = ArcherTsvReader().read(FIXTURE)[3]
     service = BrowserReviewService(profile_root=tmp_path)
 
+    captures = []
+
+    class Category:
+        def __init__(self, index):
+            self.index = index
+
+        def screenshot(self, **kwargs):
+            captures.append((self.index, kwargs["path"]))
+
+        def scroll_into_view_if_needed(self):
+            pass
+
+    class Categories:
+        def all_inner_texts(self):
+            return [
+                "Effect on Protein\nPVS1\nStrong",
+                "De Novo Data\nPS2\nStrong",
+                "Population Data\nCriteria unmet",
+            ]
+
+        def nth(self, index):
+            return Category(index)
+
     class Panel:
-        def __init__(self):
-            self.positions = []
 
         def count(self):
             return 1
@@ -535,25 +675,16 @@ def test_franklin_classification_capture_scrolls_complete_panel(tmp_path):
             pass
 
         def evaluate(self, script, argument=None):
-            if "clientHeight" in script:
-                return {"clientHeight": 400, "scrollHeight": 1000}
-            actual = 0 if argument is None else min(argument, 600)
-            self.positions.append(actual)
-            return actual
+            pass
 
-        def bounding_box(self):
-            return {"x": 10, "y": 200, "width": 1200, "height": 400}
+        def screenshot(self, **kwargs):
+            captures.append(("overview", kwargs["path"]))
+
+        def locator(self, selector):
+            assert selector == "gnx-result-category"
+            return Categories()
 
     panel = Panel()
-
-    class DeNovo:
-        def count(self):
-            return 1
-
-        def evaluate(self, script):
-            assert "category-box" in script
-            return 900
-
     class Page:
         url = "https://franklin.genoox.com/clinical-db/variant/snp/example"
 
@@ -561,26 +692,14 @@ def test_franklin_classification_capture_scrolls_complete_panel(tmp_path):
             self.captures = []
 
         def locator(self, selector):
-            if selector == "gnx-result-page":
-                return panel
-
-            class MissingCloseButton:
-                def count(self):
-                    return 0
-
-            assert selector == "gnx-mini-app-header img.close-btn"
-            return MissingCloseButton()
-
-        def wait_for_timeout(self, milliseconds):
-            assert milliseconds == 200
-
-        def get_by_text(self, text, *, exact):
-            assert text == "De Novo Data"
-            assert exact
-            return DeNovo()
+            assert selector == "gnx-result-page"
+            return panel
 
         def screenshot(self, **kwargs):
             self.captures.append(kwargs)
+
+        def wait_for_timeout(self, milliseconds):
+            assert milliseconds == 200
 
     page = Page()
     screenshots = service._capture_franklin_classification(
@@ -588,15 +707,13 @@ def test_franklin_classification_capture_scrolls_complete_panel(tmp_path):
     )
 
     assert len(screenshots) == 3
-    assert panel.positions == [0, 400, 600, 0]
-    assert screenshots[0]["label"].endswith("(1 of 3)")
-    assert screenshots[-1]["label"].endswith("(3 of 3)")
-    assert [capture["clip"]["height"] for capture in page.captures] == [
-        400,
-        400,
-        100,
+    assert [item["label"] for item in screenshots] == [
+        "ACMG classification overview",
+        "ACMG evidence: Effect on Protein",
+        "ACMG evidence: De Novo Data",
     ]
-    assert page.captures[-1]["clip"]["y"] == 400
+    assert [capture[0] for capture in captures] == ["overview", 0, 1]
+    assert not any("Population" in item["label"] for item in screenshots)
 
 
 def test_franklin_search_explicitly_selects_hg19_and_somatic(tmp_path):

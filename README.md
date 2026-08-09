@@ -16,7 +16,7 @@ Current database status:
 - ClinVar: public website resolution followed by a focused browser capture of the variant title and germline/somatic classification summary.
 - COSMIC: authenticated browser lookup by the Archer `COSMICID`, capturing the mutation Overview, Tissue distribution, and Samples filtered to `lymphoid`. The older NLM Clinical Tables v4 lookup remains in the service for basic/public records, but it does not provide these full website panels.
 - OncoKB: signed-in website lookup using the serial Microsoft Edge workflow.
-- Franklin: signed-in website lookup that explicitly searches GRCh37/hg19 in Somatic mode, verifies the returned variant identity, and imports only the suggested classification. It captures the complete Somatic Clinical Evidence scroller, then Computed Classification through De Novo Data (excluding Add More Evidence), followed by the prediction/population panels after their render buffer.
+- Franklin: signed-in website lookup that explicitly searches GRCh37/hg19 in Somatic mode, verifies the returned variant identity, and imports only the suggested classification. It captures both Computed Classification subtabs: the ACMG overview and complete evidence cards through De Novo Data, plus the full Oncogenic Classification scroller. Predictions and Population Frequencies are captured separately after a render-and-stability wait.
 - MTBP: login-assisted visible-browser submission and report parsing, one variant per pseudonymous report. Transcript HGVS is tried first; an entry rejected by MTBP is retried as GRCh37 genomic HGVS derived from Archer coordinates/ref/alt. The app validates the returned row, records pipeline/database versions, and captures one alteration-centric screenshot. Its public instance is research-only.
 
 Evidence searches run patient-by-patient. For each patient, the selected
@@ -33,6 +33,10 @@ default report timeout. Queue waiting checks both the live queue and the exact
 pseudonymous entry in Reports List, recovering completed reports after transient
 navigation stalls without resubmitting the analysis. Completed patient evidence is saved to the workbook during
 the run so a later failure does not discard earlier patients.
+Use **Stop Search** to request a cooperative stop after the current safe browser
+action. The app retains completed patient results, updates the workbook when
+available, and leaves a persistent stopped status instead of terminating the
+worker or Edge process abruptly.
 When a database search starts, the log reports each selected source as a Microsoft Edge website lookup.
 
 ## Login-based browser review
@@ -66,11 +70,12 @@ COSMIC, OncoKB, Franklin, ClinVar and MTBP have automated, fail-closed visible-p
 uses the input `COSMICID` directly and captures three evidence panels; Franklin
 uses the provider search form instead of constructing a genomic URL, which avoids
 reverse-strand ref/alt errors, retries transient failures three times, and returns
-only `[found] classification=<value>;`. It captures the complete internally
-scrollable Somatic Clinical Evidence tab, followed by non-overlapping Computed
-Classification sections ending after De Novo Data. It deliberately excludes Add
-More Evidence. It also captures a tightly cropped assessment-tools view containing Predictions and
-Population Frequencies. ClinVar captures only the title and classification-summary
+only `[found] classification=<value>;`. It deliberately skips Somatic Clinical
+Evidence and captures both subtabs under Computed Classification. ACMG is saved
+as an overview plus complete evidence cards ending with De Novo Data, excluding
+Population Data and Add More Evidence; Oncogenic Classification is captured in
+full. Predictions and Population Frequencies are saved as separate expanded
+assessment panels after their contents stabilize. ClinVar captures only the title and classification-summary
 region above Variant Details. OncoKB captures the variant overview and mutation-effect
 view. The app saves screenshots and a JSON audit record beside the review workbook,
 using a hash or pseudonymous report ID instead of the sample ID in artifact filenames.

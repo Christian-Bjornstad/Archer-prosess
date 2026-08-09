@@ -1,6 +1,7 @@
 from .browser_review import (
     BROWSER_DATABASES,
     BrowserAutomationUnavailable,
+    BrowserReviewCancelled,
     BrowserReviewService,
 )
 from .database_search import DatabaseSearchService
@@ -12,6 +13,7 @@ __all__ = [
     "AppSettings",
     "BROWSER_DATABASES",
     "BrowserAutomationUnavailable",
+    "BrowserReviewCancelled",
     "BrowserReviewService",
     "DatabaseSearchService",
     "ProcessedWorkbookLoader",

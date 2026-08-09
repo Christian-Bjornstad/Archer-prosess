@@ -47,6 +47,7 @@ from archer_processor.reports import (
 from archer_processor.services import (
     AppSettings,
     BROWSER_DATABASES,
+    BrowserReviewCancelled,
     BrowserReviewService,
     DatabaseSearchService,
     ProcessedWorkbookLoader,
@@ -117,6 +118,7 @@ def _merge_evidence_results(target: dict, incoming: dict) -> None:
 
 class DatabaseWorker(QObject):
     finished = pyqtSignal(object)
+    cancelled = pyqtSignal()
     patient_finished = pyqtSignal(object)
     failed = pyqtSignal(str)
     status = pyqtSignal(str)
@@ -154,6 +156,7 @@ class DatabaseWorker(QObject):
             )
             self.progress.emit(0, len(patients), "Preparing patient queue")
             for patient_index, (patient_id, patient_variants) in enumerate(patients, start=1):
+                self._check_cancelled()
                 patient_evidence: dict[str, list[DatabaseEvidence]] = {
                     api_service.variant_key(variant): [] for variant in patient_variants
                 }
@@ -165,8 +168,10 @@ class DatabaseWorker(QObject):
                 )
                 self.status.emit(f"{prefix}: starting {len(patient_variants)} variant(s)")
                 for database in self.api_databases:
+                    self._check_cancelled()
                     self.status.emit(f"{prefix}: searching {database}")
                     for variant in patient_variants:
+                        self._check_cancelled()
                         key = api_service.variant_key(variant)
                         try:
                             patient_evidence[key].extend(
@@ -199,6 +204,8 @@ class DatabaseWorker(QObject):
                     f"Completed {patient_id}",
                 )
             self.finished.emit(all_evidence)
+        except BrowserReviewCancelled:
+            self.cancelled.emit()
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -217,7 +224,13 @@ class DatabaseWorker(QObject):
             franklin_password=self.settings.franklin_password,
             mtbp_email=self.settings.mtbp_email,
             mtbp_password=self.settings.mtbp_password,
+            stop_requested=lambda: QThread.currentThread().isInterruptionRequested(),
         )
+
+    @staticmethod
+    def _check_cancelled() -> None:
+        if QThread.currentThread().isInterruptionRequested():
+            raise BrowserReviewCancelled("Evidence search stopped by user.")
 
     def _wait(self, reason: str) -> None:
         minimum = max(0, int(self.settings.browser_delay_seconds))
@@ -226,7 +239,12 @@ class DatabaseWorker(QObject):
         if delay <= 0:
             return
         self.status.emit(f"{reason}: {delay}s")
-        time.sleep(delay)
+        remaining = float(delay)
+        while remaining > 0:
+            self._check_cancelled()
+            chunk = min(0.25, remaining)
+            time.sleep(chunk)
+            remaining -= chunk
 
 
 class BrowserLoginWorker(QObject):
@@ -266,6 +284,7 @@ class BrowserLoginWorker(QObject):
 
 class BrowserReviewWorker(QObject):
     finished = pyqtSignal(object)
+    cancelled = pyqtSignal()
     patient_finished = pyqtSignal(object)
     failed = pyqtSignal(str)
     status = pyqtSignal(str)
@@ -294,11 +313,14 @@ class BrowserReviewWorker(QObject):
                 franklin_password=self.settings.franklin_password,
                 mtbp_email=self.settings.mtbp_email,
                 mtbp_password=self.settings.mtbp_password,
+                stop_requested=lambda: QThread.currentThread().isInterruptionRequested(),
             )
             all_evidence: dict[str, list[DatabaseEvidence]] = {}
             patients = _variants_grouped_by_patient(self.variants)
             self.progress.emit(0, len(patients), "Preparing signed-in browser queue")
             for patient_index, (patient_id, patient_variants) in enumerate(patients, start=1):
+                if QThread.currentThread().isInterruptionRequested():
+                    raise BrowserReviewCancelled("Evidence search stopped by user.")
                 prefix = f"Patient {patient_index}/{len(patients)} ({patient_id})"
                 self.progress.emit(
                     patient_index - 1,
@@ -327,8 +349,18 @@ class BrowserReviewWorker(QObject):
                         self.status.emit(
                             f"{prefix}: safety buffer before next patient: {delay}s"
                         )
-                        time.sleep(delay)
+                        remaining = float(delay)
+                        while remaining > 0:
+                            if QThread.currentThread().isInterruptionRequested():
+                                raise BrowserReviewCancelled(
+                                    "Evidence search stopped by user."
+                                )
+                            chunk = min(0.25, remaining)
+                            time.sleep(chunk)
+                            remaining -= chunk
             self.finished.emit(all_evidence)
+        except BrowserReviewCancelled:
+            self.cancelled.emit()
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -715,9 +747,21 @@ class MainWindow(QMainWindow):
         self.search_btn = QPushButton("Run Evidence Search")
         self.search_btn.setObjectName("PrimaryButton")
         self.search_btn.setMinimumWidth(190)
+        self.search_btn.setMinimumHeight(44)
         self.search_btn.setEnabled(False)
         self.search_btn.clicked.connect(self._start_database_search)
         command_layout.addWidget(self.search_btn)
+        self.stop_search_btn = QPushButton("Stop Search")
+        self.stop_search_btn.setObjectName("StopButton")
+        self.stop_search_btn.setMinimumWidth(118)
+        self.stop_search_btn.setMinimumHeight(44)
+        self.stop_search_btn.setEnabled(False)
+        self.stop_search_btn.setAccessibleName("Stop evidence search")
+        self.stop_search_btn.setToolTip(
+            "Safely stop after the current browser action. Evidence already collected is kept."
+        )
+        self.stop_search_btn.clicked.connect(self._stop_evidence_search)
+        command_layout.addWidget(self.stop_search_btn)
         layout.addWidget(command)
 
         checks = QGroupBox("Evidence sources")
@@ -1161,8 +1205,10 @@ class MainWindow(QMainWindow):
         worker.progress.connect(self._update_run_progress)
         worker.patient_finished.connect(self._database_patient_finished)
         worker.finished.connect(self._database_finished)
+        worker.cancelled.connect(self._search_cancelled)
         worker.failed.connect(self._worker_failed)
         worker.finished.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
         worker.failed.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
@@ -1244,8 +1290,10 @@ class MainWindow(QMainWindow):
         worker.progress.connect(self._update_run_progress)
         worker.patient_finished.connect(self._browser_patient_finished)
         worker.finished.connect(self._browser_review_finished)
+        worker.cancelled.connect(self._search_cancelled)
         worker.failed.connect(self._browser_review_failed)
         worker.finished.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
         worker.failed.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
@@ -1426,6 +1474,58 @@ class MainWindow(QMainWindow):
         self._refresh_evidence_table()
         self._auto_rewrite_workbook()
         self._worker_failed(message)
+
+    def _stop_evidence_search(self) -> None:
+        requested = False
+        for thread, worker in (
+            (self.database_thread, self.database_worker),
+            (self.browser_thread, self.browser_worker),
+        ):
+            if (
+                thread is not None
+                and thread.isRunning()
+                and isinstance(worker, (DatabaseWorker, BrowserReviewWorker))
+            ):
+                thread.requestInterruption()
+                requested = True
+        if not requested:
+            return
+        self.stop_search_btn.setEnabled(False)
+        self.stop_search_btn.setText("Stopping…")
+        self.run_progress.show()
+        self.run_progress.title.setText("Stopping evidence search")
+        self.run_progress.detail.setText(
+            "Finishing the current safe browser action. Evidence already collected will be kept."
+        )
+        self.status_badge.setText("Stopping")
+        self.status_badge.setStyleSheet(
+            f"background: {Palette.pale_yellow}; color: {Palette.yellow}; "
+            "border: 1px solid #E7CF91; border-radius: 12px; "
+            "padding: 5px 12px; font-weight: 700;"
+        )
+        self._log("Stop requested; waiting for the current safe browser action")
+
+    def _search_cancelled(self) -> None:
+        self._refresh_evidence_table()
+        self._auto_rewrite_workbook()
+        self._set_ready()
+        self.run_progress.show()
+        self.run_progress.title.setText("Evidence search stopped")
+        detail = "Completed patient results were kept and written to the review workbook."
+        if self.workbook_write_pending:
+            detail = (
+                "Completed results were kept, but the workbook is open in Excel. "
+                "Close it, then click Update Review Workbook."
+            )
+        self.run_progress.detail.setText(detail)
+        self.status_badge.setText("Search stopped")
+        self.status_badge.setStyleSheet(
+            f"background: {Palette.pale_yellow}; color: {Palette.yellow}; "
+            "border: 1px solid #E7CF91; border-radius: 12px; "
+            "padding: 5px 12px; font-weight: 700;"
+        )
+        self.status_bar.showMessage("Evidence search stopped — completed results kept")
+        self._log("Evidence search stopped; completed results retained")
 
     def _rewrite_workbook(self) -> None:
         if not self.result or not self.result.output_path:
@@ -1741,6 +1841,8 @@ class MainWindow(QMainWindow):
         self.activity_progress.show()
         self.process_btn.setEnabled(False)
         self.search_btn.setEnabled(False)
+        self.stop_search_btn.setText("Stop Search")
+        self.stop_search_btn.setEnabled(label in {"Searching", "Browser lookups"})
         self.browser_signin_btn.setEnabled(False)
         self.browser_review_btn.setEnabled(False)
         self.rewrite_btn.setEnabled(False)
@@ -1754,6 +1856,8 @@ class MainWindow(QMainWindow):
         self.activity_progress.hide()
         self._update_process_state()
         self.search_btn.setEnabled(self.result is not None)
+        self.stop_search_btn.setText("Stop Search")
+        self.stop_search_btn.setEnabled(False)
         self.browser_signin_btn.setEnabled(True)
         self.browser_review_btn.setEnabled(self.result is not None)
         self.rewrite_btn.setEnabled(self.result is not None)
@@ -1913,6 +2017,16 @@ class MainWindow(QMainWindow):
                 background: {Palette.pale_blue};
                 color: {Palette.navy};
                 border-color: {Palette.blue};
+            }}
+            QPushButton#StopButton {{
+                min-height: 24px;
+                background: {Palette.panel};
+                color: {Palette.red};
+                border: 1px solid {Palette.red};
+            }}
+            QPushButton#StopButton:hover {{
+                background: {Palette.pale_red};
+                border-color: {Palette.red};
             }}
             QPushButton#ReportButton {{
                 background: {Palette.green};
