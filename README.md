@@ -1,151 +1,237 @@
-# VPM Tolkning
+<p align="center">
+  <img src="src/archer_processor/assets/vpm-tolkning-icon.png" alt="VPM Tolkning icon" width="104" height="104">
+</p>
 
-Clinical desktop workstation for somatic VPM variant interpretation, evidence research, and patient reporting. Archer Analysis TSV exports are supported as the input format.
+<h1 align="center">VPM Tolkning</h1>
 
-The app is being rebuilt as a clean PyQt6 project with a stable processing core:
+<p align="center">
+  A focused Windows workstation for somatic variant review, evidence collection,<br>
+  and image-led VPM interpretation reports.
+</p>
 
-- validate and read Archer variant TSV exports
-- apply local production filtering rules
-- edit the saved artifact list from Settings
-- compare variants with the yearly VPM history workbook
-- prepare review-ready Excel workbooks
-- support the focused evidence workflow: MTBP, Franklin, ClinVar, OncoKB, and COSMIC
+<p align="center">
+  <img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white">
+  <img alt="PyQt6" src="https://img.shields.io/badge/Desktop-PyQt6-41CD52?logo=qt&logoColor=white">
+  <img alt="Windows" src="https://img.shields.io/badge/Platform-Windows-0078D4?logo=windows11&logoColor=white">
+  <img alt="Somatic workflow" src="https://img.shields.io/badge/Workflow-Somatic-8B5CF6">
+  <img alt="GRCh37 hg19" src="https://img.shields.io/badge/Reference-GRCh37%20%2F%20hg19-0E98A8">
+</p>
 
-Current database status:
+<p align="center">
+  <img src="docs/assets/vpm-tolkning-evidence.png" alt="VPM Tolkning evidence workspace" width="100%">
+</p>
 
-- ClinVar: public website resolution followed by a focused browser capture of the variant title and germline/somatic classification summary.
-- COSMIC: authenticated browser lookup by the Archer `COSMICID`, capturing the mutation Overview, Tissue distribution, and Samples filtered to `lymphoid`. The older NLM Clinical Tables v4 lookup remains in the service for basic/public records, but it does not provide these full website panels.
-- OncoKB: signed-in website lookup using the serial Microsoft Edge workflow.
-- Franklin: signed-in website lookup that explicitly searches GRCh37/hg19 in Somatic mode, verifies the returned variant identity, and imports only the suggested classification. It captures both Computed Classification subtabs: the ACMG overview and complete evidence cards through De Novo Data, plus the full Oncogenic Classification scroller. Predictions and Population Frequencies are captured separately after a render-and-stability wait.
-- MTBP: login-assisted visible-browser submission and report parsing, one variant per pseudonymous report. Transcript HGVS is tried first; an entry rejected by MTBP is retried as GRCh37 genomic HGVS derived from Archer coordinates/ref/alt. The app validates the returned row, records pipeline/database versions, and captures one alteration-centric screenshot. Its public instance is research-only.
+> [!IMPORTANT]
+> VPM Tolkning is a research and interpretation-support tool. Database findings
+> and generated reports must be reviewed by qualified personnel before clinical use.
 
-Evidence searches run patient-by-patient. For each patient, the selected
-websites run serially, with MTBP kept last for operational safety;
-only then does the next patient start again at the first selected source.
-The **Included variants only** option is enabled by default, so excluded and
-flagged records are not sent to external database websites unless the option is
-deliberately cleared.
-Website safety delays are randomized independently between
-website variants, provider changes, and consecutive browser-only patients. It
-defaults to 10-20 seconds, with editable minimum and maximum values in Settings.
-MTBP always runs last for each patient and has a separately configurable 20-minute
-default report timeout. Queue waiting checks both the live queue and the exact
-pseudonymous entry in Reports List, recovering completed reports after transient
-navigation stalls without resubmitting the analysis. Completed patient evidence is saved to the workbook during
-the run so a later failure does not discard earlier patients.
-Use **Stop Search** to request a cooperative stop after the current safe browser
-action. The app retains completed patient results, updates the workbook when
-available, and leaves a persistent stopped status instead of terminating the
-worker or Edge process abruptly.
-When a database search starts, the log reports each selected source as a Microsoft Edge website lookup.
+## What it does
 
-## Login-based browser review
+VPM Tolkning turns an Archer Analysis TSV export into a controlled review and
+evidence workflow. It keeps variant selection, browser research, screenshots,
+audit data, and patient workbooks connected without sending patient or sample
+identifiers to the evidence providers.
 
-The Databases tab also provides a visible Microsoft Edge workflow for COSMIC,
-OncoKB, Franklin, ClinVar and MTBP:
+| Capability | Result |
+| --- | --- |
+| Structured import | Validates Archer TSV exports and normalizes variant records |
+| Local prioritisation | Applies configurable artifact rules and compares against the yearly VPM history workbook |
+| Review-first workflow | Produces a full Excel workbook where unwanted searches can be marked with `X` |
+| Evidence collection | Searches MTBP, Franklin, ClinVar, OncoKB, and COSMIC in visible Microsoft Edge sessions |
+| Screenshot capture | Saves focused, variant-specific evidence images in a consistent order |
+| Resumable analysis | Reopens a processed workbook with selections, evidence, and screenshot paths restored |
+| Patient reporting | Creates one image-led interpretation workbook per DIT identifier |
 
-The app starts the installed Microsoft Edge directly and controls it over the
-localhost Edge DevTools Protocol (CDP) using a pure-Python WebSocket client. It
-does not install or launch Playwright, Node.js, Selenium, Selenium Manager, or a
-separate Edge WebDriver executable. Work-PC policy must allow the managed Edge
-binary and the Edge `RemoteDebuggingAllowed` policy.
+## Workflow
 
-1. Choose a source under **Browser provider**.
-2. Add COSMIC, OncoKB, Franklin and/or MTBP email/password in Settings. Passwords are encrypted
-   by Windows Credential Manager and are never written to `config.json`.
-3. Click **Sign In**. With saved credentials the app signs in
-   and releases the Edge profile automatically. Manual login remains available.
-4. Set the randomized inter-search delay range, MTBP report timeout, and exact
-   MTBP cancer type in Settings (defaults: 10-20 seconds, 20 minutes, and `Blood`).
-5. Select the desired sources and click **Run Browser Sources**.
+```mermaid
+flowchart LR
+    A["Archer TSV"] --> B["Review workbook"]
+    B --> C["Review all variants"]
+    C --> D["Mark unwanted searches with X"]
+    D --> E["Serial evidence search"]
+    E --> F["Verify findings"]
+    F --> G["Patient VPM workbooks"]
+```
 
-The app uses a separate persistent Edge profile per provider under
-`%USERPROFILE%\.archer-prosess\browser_profiles`. Login passwords are stored by
-Windows Credential Manager under `Archer Prosess/<provider>`; plaintext
-passwords are never written to project files or application JSON. Browser
-profiles contain sensitive authenticated cookies and must not be copied, shared
-or committed to Git.
+1. Import an Archer variant TSV and create the review workbook.
+2. Review **With Artifacts** and mark `X` in **Skip Database Search (X)** where appropriate.
+3. Load the reviewed workbook back into the application.
+4. Select the evidence sources and run the patient-by-patient search.
+5. Verify the compact findings and captured source images.
+6. Create the final patient workbooks.
 
-COSMIC, OncoKB, Franklin, ClinVar and MTBP have automated, fail-closed visible-page parsers. COSMIC
-uses the input `COSMICID` directly and captures three evidence panels; Franklin
-uses the provider search form instead of constructing a genomic URL, which avoids
-reverse-strand ref/alt errors, retries transient failures three times, and returns
-only `[found] classification=<value>;`. It deliberately skips Somatic Clinical
-Evidence and captures both subtabs under Computed Classification. ACMG is saved
-as an overview plus complete evidence cards ending with De Novo Data, excluding
-Population Data and Add More Evidence; Oncogenic Classification is captured in
-full. Predictions and Population Frequencies are saved as separate expanded
-assessment panels after their contents stabilize. ClinVar captures only the title and classification-summary
-region above Variant Details. OncoKB captures the variant overview and mutation-effect
-view. The app saves screenshots and a JSON audit record beside the review workbook,
-using a hash or pseudonymous report ID instead of the sample ID in artifact filenames.
-MTBP captures the exact alteration-centric evidence section for each safely matched
-variant. MTBP runs after the other browser sources and submits each variant as a
-separate pseudonymous report. It retries mapper failures using GRCh37 genomic HGVS
-and waits up to the configured timeout for each report. Generated reports remain
-available in MTBP until the app detects six
-`ARCHER-` reports; it then deletes all six as one housekeeping batch. The same
-safe cleanup runs before submission if MTBP's ten-report capacity is already full.
-Local screenshots and audit evidence are written before any post-analysis cleanup,
-and manually named reports are never automatically deleted. It imports functional relevance, evidence category, actionability
-tier, supporting source links and version provenance. The personal MTBP report URL
-is never exported. Never enter patient or sample
-identifiers in the MTBP cancer-type setting or browser form.
+The search can be stopped safely at any time with **Stop Search**. The current
+browser action is allowed to finish, completed patient evidence is retained, and
+the review workbook is updated whenever it is writable.
 
-## Workbook report
+## Evidence sources
 
-The exported review workbook contains exactly two Archer-style data sheets:
-**With Artifacts** and **Artifacts Removed**. Low-priority technical columns are
-hidden to match the laboratory review layout, the leading identifier columns stay
-frozen, and compact database evidence columns are appended at the far right.
-Review the full variant list in **With Artifacts** and place `X` in
-**Skip Database Search (X)** for variants that should not be submitted. Known
-artifacts are marked automatically;
-then use **Load X Selections** in the app before collecting evidence.
-The orange and yellow row colors match the established workbook, and evidence
-does not increase row height. The workbook is rewritten automatically when the selected
-database/browser phases finish; the manual rewrite button remains available if
-the file was open in Excel during that save. A locked workbook no longer interrupts
-the application: the evidence remains in memory, one warning explains how to close
-the file and retry, and the completed-search card shows **save pending** until the
-manual rewrite succeeds. The completed-search card otherwise remains visible so it
-is clear that every queued patient has finished.
+All browser sources are queried with the somatic workflow and GRCh37/hg19 where
+the provider exposes that choice.
 
-Use **Open Processed Workbook** on the Import page to resume a previous VPM
-session after restarting the application. The loader restores the original
-variant rows, recalculates the current include/exclude rules, reads all `X`
-selections from **With Artifacts**, and restores full evidence records and
-screenshot paths from the matching `*_browser_evidence` directory. When an audit
-file is unavailable, the compact evidence stored in the workbook is retained as
-a fallback. Subsequent evidence searches merge new source results with the
-restored sources instead of discarding earlier work.
+| Source | Capture strategy | Key safeguards |
+| --- | --- | --- |
+| **MTBP** | One pseudonymous report per variant and one alteration-centric screenshot | Transcript HGVS first, then a validated GRCh37 genomic fallback; returned variant identity is checked; personal report URLs are not exported |
+| **Franklin** | ACMG overview, ACMG evidence cards through De Novo Data, full Oncogenic Classification, Predictions, and Population Frequencies | Explicit **hg19** + **Somatic** search; dynamic panels must stabilize; Somatic Clinical Evidence and Add More Evidence are excluded |
+| **ClinVar** | Variant title and focused germline/somatic classification summary | Resolves the canonical ClinVar variation before capture |
+| **OncoKB** | Variant Overview and Mutation Effect | Rejects the cookie overlay before taking the screenshot |
+| **COSMIC** | Overview, Tissue distribution, and Samples filtered to `lymphoid` | Uses the Archer `COSMICID` and resolves the canonical GRCh37 mutation page |
 
-## Patient Excel reports
+Patient report images are embedded in this order:
 
-Use **Export Patient Excel Reports** to create one image-led workbook per DIT
-identifier. Files are named `<DIT>_VPM_Tolkning.xlsx`. Each workbook contains
-**Oversikt**, **Vedlegg**, and one sheet per selected variant. Oversikt contains
-compressed findings and live database links; Vedlegg contains only the DIT number
-for manual additions. Variant sheets embed screenshots in the order MTBP,
-Franklin, ClinVar, OncoKB, and COSMIC. A unique gene uses the gene symbol as its
-sheet name; repeated genes add the protein change, or the coding-DNA change when
-protein information is unavailable.
-The workbooks are written to `<workbook>_patient_excel_reports` and remain usable
-without the separate screenshot folder because the images are embedded.
+1. MTBP
+2. Franklin
+3. ClinVar
+4. OncoKB
+5. COSMIC
 
-The COSMIC text panel summarizes the captured page while the main
-database evidence cache retains the full source response for audit and later
-report refinement.
+## Why direct Edge control?
 
-## Run
+The application controls the installed Microsoft Edge browser through the local
+Edge DevTools Protocol (CDP). The browser is started and automated directly from
+Python using a local WebSocket connection.
+
+This design requires no:
+
+- Playwright or Node.js
+- Selenium or Selenium Manager
+- separate Edge WebDriver executable
+
+Each provider receives its own persistent Edge profile under
+`%USERPROFILE%\.archer-prosess\browser_profiles`. This allows signed-in sessions
+to be reused while keeping browser activity visible and auditable.
+
+> [!WARNING]
+> Browser profiles contain authenticated session data. Do not copy, share, or
+> commit the profile directory. Managed Edge must permit local remote debugging.
+
+## Operational safeguards
+
+- Evidence searches run serially, one patient at a time.
+- Selected websites finish for one patient before the next patient begins.
+- Randomized safety buffers default to 10–20 seconds between browser actions.
+- MTBP runs last and has a separately configurable report timeout.
+- MTBP submissions use application-generated pseudonymous identifiers only.
+- Completed patient evidence is saved throughout the run, not only at the end.
+- Cooperative cancellation is checked during provider loops, safety buffers,
+  Franklin rendering waits, and MTBP report polling.
+- If Excel has the workbook open, the app keeps evidence in memory, shows a clear
+  warning, and allows the workbook update to be retried without closing the app.
+- Screenshot filenames use hashes or pseudonymous report identifiers rather than
+  patient or sample identifiers.
+
+## Excel outputs
+
+### Review workbook
+
+The first output is designed for complete variant review and database selection.
+It contains exactly two data sheets:
+
+- **With Artifacts** — the full variant list, including **Skip Database Search (X)**.
+- **Artifacts Removed** — the corresponding view without known artifacts.
+
+The workbook mirrors the laboratory review layout with frozen identifier columns,
+hidden low-priority technical fields, familiar row colours, and compact evidence
+columns at the far right. Evidence text does not expand row height.
+
+### Patient workbooks
+
+Patient reports are named `<DIT>_VPM_Tolkning.xlsx` and contain:
+
+- **Oversikt** — compact findings such as `ClinVar – Benign`, plus source links.
+- **Vedlegg** — the DIT identifier and space for manual additions.
+- **One sheet per variant** — compact evidence followed by embedded screenshots.
+
+Unique genes use the gene symbol as the sheet name. If a patient has multiple
+variants in the same gene, the protein change is added; the coding-DNA change is
+used when protein information is unavailable.
+
+## Resume a previous analysis
+
+Use **Open Processed Workbook** on the Import page to continue after restarting
+the application. The loader restores:
+
+- all original variant rows;
+- current include/exclude decisions;
+- `X` selections from **With Artifacts**;
+- compact database evidence;
+- matching screenshot and audit paths from the `*_browser_evidence` directory.
+
+New searches merge with restored evidence instead of discarding earlier results.
+
+## Requirements
+
+- Windows 10 or Windows 11
+- Python 3.11 or newer
+- Microsoft Edge with the `RemoteDebuggingAllowed` policy enabled
+- Access to the provider websites required by your workflow
+- Microsoft Excel for manual workbook review and final adjustments
+
+## Installation
 
 ```powershell
-python -m pip install -e .[dev]
+git clone https://github.com/Christian-Bjornstad/Archer-prosess.git
+cd Archer-prosess
+
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+```
+
+Start the application with either command:
+
+```powershell
+vpm-tolkning
+# or
 python -m archer_processor
 ```
 
-## Test
+## Configuration
+
+Use the in-app **Settings** page to configure:
+
+- yearly VPM history workbook;
+- default output directory;
+- provider sign-in details;
+- browser safety-buffer range;
+- MTBP timeout and cancer type;
+- local artifact rules;
+- default evidence sources.
+
+Non-secret settings are stored in `%USERPROFILE%\.archer-prosess\config.json`.
+Passwords are excluded from that JSON file and handled through the operating
+system credential store.
+
+## Development
+
+Run the full automated test suite:
 
 ```powershell
-pytest
+pytest -q
 ```
+
+Project layout:
+
+```text
+src/archer_processor/
+├── core/       Variant models, filtering, and processing
+├── gui/        PyQt6 desktop interface and workers
+├── io/         Archer TSV import
+├── knowledge/  Historical variant matching
+├── reports/    Review and patient Excel generation
+├── services/   Browser automation, providers, settings, and resume support
+└── assets/     Application icon resources
+
+tests/          Unit and workflow regression tests
+docs/           Workflow and design notes
+design-system/  VPM Tolkning visual and interaction rules
+```
+
+## Status
+
+VPM Tolkning is under active development for a specialised laboratory workflow.
+Provider websites can change without notice, so browser selectors and evidence
+boundaries are intentionally fail-closed and covered by regression tests wherever
+possible.
