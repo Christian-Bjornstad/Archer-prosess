@@ -69,8 +69,8 @@ def test_edge_launcher_retries_transient_broker_failures(tmp_path, monkeypatch):
     sleeps = []
     sentinel = object()
 
-    def launch(profile, *, viewport, accept_downloads):
-        attempts.append(profile)
+    def launch(profile, *, viewport, accept_downloads, background):
+        attempts.append((profile, background))
         if len(attempts) < 3:
             raise EdgeCdpError("stale Edge broker")
         return sentinel
@@ -79,10 +79,13 @@ def test_edge_launcher_retries_transient_broker_failures(tmp_path, monkeypatch):
     monkeypatch.setattr("archer_processor.services.edge_cdp.time.sleep", sleeps.append)
     runtime = EdgeCdpRuntime()
 
-    context = runtime.chromium.launch_persistent_context(str(tmp_path))
+    context = runtime.chromium.launch_persistent_context(
+        str(tmp_path), background=True
+    )
 
     assert context is sentinel
     assert len(attempts) == 3
+    assert all(background is True for _, background in attempts)
     assert sleeps == [1.5, 3.0]
 
 

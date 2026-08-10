@@ -52,6 +52,7 @@ def test_browser_sources_use_canonical_order_with_mtbp_last(tmp_path, monkeypatc
         profile_root=tmp_path,
         request_delay_ms=0,
         request_delay_max_ms=0,
+        provider_switch_delay_ms=0,
     )
     visited = []
 
@@ -65,6 +66,47 @@ def test_browser_sources_use_canonical_order_with_mtbp_last(tmp_path, monkeypatc
     )
 
     assert visited == ["COSMIC", "OncoKB", "Franklin", "MTBP"]
+
+
+def test_browser_resume_skips_completed_sources_and_checkpoints_each_provider(
+    tmp_path, monkeypatch
+):
+    variants = ArcherTsvReader().read(FIXTURE)[3:5]
+    service = BrowserReviewService(
+        profile_root=tmp_path,
+        request_delay_ms=0,
+        request_delay_max_ms=0,
+        provider_switch_delay_ms=0,
+    )
+    first_key = service.variant_key(variants[0])
+    calls = []
+
+    def record(database, pending, artifact_directory, *, progress):
+        calls.append((database, [service.variant_key(variant) for variant in pending]))
+        return {
+            service.variant_key(variant): DatabaseEvidence(
+                database, "found", "complete"
+            )
+            for variant in pending
+        }
+
+    monkeypatch.setattr(service, "_search_database", record)
+    checkpoints = []
+
+    results = service.search_variants(
+        variants,
+        ["COSMIC", "ClinVar"],
+        tmp_path / "audit",
+        completed_sources={(first_key, "COSMIC")},
+        checkpoint=checkpoints.append,
+    )
+
+    assert calls == [
+        ("COSMIC", [service.variant_key(variants[1])]),
+        ("ClinVar", [service.variant_key(variant) for variant in variants]),
+    ]
+    assert len(checkpoints) == 2
+    assert results[first_key][0].database == "ClinVar"
 
 
 def test_cosmic_identifier_uses_first_archer_cosmic_id():
@@ -122,10 +164,7 @@ def test_cosmic_search_resolves_canonical_internal_mutation_id(tmp_path):
     service._resolve_cosmic_mutation_page(page, variant)
 
     assert page.url == grch37
-    assert _cosmic_source_url(page.url, variant.cosmic_id) == (
-        "https://cancer.sanger.ac.uk/cosmic/mutation/overview"
-        "?id=43598117&merge=1411076"
-    )
+    assert _cosmic_source_url(page.url, variant.cosmic_id) == grch37
 
 
 def test_oncokb_rejects_cookie_banner_before_capture(tmp_path):
@@ -203,13 +242,13 @@ def test_browser_safety_buffer_randomizes_queries_and_provider_switches(
         "OncoKB", "Franklin", progress=progress.append
     )
 
-    assert random_bounds == [(15_000, 30_000), (15_000, 30_000)]
+    assert random_bounds == [(15_000, 30_000)]
     assert sum(page.waits) == 23_400
     assert all(wait <= 250 for wait in page.waits)
-    assert sum(slept) == pytest.approx(23.4)
+    assert sum(slept) == pytest.approx(3.0)
     assert all(wait <= 0.25 for wait in slept)
     assert "23.4s before next variant" in progress[0]
-    assert "23.4s between OncoKB and Franklin" in progress[1]
+    assert "3.0s between OncoKB and Franklin" in progress[1]
 
 
 def test_oncokb_visible_page_parser_extracts_core_evidence():
@@ -655,6 +694,9 @@ def test_franklin_classification_capture_ends_with_complete_de_novo_card(tmp_pat
         def scroll_into_view_if_needed(self):
             pass
 
+        def bounding_box(self):
+            return {"x": 0, "y": 100 + self.index * 100, "width": 1000, "height": 90}
+
     class Categories:
         def all_inner_texts(self):
             return [
@@ -677,8 +719,8 @@ def test_franklin_classification_capture_ends_with_complete_de_novo_card(tmp_pat
         def evaluate(self, script, argument=None):
             pass
 
-        def screenshot(self, **kwargs):
-            captures.append(("overview", kwargs["path"]))
+        def bounding_box(self):
+            return {"x": 0, "y": 0, "width": 1000, "height": 500}
 
         def locator(self, selector):
             assert selector == "gnx-result-category"
@@ -712,8 +754,98 @@ def test_franklin_classification_capture_ends_with_complete_de_novo_card(tmp_pat
         "ACMG evidence: Effect on Protein",
         "ACMG evidence: De Novo Data",
     ]
-    assert [capture[0] for capture in captures] == ["overview", 0, 1]
+    assert [capture[0] for capture in captures] == [0, 1]
+    assert page.captures[0]["clip"] == {
+        "x": 0,
+        "y": 0,
+        "width": 1000,
+        "height": 100,
+    }
     assert not any("Population" in item["label"] for item in screenshots)
+
+
+def test_franklin_oncogenic_capture_uses_named_evidence_boxes(tmp_path):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+    captures = []
+
+    class Category:
+        def __init__(self, index):
+            self.index = index
+
+        def scroll_into_view_if_needed(self):
+            pass
+
+        def screenshot(self, **kwargs):
+            captures.append((self.index, kwargs["path"]))
+
+        def bounding_box(self):
+            return {
+                "x": 20,
+                "y": 120 + self.index * 120,
+                "width": 1000,
+                "height": 110,
+            }
+
+    class Categories:
+        def all_inner_texts(self):
+            return [
+                "Population Data\nOP4\nSupportingOncogenic",
+                "Functional Data\nOVS3\nVeryStrongOncogenic",
+                "Predictive Data\nOS1\nStrongOncogenic",
+            ]
+
+        def nth(self, index):
+            return Category(index)
+
+    class Panel:
+        def count(self):
+            return 1
+
+        def wait_for(self, **kwargs):
+            pass
+
+        def evaluate(self, script, argument=None):
+            pass
+
+        def bounding_box(self):
+            return {"x": 20, "y": 20, "width": 1000, "height": 600}
+
+        def locator(self, selector):
+            assert selector == "gnx-oncogenic-classification-tile"
+            return Categories()
+
+    panel = Panel()
+
+    class Page:
+        url = "https://franklin.genoox.com/example?app=oncogenic-classification"
+
+        def __init__(self):
+            self.captures = []
+
+        def locator(self, selector):
+            assert selector == "gnx-oncogenic-classification-app"
+            return panel
+
+        def wait_for_timeout(self, milliseconds):
+            assert milliseconds == 200
+
+        def screenshot(self, **kwargs):
+            self.captures.append(kwargs)
+
+    page = Page()
+    screenshots = service._capture_franklin_oncogenic_classification(
+        page, variant, tmp_path
+    )
+
+    assert [item["label"] for item in screenshots] == [
+        "Oncogenic classification overview",
+        "Oncogenic evidence: Population Data",
+        "Oncogenic evidence: Functional Data",
+        "Oncogenic evidence: Predictive Data",
+    ]
+    assert [capture[0] for capture in captures] == [0, 1, 2]
+    assert page.captures[0]["clip"]["height"] == 100
 
 
 def test_franklin_search_explicitly_selects_hg19_and_somatic(tmp_path):

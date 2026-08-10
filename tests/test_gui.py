@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 from PIL import Image
 
@@ -34,6 +35,10 @@ def test_database_tab_contains_current_sources(qt_app):
         == window.settings.browser_delay_max_seconds
     )
     assert window.mtbp_timeout_spin.value() == window.settings.mtbp_timeout_minutes
+    assert (
+        window.browser_background_check.isChecked()
+        == window.settings.browser_background
+    )
     assert window.included_only_check.isChecked() == window.settings.search_included_only
     assert window.settings_scroll.widgetResizable()
     assert window.database_scroll.widgetResizable()
@@ -274,6 +279,48 @@ def test_database_lookup_scope_can_be_limited_to_included_variants(qt_app, tmp_p
     assert len(window._variants_for_search()) == window.result.total_count - 1
 
 
+def test_resume_scope_keeps_only_variants_with_unfinished_selected_sources(
+    qt_app, tmp_path
+):
+    window = MainWindow()
+    window.result = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-08-10",
+        tmp_path / "review.xlsx",
+    )
+    window.included_only_check.setChecked(False)
+    first, second = window.result.variants[:2]
+    window.evidence = {
+        f"{first.sample}|{first.hgvsc}": [
+            DatabaseEvidence("ClinVar", "found", "complete"),
+            DatabaseEvidence("OncoKB", "not_found", "complete"),
+        ],
+        f"{second.sample}|{second.hgvsc}": [
+            DatabaseEvidence("ClinVar", "found", "complete"),
+            DatabaseEvidence("OncoKB", "error", "retry this source"),
+        ],
+    }
+
+    pending = window._pending_variants_for_search(["ClinVar", "OncoKB"])
+
+    assert first not in pending
+    assert second in pending
+
+
+def test_log_lines_have_clock_timestamps_and_elapsed_search_time(
+    qt_app, monkeypatch
+):
+    window = MainWindow()
+    monkeypatch.setattr("archer_processor.gui.app.time.monotonic", lambda: 225.0)
+    window._search_started_at = 100.0
+
+    window._log(f"Search checkpoint ({window._search_elapsed_text()})")
+
+    line = window.log.toPlainText().splitlines()[-1]
+    assert re.match(r"^\[\d{2}:\d{2}:\d{2}] ", line)
+    assert "2m 05s" in line
+
+
 def test_normal_search_routes_non_api_login_sources_to_browser_phase(qt_app):
     window = MainWindow()
     for check in window.db_checks.values():
@@ -345,7 +392,16 @@ def test_database_worker_completes_all_sources_before_next_patient(
         def __init__(self, **kwargs):
             pass
 
-        def search_variants(self, patient_variants, databases, artifact_root, *, progress):
+        def search_variants(
+            self,
+            patient_variants,
+            databases,
+            artifact_root,
+            *,
+            progress,
+            completed_sources,
+            checkpoint,
+        ):
             patient_id = patient_variants[0].patient_id
             results = {}
             for database in databases:
@@ -355,6 +411,14 @@ def test_database_worker_completes_all_sources_before_next_patient(
                     results.setdefault(key, []).append(
                         DatabaseEvidence(database, "found", "test")
                     )
+                checkpoint(
+                    {
+                        f"{variant.sample}|{variant.hgvsc}": [
+                            DatabaseEvidence(database, "found", "test")
+                        ]
+                        for variant in patient_variants
+                    }
+                )
             return results
 
     monkeypatch.setattr(

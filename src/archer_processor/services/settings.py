@@ -27,6 +27,7 @@ class AppSettings:
     database_workers: int = 1
     browser_delay_seconds: int = 10
     browser_delay_max_seconds: int = 20
+    browser_background: bool = True
     mtbp_timeout_minutes: int = 20
     search_included_only: bool = True
     gnomad_dataset: str = "gnomad_r2_1"

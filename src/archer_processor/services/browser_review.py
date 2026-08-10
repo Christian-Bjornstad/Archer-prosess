@@ -30,6 +30,7 @@ LOGIN_URLS = {
 
 FRANKLIN_HOME_URL = "https://franklin.genoox.com/clinical-db/home"
 FRANKLIN_ASSESSMENT_RENDER_BUFFER_MS = 5_000
+PROVIDER_SWITCH_DELAY_MS = 3_000
 
 _AMINO_ACID_3_TO_1 = {
     "Ala": "A", "Arg": "R", "Asn": "N", "Asp": "D", "Cys": "C",
@@ -81,8 +82,10 @@ class BrowserReviewService:
         franklin_attempts: int = 3,
         request_delay_ms: int = 10_000,
         request_delay_max_ms: int | None = 20_000,
+        provider_switch_delay_ms: int = PROVIDER_SWITCH_DELAY_MS,
         stop_requested: Callable[[], bool] | None = None,
         pause_wait: Callable[[], None] | None = None,
+        browser_background: bool = True,
     ) -> None:
         self.profile_root = profile_root or Path.home() / ".archer-prosess" / "browser_profiles"
         self.channel = channel
@@ -106,8 +109,10 @@ class BrowserReviewService:
             if request_delay_max_ms is None
             else request_delay_max_ms,
         )
+        self.provider_switch_delay_ms = max(0, int(provider_switch_delay_ms))
         self.stop_requested = stop_requested or (lambda: False)
         self.pause_wait = pause_wait or (lambda: None)
+        self.browser_background = bool(browser_background)
         self._cosmic_cache: dict[str, DatabaseEvidence] = {}
         self._mtbp_rejected_transcript_queries: set[str] = set()
 
@@ -208,6 +213,8 @@ class BrowserReviewService:
         artifact_root: Path,
         *,
         progress: Callable[[str], None] | None = None,
+        completed_sources: set[tuple[str, str]] | None = None,
+        checkpoint: Callable[[dict[str, list[DatabaseEvidence]]], None] | None = None,
     ) -> dict[str, list[DatabaseEvidence]]:
         variant_list = list(variants)
         requested = set(databases)
@@ -216,23 +223,46 @@ class BrowserReviewService:
             self.variant_key(variant): [] for variant in variant_list
         }
         artifact_root.mkdir(parents=True, exist_ok=True)
-        for database_index, database in enumerate(database_list):
+        completed_sources = completed_sources or set()
+        jobs = [
+            (
+                database,
+                [
+                    variant
+                    for variant in variant_list
+                    if (self.variant_key(variant), database) not in completed_sources
+                ],
+            )
+            for database in database_list
+        ]
+        jobs = [(database, pending) for database, pending in jobs if pending]
+        for database_index, (database, pending_variants) in enumerate(jobs):
             self._check_cancelled()
             if progress:
-                progress(f"Browser review: starting {database}")
+                progress(
+                    f"Browser review: starting {database} for "
+                    f"{len(pending_variants)}/{len(variant_list)} pending variant(s)"
+                )
             database_results = self._search_database(
                 database,
-                variant_list,
+                pending_variants,
                 artifact_root / database.lower().replace(" ", "-"),
                 progress=progress,
             )
             for key, evidence in database_results.items():
                 results[key].append(evidence)
+            if checkpoint and database_results:
+                checkpoint(
+                    {
+                        key: [evidence]
+                        for key, evidence in database_results.items()
+                    }
+                )
             self._check_cancelled()
-            if database_index < len(database_list) - 1:
+            if database_index < len(jobs) - 1:
                 self._wait_between_databases(
                     database,
-                    database_list[database_index + 1],
+                    jobs[database_index + 1][0],
                     progress=progress,
                 )
         return results
@@ -282,6 +312,7 @@ class BrowserReviewService:
                     headless=False,
                     accept_downloads=True,
                     viewport={"width": 1440, "height": 1000},
+                    background=self.browser_background,
                 )
             except Exception as exc:
                 raise BrowserAutomationUnavailable(
@@ -374,6 +405,7 @@ class BrowserReviewService:
                     headless=False,
                     accept_downloads=True,
                     viewport={"width": 1440, "height": 1000},
+                    background=self.browser_background,
                 )
             except Exception as exc:
                 raise BrowserAutomationUnavailable(
@@ -543,6 +575,7 @@ class BrowserReviewService:
                     headless=False,
                     accept_downloads=True,
                     viewport={"width": 1440, "height": 1000},
+                    background=self.browser_background,
                 )
             except Exception as exc:
                 raise BrowserAutomationUnavailable(
@@ -784,6 +817,7 @@ class BrowserReviewService:
                         headless=False,
                         accept_downloads=True,
                         viewport={"width": 1440, "height": 1000},
+                        background=self.browser_background,
                     )
                 except Exception as exc:
                     raise BrowserAutomationUnavailable(
@@ -1095,6 +1129,7 @@ class BrowserReviewService:
                         headless=False,
                         accept_downloads=True,
                         viewport={"width": 1440, "height": 1000},
+                        background=self.browser_background,
                     )
                 except Exception as exc:
                     raise BrowserAutomationUnavailable(
@@ -1868,7 +1903,7 @@ class BrowserReviewService:
         variant: VariantRecord,
         artifact_directory: Path,
     ) -> list[dict[str, str]]:
-        """Capture the ACMG overview and complete evidence cards through De Novo."""
+        """Capture a classification-only overview and each ACMG evidence box."""
         original_path = self._screenshot_path(
             artifact_directory, "Franklin", variant
         )
@@ -1888,7 +1923,20 @@ class BrowserReviewService:
 
         panel.wait_for(state="visible", timeout=self.navigation_timeout_ms)
         panel.evaluate("el => { el.scrollTop = 0; }")
-        panel.screenshot(path=str(base_path))
+        categories = panel.locator("gnx-result-category")
+        category_texts = categories.all_inner_texts()
+        if not category_texts:
+            page.screenshot(path=str(base_path), full_page=True)
+            return [
+                {
+                    "label": "Full ACMG classification page",
+                    "path": str(base_path),
+                    "url": page.url,
+                }
+            ]
+        self._capture_franklin_classification_overview(
+            page, panel, categories.nth(0), base_path
+        )
         screenshots = [
             {
                 "label": "ACMG classification overview",
@@ -1896,22 +1944,13 @@ class BrowserReviewService:
                 "url": page.url,
             }
         ]
-        categories = panel.locator("gnx-result-category")
-        category_texts = categories.all_inner_texts()
         de_novo_indexes = [
             index
             for index, text in enumerate(category_texts)
             if text.strip().splitlines()[0].strip() == "De Novo Data"
         ]
         if len(de_novo_indexes) != 1:
-            page.screenshot(path=str(base_path), full_page=True)
-            return [
-                {
-                    "label": "ACMG classification (De Novo boundary unavailable)",
-                    "path": str(base_path),
-                    "url": page.url,
-                }
-            ]
+            raise RuntimeError("Franklin ACMG De Novo evidence boundary was unavailable.")
         for index in range(de_novo_indexes[0] + 1):
             category = categories.nth(index)
             title = category_texts[index].strip().splitlines()[0].strip()
@@ -1920,7 +1959,7 @@ class BrowserReviewService:
             )
             category.scroll_into_view_if_needed()
             page.wait_for_timeout(200)
-            category.screenshot(path=str(screenshot_path))
+            self._capture_franklin_evidence_box(page, category, screenshot_path)
             screenshots.append(
                 {
                     "label": f"ACMG evidence: {title}",
@@ -1937,7 +1976,7 @@ class BrowserReviewService:
         variant: VariantRecord,
         artifact_directory: Path,
     ) -> list[dict[str, str]]:
-        """Capture the complete visible oncogenic-classification scroller."""
+        """Capture the oncogenic overview and each named evidence box."""
         original_path = self._screenshot_path(
             artifact_directory, "Franklin", variant
         )
@@ -1947,12 +1986,137 @@ class BrowserReviewService:
         panel = page.locator("gnx-oncogenic-classification-app")
         if panel.count() != 1:
             raise RuntimeError("Franklin oncogenic classification panel was unavailable.")
-        return self._capture_franklin_scroll_tiles(
-            page,
-            panel,
-            base_path,
-            "Oncogenic classification",
+        panel.wait_for(state="visible", timeout=self.navigation_timeout_ms)
+        panel.evaluate("el => { el.scrollTop = 0; }")
+        categories = panel.locator("gnx-oncogenic-classification-tile")
+        category_texts = categories.all_inner_texts()
+        if not category_texts:
+            return self._capture_franklin_scroll_tiles(
+                page,
+                panel,
+                base_path,
+                "Oncogenic classification",
+            )
+
+        self._capture_franklin_classification_overview(
+            page, panel, categories.nth(0), base_path
         )
+        screenshots = [
+            {
+                "label": "Oncogenic classification overview",
+                "path": str(base_path),
+                "url": page.url,
+            }
+        ]
+        for index, text in enumerate(category_texts):
+            category = categories.nth(index)
+            title = text.strip().splitlines()[0].strip() or f"Evidence {index + 1}"
+            screenshot_path = base_path.with_name(
+                f"{base_path.stem}-evidence-{index + 1:02d}{base_path.suffix}"
+            )
+            category.scroll_into_view_if_needed()
+            page.wait_for_timeout(200)
+            self._capture_franklin_evidence_box(page, category, screenshot_path)
+            screenshots.append(
+                {
+                    "label": f"Oncogenic evidence: {title}",
+                    "path": str(screenshot_path),
+                    "url": page.url,
+                }
+            )
+        panel.evaluate("el => { el.scrollTop = 0; }")
+        return screenshots
+
+    def _capture_franklin_classification_overview(
+        self,
+        page: Any,
+        panel: Any,
+        first_category: Any,
+        screenshot_path: Path,
+    ) -> None:
+        """Crop the classification summary before the first evidence category."""
+        panel.evaluate("el => { el.scrollTop = 0; }")
+        page.wait_for_timeout(200)
+        panel_box = panel.bounding_box()
+        category_box = first_category.bounding_box()
+        if panel_box is None or category_box is None:
+            raise RuntimeError("Franklin classification overview was not visible.")
+        height = float(category_box["y"]) - float(panel_box["y"])
+        if height <= 1:
+            raise RuntimeError("Franklin classification overview could not be cropped.")
+        page.screenshot(
+            path=str(screenshot_path),
+            clip={
+                "x": max(0, float(panel_box["x"])),
+                "y": max(0, float(panel_box["y"])),
+                "width": float(panel_box["width"]),
+                "height": height,
+            },
+        )
+
+    def _capture_franklin_evidence_box(
+        self,
+        page: Any,
+        category: Any,
+        screenshot_path: Path,
+    ) -> None:
+        """Clone one evidence card outside Franklin's clipping scroll panel."""
+        capture_id = "vpm-franklin-" + hashlib.sha256(
+            str(screenshot_path).encode("utf-8")
+        ).hexdigest()[:16]
+        selector = f"[data-vpm-capture='{capture_id}']"
+        try:
+            category.evaluate(
+                """
+                (el, captureId) => {
+                  const existing = document.querySelector(
+                    `[data-vpm-capture='${captureId}']`
+                  );
+                  if (existing) existing.remove();
+                  const rect = el.getBoundingClientRect();
+                  const wrapper = document.createElement('div');
+                  wrapper.setAttribute('data-vpm-capture', captureId);
+                  Object.assign(wrapper.style, {
+                    position: 'fixed',
+                    left: '0px',
+                    top: '0px',
+                    width: `${Math.ceil(rect.width)}px`,
+                    height: 'auto',
+                    overflow: 'visible',
+                    background: '#ffffff',
+                    zIndex: '2147483647',
+                    pointerEvents: 'none'
+                  });
+                  const clone = el.cloneNode(true);
+                  Object.assign(clone.style, {
+                    display: 'block',
+                    width: '100%',
+                    height: 'auto',
+                    maxHeight: 'none',
+                    overflow: 'visible',
+                    margin: '0'
+                  });
+                  wrapper.appendChild(clone);
+                  document.body.appendChild(wrapper);
+                  return wrapper.getBoundingClientRect().height > 0;
+                }
+                """,
+                capture_id,
+            )
+        except (AttributeError, TypeError):
+            category.screenshot(path=str(screenshot_path))
+            return
+        try:
+            clone = page.locator(selector)
+            clone.wait_for(state="visible", timeout=self.navigation_timeout_ms)
+            clone.screenshot(path=str(screenshot_path))
+        finally:
+            try:
+                page.locator(selector).evaluate_all(
+                    "nodes => nodes.forEach(node => node.remove())"
+                )
+            except Exception:
+                pass
 
     def _capture_franklin_scroll_tiles(
         self,
@@ -2271,7 +2435,7 @@ class BrowserReviewService:
         *,
         progress: Callable[[str], None] | None,
     ) -> None:
-        delay_ms = self._next_request_delay_ms()
+        delay_ms = self.provider_switch_delay_ms
         if delay_ms <= 0:
             return
         if progress:
@@ -2477,15 +2641,13 @@ def _cosmic_numeric_id(value: str | None) -> str:
 
 
 def _cosmic_source_url(current_url: str, cosmic_id: str | None) -> str:
-    """Expose the GRCh37 internal id together with Archer's legacy identifier."""
-    internal = re.search(r"[?&]id=(\d+)", current_url)
-    legacy = _cosmic_numeric_id(cosmic_id)
-    if not internal or not legacy:
-        return current_url
-    return (
-        "https://cancer.sanger.ac.uk/cosmic/mutation/overview"
-        f"?id={internal.group(1)}&merge={legacy}"
-    )
+    """Return the exact resolved COSMIC page that was validated and captured.
+
+    COSMIC's GRCh37 links can require extra query parameters such as ``cosm``,
+    ``genome`` and ``trans``. Rebuilding the URL from only ``id`` and ``merge``
+    can therefore turn a working page into a "mutation not found" link.
+    """
+    return current_url
 
 
 def parse_oncokb_page(

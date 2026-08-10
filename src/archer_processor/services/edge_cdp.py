@@ -85,6 +85,7 @@ class EdgeCdpLauncher:
         headless: bool = False,
         accept_downloads: bool = True,
         viewport: dict[str, int] | None = None,
+        background: bool = False,
     ) -> "EdgeCdpContext":
         if channel not in {"msedge", "edge"}:
             raise EdgeCdpError(f"Unsupported CDP browser channel: {channel}")
@@ -98,6 +99,7 @@ class EdgeCdpLauncher:
                     Path(user_data_dir),
                     viewport=viewport or {"width": 1440, "height": 1000},
                     accept_downloads=accept_downloads,
+                    background=background,
                 )
                 break
             except EdgeCdpTimeout:
@@ -141,6 +143,7 @@ class EdgeCdpContext:
         *,
         viewport: dict[str, int],
         accept_downloads: bool,
+        background: bool = False,
     ) -> "EdgeCdpContext":
         profile_directory.mkdir(parents=True, exist_ok=True)
         edge = find_edge_executable()
@@ -162,6 +165,14 @@ class EdgeCdpContext:
             "--disable-session-crashed-bubble",
             "about:blank",
         ]
+        if background:
+            arguments[1:1] = [
+                "--start-minimized",
+                "--window-position=-32000,-32000",
+                "--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding",
+            ]
         creation_flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         process = subprocess.Popen(
             arguments,

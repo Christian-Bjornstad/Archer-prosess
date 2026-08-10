@@ -4,6 +4,10 @@ from archer_processor.core import default_artifact_rules
 from archer_processor.services import AppSettings
 
 
+def test_automated_edge_runs_minimized_by_default():
+    assert AppSettings().browser_background is True
+
+
 def test_login_passwords_use_credential_store_not_json(tmp_path, monkeypatch):
     config_path = tmp_path / "config.json"
     monkeypatch.setattr(AppSettings, "config_path", classmethod(lambda cls: config_path))

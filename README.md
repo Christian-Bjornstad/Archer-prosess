@@ -37,7 +37,7 @@ identifiers to the evidence providers.
 | Structured import | Validates Archer TSV exports and normalizes variant records |
 | Local prioritisation | Applies configurable artifact rules and compares against the yearly VPM history workbook |
 | Review-first workflow | Produces a full Excel workbook where unwanted searches can be marked with `X` |
-| Evidence collection | Searches MTBP, Franklin, ClinVar, OncoKB, and COSMIC in visible Microsoft Edge sessions |
+| Evidence collection | Searches MTBP, Franklin, ClinVar, OncoKB, and COSMIC in minimized Microsoft Edge sessions |
 | Screenshot capture | Saves focused, variant-specific evidence images in a consistent order |
 | Resumable analysis | Reopens a processed workbook with selections, evidence, and screenshot paths restored |
 | Patient reporting | Creates one image-led interpretation workbook per DIT identifier |
@@ -63,9 +63,16 @@ flowchart LR
 
 Use **Pause Search** to pause at the next safe browser checkpoint and **Resume
 Search** to continue the same queue without repeating completed work. **Stop
-Search** ends the run, retains completed patient evidence, and updates the review
-workbook whenever it is writable. A stopped search can be started again with
-**Run Evidence Search**.
+Search** ends the run, retains every completed provider result, and updates the
+review workbook whenever it is writable. **Resume Incomplete Search** skips fully
+completed patients and sources, while retrying errors, timeouts, and unfinished
+work. Log lines include clock timestamps and completed/stopped runs include total
+elapsed time.
+
+Automated Edge windows run minimized by default so the workstation remains usable.
+Manual **Sign In** windows still open visibly. Variant-to-variant pacing remains
+randomized according to Settings; switching between providers uses a fixed 3-second
+transition.
 
 ## Evidence sources
 
@@ -75,7 +82,7 @@ the provider exposes that choice.
 | Source | Capture strategy | Key safeguards |
 | --- | --- | --- |
 | **MTBP** | One pseudonymous report per variant and one alteration-centric screenshot | Transcript HGVS first, then a validated GRCh37 genomic fallback; returned variant identity is checked; personal report URLs are not exported |
-| **Franklin** | ACMG overview, ACMG evidence cards through De Novo Data, full Oncogenic Classification, Predictions, and Population Frequencies | Explicit **hg19** + **Somatic** search; dynamic panels must stabilize; Somatic Clinical Evidence and Add More Evidence are excluded |
+| **Franklin** | Classification-only ACMG/Oncology overviews, each named evidence card, Predictions, and Population Frequencies | Explicit **hg19** + **Somatic** search; clipped evidence cards are expanded for full capture; ACMG stops after De Novo Data; Somatic Clinical Evidence and Add More Evidence are excluded |
 | **ClinVar** | Variant title and focused germline/somatic classification summary | Resolves the canonical ClinVar variation before capture |
 | **OncoKB** | Variant Overview and Mutation Effect | Rejects the cookie overlay before taking the screenshot |
 | **COSMIC** | Overview, Tissue distribution, and Samples filtered to `lymphoid` | Uses the Archer `COSMICID` and resolves the canonical GRCh37 mutation page |
@@ -143,7 +150,7 @@ Patient reports are named `<DIT>_VPM_Tolkning.xlsx` and contain:
 
 - **Oversikt** — compact findings such as `ClinVar – Benign`, plus source links.
 - **Vedlegg** — the DIT identifier and space for manual additions.
-- **One sheet per variant** — compact evidence followed by embedded screenshots.
+- **One sheet per variant** — linked compact evidence followed by embedded screenshots with plain, non-linked captions.
 
 Unique genes use the gene symbol as the sheet name. If a patient has multiple
 variants in the same gene, the protein change is added; the coding-DNA change is
@@ -198,6 +205,7 @@ Use the in-app **Settings** page to configure:
 - default output directory;
 - provider sign-in details;
 - browser safety-buffer range;
+- minimized/background Edge mode;
 - MTBP timeout and cancer type;
 - local artifact rules. The defaults contain the 36 `HGVSc` entries from
   **Artefakter DNA Fragmentering v2**; `NM_015338.5:c.1934dup` is treated as an

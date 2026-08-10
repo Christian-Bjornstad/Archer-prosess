@@ -166,6 +166,16 @@ def test_patient_excel_report_uses_requested_sheet_layout_and_image_order(tmp_pa
     assert workbook["Vedlegg"]["A1"].value == "26OUM00004"
     variant_sheet = workbook["TP53"]
     assert variant_sheet["A6"].hyperlink is None
+    assert variant_sheet["A7"].hyperlink is not None
+    screenshot_heading_row = next(
+        row
+        for row in range(1, variant_sheet.max_row + 1)
+        if variant_sheet.cell(row, 1).value == "Skjermbilder"
+    )
+    assert all(
+        variant_sheet.cell(row, 1).hyperlink is None
+        for row in range(screenshot_heading_row + 1, variant_sheet.max_row + 1)
+    )
     assert len(variant_sheet._images) == 6
     assert IMAGE_DATABASES == ("MTBP", "Franklin", "ClinVar", "OncoKB", "COSMIC")
     workbook.close()

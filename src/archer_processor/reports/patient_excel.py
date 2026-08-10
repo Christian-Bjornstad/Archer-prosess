@@ -204,9 +204,6 @@ class PatientExcelReportWriter:
                     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
                     caption = ws.cell(row, 1, record["label"])
                     caption.font = Font(bold=True, color=self.colors["navy"])
-                    if record.get("url") and database != "MTBP":
-                        caption.hyperlink = record["url"]
-                        caption.style = "Hyperlink"
                     row += 1
                     row = self._add_image(ws, Path(record["path"]), row)
                     row += 1
@@ -374,9 +371,6 @@ class PatientExcelReportWriter:
                 caption = ws.cell(row, 1, record["label"])
                 caption.font = Font(bold=True, color=self.colors["navy"])
                 caption.fill = PatternFill("solid", fgColor=self.colors["pale_blue"])
-                if record.get("url") and database != "MTBP":
-                    caption.hyperlink = record["url"]
-                    caption.style = "Hyperlink"
                 row += 1
                 row = self._add_image(ws, Path(record["path"]), row)
                 row += 1
