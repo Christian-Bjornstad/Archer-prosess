@@ -31,6 +31,7 @@ class AppSettings:
     search_included_only: bool = True
     gnomad_dataset: str = "gnomad_r2_1"
     mtbp_cancer_type: str = "Blood"
+    artifact_catalog_version: int = 2
     artifact_rules: list[dict[str, str]] = field(default_factory=default_artifact_rules)
     enabled_databases: list[str] = field(
         default_factory=lambda: [
@@ -74,6 +75,20 @@ class AppSettings:
         if legacy_fixed_delay or former_default_range:
             settings.browser_delay_seconds = 10
             settings.browser_delay_max_seconds = 20
+        if int(data.get("artifact_catalog_version", 0) or 0) < 2:
+            legacy_hgvsc = {
+                "NM_004119.2:c.1419-4dup",
+                "NM_004119.2:c.1419-4del",
+                "NM_004972.3:c.3291+16dup",
+                "NM_004972.3:c.3291+16del",
+            }
+            configured_hgvsc = {
+                str(entry.get("hgvsc") or "").strip()
+                for entry in settings.artifact_rules
+            }
+            if configured_hgvsc == legacy_hgvsc:
+                settings.artifact_rules = default_artifact_rules()
+            settings.artifact_catalog_version = 2
         settings.browser_delay_seconds = max(0, int(settings.browser_delay_seconds))
         settings.browser_delay_max_seconds = max(
             settings.browser_delay_seconds,

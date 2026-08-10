@@ -82,6 +82,7 @@ class BrowserReviewService:
         request_delay_ms: int = 10_000,
         request_delay_max_ms: int | None = 20_000,
         stop_requested: Callable[[], bool] | None = None,
+        pause_wait: Callable[[], None] | None = None,
     ) -> None:
         self.profile_root = profile_root or Path.home() / ".archer-prosess" / "browser_profiles"
         self.channel = channel
@@ -106,6 +107,7 @@ class BrowserReviewService:
             else request_delay_max_ms,
         )
         self.stop_requested = stop_requested or (lambda: False)
+        self.pause_wait = pause_wait or (lambda: None)
         self._cosmic_cache: dict[str, DatabaseEvidence] = {}
         self._mtbp_rejected_transcript_queries: set[str] = set()
 
@@ -2280,6 +2282,9 @@ class BrowserReviewService:
         self._interruptible_sleep(delay_ms / 1_000)
 
     def _check_cancelled(self) -> None:
+        if self.stop_requested():
+            raise BrowserReviewCancelled("Evidence search stopped by user.")
+        self.pause_wait()
         if self.stop_requested():
             raise BrowserReviewCancelled("Evidence search stopped by user.")
 

@@ -61,9 +61,11 @@ flowchart LR
 5. Verify the compact findings and captured source images.
 6. Create the final patient workbooks.
 
-The search can be stopped safely at any time with **Stop Search**. The current
-browser action is allowed to finish, completed patient evidence is retained, and
-the review workbook is updated whenever it is writable.
+Use **Pause Search** to pause at the next safe browser checkpoint and **Resume
+Search** to continue the same queue without repeating completed work. **Stop
+Search** ends the run, retains completed patient evidence, and updates the review
+workbook whenever it is writable. A stopped search can be started again with
+**Run Evidence Search**.
 
 ## Evidence sources
 
@@ -197,7 +199,9 @@ Use the in-app **Settings** page to configure:
 - provider sign-in details;
 - browser safety-buffer range;
 - MTBP timeout and cancer type;
-- local artifact rules;
+- local artifact rules. The defaults contain the 36 `HGVSc` entries from
+  **Artefakter DNA Fragmentering v2**; `NM_015338.5:c.1934dup` is treated as an
+  artifact through 5.5% AF and retained above that threshold;
 - default evidence sources.
 
 Non-secret settings are stored in `%USERPROFILE%\.archer-prosess\config.json`.

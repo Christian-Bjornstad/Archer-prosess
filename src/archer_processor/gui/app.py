@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import sys
 import random
+import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from PyQt6.QtCore import QDate, QObject, Qt, QThread, QTimer, pyqtSignal
@@ -27,6 +29,7 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QStatusBar,
     QTableWidget,
@@ -116,6 +119,42 @@ def _merge_evidence_results(target: dict, incoming: dict) -> None:
         target[key] = list(by_database.values())
 
 
+class SearchPauseControl:
+    """Thread-safe cooperative pause gate shared with a search worker."""
+
+    def __init__(self) -> None:
+        self._resume = threading.Event()
+        self._resume.set()
+
+    @property
+    def pause_requested(self) -> bool:
+        return not self._resume.is_set()
+
+    def request_pause(self) -> None:
+        self._resume.clear()
+
+    def resume(self) -> None:
+        self._resume.set()
+
+    def wait(
+        self,
+        *,
+        stop_requested: Callable[[], bool],
+        pause_changed: Callable[[bool], None],
+    ) -> None:
+        if self._resume.is_set():
+            return
+        pause_changed(True)
+        try:
+            while not self._resume.wait(0.1):
+                if stop_requested():
+                    raise BrowserReviewCancelled("Evidence search stopped by user.")
+        finally:
+            pause_changed(False)
+        if stop_requested():
+            raise BrowserReviewCancelled("Evidence search stopped by user.")
+
+
 class DatabaseWorker(QObject):
     finished = pyqtSignal(object)
     cancelled = pyqtSignal()
@@ -123,6 +162,7 @@ class DatabaseWorker(QObject):
     failed = pyqtSignal(str)
     status = pyqtSignal(str)
     progress = pyqtSignal(int, int, str)
+    paused = pyqtSignal(bool)
 
     def __init__(
         self,
@@ -139,6 +179,7 @@ class DatabaseWorker(QObject):
         self.databases = [*api_databases, *browser_databases]
         self.artifact_root = artifact_root
         self.settings = settings
+        self.pause_control = SearchPauseControl()
 
     def run(self) -> None:
         try:
@@ -225,12 +266,25 @@ class DatabaseWorker(QObject):
             mtbp_email=self.settings.mtbp_email,
             mtbp_password=self.settings.mtbp_password,
             stop_requested=lambda: QThread.currentThread().isInterruptionRequested(),
+            pause_wait=self._wait_if_paused,
         )
 
-    @staticmethod
-    def _check_cancelled() -> None:
+    def request_pause(self) -> None:
+        self.pause_control.request_pause()
+
+    def resume_search(self) -> None:
+        self.pause_control.resume()
+
+    def _wait_if_paused(self) -> None:
+        self.pause_control.wait(
+            stop_requested=lambda: QThread.currentThread().isInterruptionRequested(),
+            pause_changed=self.paused.emit,
+        )
+
+    def _check_cancelled(self) -> None:
         if QThread.currentThread().isInterruptionRequested():
             raise BrowserReviewCancelled("Evidence search stopped by user.")
+        self._wait_if_paused()
 
     def _wait(self, reason: str) -> None:
         minimum = max(0, int(self.settings.browser_delay_seconds))
@@ -289,6 +343,7 @@ class BrowserReviewWorker(QObject):
     failed = pyqtSignal(str)
     status = pyqtSignal(str)
     progress = pyqtSignal(int, int, str)
+    paused = pyqtSignal(bool)
 
     def __init__(self, variants, databases: list[str], artifact_root: Path, settings: AppSettings):
         super().__init__()
@@ -296,6 +351,7 @@ class BrowserReviewWorker(QObject):
         self.databases = databases
         self.artifact_root = artifact_root
         self.settings = settings
+        self.pause_control = SearchPauseControl()
 
     def run(self) -> None:
         try:
@@ -314,13 +370,13 @@ class BrowserReviewWorker(QObject):
                 mtbp_email=self.settings.mtbp_email,
                 mtbp_password=self.settings.mtbp_password,
                 stop_requested=lambda: QThread.currentThread().isInterruptionRequested(),
+                pause_wait=self._wait_if_paused,
             )
             all_evidence: dict[str, list[DatabaseEvidence]] = {}
             patients = _variants_grouped_by_patient(self.variants)
             self.progress.emit(0, len(patients), "Preparing signed-in browser queue")
             for patient_index, (patient_id, patient_variants) in enumerate(patients, start=1):
-                if QThread.currentThread().isInterruptionRequested():
-                    raise BrowserReviewCancelled("Evidence search stopped by user.")
+                self._check_cancelled()
                 prefix = f"Patient {patient_index}/{len(patients)} ({patient_id})"
                 self.progress.emit(
                     patient_index - 1,
@@ -351,10 +407,7 @@ class BrowserReviewWorker(QObject):
                         )
                         remaining = float(delay)
                         while remaining > 0:
-                            if QThread.currentThread().isInterruptionRequested():
-                                raise BrowserReviewCancelled(
-                                    "Evidence search stopped by user."
-                                )
+                            self._check_cancelled()
                             chunk = min(0.25, remaining)
                             time.sleep(chunk)
                             remaining -= chunk
@@ -363,6 +416,23 @@ class BrowserReviewWorker(QObject):
             self.cancelled.emit()
         except Exception as exc:
             self.failed.emit(str(exc))
+
+    def request_pause(self) -> None:
+        self.pause_control.request_pause()
+
+    def resume_search(self) -> None:
+        self.pause_control.resume()
+
+    def _wait_if_paused(self) -> None:
+        self.pause_control.wait(
+            stop_requested=lambda: QThread.currentThread().isInterruptionRequested(),
+            pause_changed=self.paused.emit,
+        )
+
+    def _check_cancelled(self) -> None:
+        if QThread.currentThread().isInterruptionRequested():
+            raise BrowserReviewCancelled("Evidence search stopped by user.")
+        self._wait_if_paused()
 
 
 class MetricCard(QFrame):
@@ -440,6 +510,8 @@ class MainWindow(QMainWindow):
         self.processing_worker: ProcessingWorker | None = None
         self.database_worker: DatabaseWorker | None = None
         self.browser_worker: BrowserLoginWorker | BrowserReviewWorker | None = None
+        self._search_pause_requested = False
+        self._search_stop_requested = False
         self.workbook_write_pending = False
         self._workbook_lock_warning_shown = False
         self.setWindowTitle("VPM Tolkning")
@@ -741,19 +813,35 @@ class MainWindow(QMainWindow):
         command_title.setObjectName("SectionTitle")
         self.evidence_summary = QLabel("Choose sources to prepare a search")
         self.evidence_summary.setObjectName("HelperText")
+        self.evidence_summary.setWordWrap(True)
+        self.evidence_summary.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
         command_copy.addWidget(command_title)
         command_copy.addWidget(self.evidence_summary)
         command_layout.addLayout(command_copy, 1)
         self.search_btn = QPushButton("Run Evidence Search")
         self.search_btn.setObjectName("PrimaryButton")
-        self.search_btn.setMinimumWidth(190)
+        self.search_btn.setFixedWidth(190)
         self.search_btn.setMinimumHeight(44)
         self.search_btn.setEnabled(False)
         self.search_btn.clicked.connect(self._start_database_search)
         command_layout.addWidget(self.search_btn)
+        self.pause_search_btn = QPushButton("Pause Search")
+        self.pause_search_btn.setObjectName("PauseButton")
+        self.pause_search_btn.setFixedWidth(124)
+        self.pause_search_btn.setMinimumHeight(44)
+        self.pause_search_btn.setEnabled(False)
+        self.pause_search_btn.setAccessibleName("Pause or resume evidence search")
+        self.pause_search_btn.setToolTip(
+            "Pause at the next safe checkpoint, then resume the same queue without repeating completed work."
+        )
+        self.pause_search_btn.clicked.connect(self._toggle_search_pause)
+        command_layout.addWidget(self.pause_search_btn)
         self.stop_search_btn = QPushButton("Stop Search")
         self.stop_search_btn.setObjectName("StopButton")
-        self.stop_search_btn.setMinimumWidth(118)
+        self.stop_search_btn.setFixedWidth(118)
         self.stop_search_btn.setMinimumHeight(44)
         self.stop_search_btn.setEnabled(False)
         self.stop_search_btn.setAccessibleName("Stop evidence search")
@@ -765,7 +853,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(command)
 
         checks = QGroupBox("Evidence sources")
-        checks.setMinimumHeight(118)
+        checks.setMinimumHeight(250)
         grid = QGridLayout(checks)
         grid.setHorizontalSpacing(9)
         grid.setVerticalSpacing(6)
@@ -787,8 +875,9 @@ class MainWindow(QMainWindow):
                 check.setToolTip("Uses the saved signed-in browser session.")
             self.db_checks[database] = check
             check.stateChanged.connect(self._update_evidence_summary)
-            grid.addWidget(check, 0, index)
-            grid.setColumnStretch(index, 1)
+            row, column = divmod(index, 2)
+            grid.addWidget(check, row, column)
+            grid.setColumnStretch(column, 1)
         layout.addWidget(checks)
 
         options = QGroupBox("Search scope and browser session")
@@ -805,58 +894,62 @@ class MainWindow(QMainWindow):
         self.included_only_check.setToolTip(
             "When enabled, excluded and flagged variants are not sent to any database website."
         )
-        options_grid.addWidget(self.included_only_check, 0, 1)
+        options_grid.addWidget(self.included_only_check, 0, 1, 1, 3)
         serial_label = QLabel("Serial patient queue")
         serial_label.setObjectName("FieldLabel")
-        options_grid.addWidget(serial_label, 0, 2)
+        options_grid.addWidget(serial_label, 1, 0)
         self.worker_count = QSpinBox()
         self.worker_count.setRange(1, 1)
         self.worker_count.setValue(1)
+        self.worker_count.setFixedWidth(72)
         self.worker_count.setToolTip(
             "Patient-centric evidence collection is deliberately serial to avoid bursts of requests."
         )
-        options_grid.addWidget(self.worker_count, 0, 3)
+        options_grid.addWidget(self.worker_count, 1, 1)
         selection_label = QLabel("Reviewed workbook")
         selection_label.setObjectName("FieldLabel")
-        options_grid.addWidget(selection_label, 1, 0)
+        options_grid.addWidget(selection_label, 2, 0)
         self.selection_status = QLabel("No skip list loaded")
         self.selection_status.setObjectName("HelperText")
         self.selection_status.setWordWrap(True)
-        options_grid.addWidget(self.selection_status, 1, 1, 1, 2)
+        options_grid.addWidget(self.selection_status, 2, 1, 1, 2)
         self.load_selection_btn = QPushButton("Load Selection Workbook")
+        self.load_selection_btn.setFixedWidth(190)
         self.load_selection_btn.setEnabled(False)
         self.load_selection_btn.setToolTip(
             "Load the processed workbook and skip rows marked X on With Artifacts."
         )
         self.load_selection_btn.clicked.connect(self._load_database_selection)
-        options_grid.addWidget(self.load_selection_btn, 1, 3)
+        options_grid.addWidget(self.load_selection_btn, 2, 3)
 
         browser_label = QLabel("Browser provider")
         browser_label.setObjectName("FieldLabel")
         self.browser_database_combo = QComboBox()
         self.browser_database_combo.addItems(list(BROWSER_DATABASES))
         self.browser_signin_btn = QPushButton("Sign In")
+        self.browser_signin_btn.setFixedWidth(90)
         self.browser_signin_btn.setToolTip(
             "Uses credentials stored by Windows Credential Manager, or opens Edge for manual sign-in. The profile is released automatically after success."
         )
         self.browser_signin_btn.clicked.connect(self._start_browser_login)
         self.browser_review_btn = QPushButton("Run Browser Sources")
+        self.browser_review_btn.setFixedWidth(170)
         self.browser_review_btn.setObjectName("OutlineButton")
         self.browser_review_btn.setEnabled(False)
         self.browser_review_btn.setToolTip(
             "Runs selected ClinVar, COSMIC, OncoKB, Franklin, and MTBP sources patient-by-patient in visible Edge."
         )
         self.browser_review_btn.clicked.connect(self._start_browser_review)
-        options_grid.addWidget(browser_label, 2, 0)
-        options_grid.addWidget(self.browser_database_combo, 2, 1)
-        options_grid.addWidget(self.browser_signin_btn, 2, 2)
-        options_grid.addWidget(self.browser_review_btn, 2, 3)
+        options_grid.addWidget(browser_label, 3, 0)
+        options_grid.addWidget(self.browser_database_combo, 3, 1)
+        options_grid.addWidget(self.browser_signin_btn, 3, 2)
+        options_grid.addWidget(self.browser_review_btn, 3, 3)
         self.browser_security_label = QLabel(
             "Local privacy guard: only variant coordinates are sent; patient and sample identifiers remain on this computer."
         )
         self.browser_security_label.setObjectName("SecurityNote")
         self.browser_security_label.setWordWrap(True)
-        options_grid.addWidget(self.browser_security_label, 3, 1, 1, 3)
+        options_grid.addWidget(self.browser_security_label, 4, 1, 1, 3)
         layout.addWidget(options)
 
         exports = QGroupBox("Reports")
@@ -868,9 +961,11 @@ class MainWindow(QMainWindow):
         export_help.setObjectName("HelperText")
         export_help.setWordWrap(True)
         self.rewrite_btn = QPushButton("Update Review Workbook")
+        self.rewrite_btn.setFixedWidth(185)
         self.rewrite_btn.setEnabled(False)
         self.rewrite_btn.clicked.connect(self._rewrite_workbook)
         self.patient_excel_btn = QPushButton("Create Patient Workbooks")
+        self.patient_excel_btn.setFixedWidth(190)
         self.patient_excel_btn.setObjectName("ReportButton")
         self.patient_excel_btn.setEnabled(False)
         self.patient_excel_btn.setToolTip(
@@ -889,6 +984,11 @@ class MainWindow(QMainWindow):
             "No evidence collected yet. Run selected sources to populate this table."
         )
         self.evidence_result_summary.setObjectName("HelperText")
+        self.evidence_result_summary.setWordWrap(True)
+        self.evidence_result_summary.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
         evidence_layout.addWidget(self.evidence_result_summary)
         self.evidence_table = QTableWidget(0, 3 + len(self.databases))
         self.evidence_table.setHorizontalHeaderLabels(["Sample", "Gene", "HGVSc", *self.databases])
@@ -1025,10 +1125,23 @@ class MainWindow(QMainWindow):
 
         artifact_group = QGroupBox("Artifact exclusions")
         artifact_layout = QVBoxLayout(artifact_group)
-        self.artifact_table = QTableWidget(0, 3)
-        self.artifact_table.setHorizontalHeaderLabels(["Gene", "HGVSc", "Reason"])
-        self.artifact_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.artifact_table.setMinimumHeight(180)
+        artifact_note = QLabel(
+            "Defaults: 36 HGVSc entries from ‘Artefakter DNA Fragmentering v2’. "
+            "ASXL1 NM_015338.5:c.1934dup is kept when AF is above 5.5%."
+        )
+        artifact_note.setObjectName("HelperText")
+        artifact_note.setWordWrap(True)
+        artifact_layout.addWidget(artifact_note)
+        self.artifact_table = QTableWidget(0, 4)
+        self.artifact_table.setHorizontalHeaderLabels(
+            ["Gene", "HGVSc", "Artifact through AF", "Reason"]
+        )
+        artifact_header = self.artifact_table.horizontalHeader()
+        artifact_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        artifact_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        artifact_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        artifact_header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.artifact_table.setMinimumHeight(240)
         self._load_artifact_table(self.settings.artifact_rules)
         artifact_actions = QHBoxLayout()
         add_artifact_btn = QPushButton("Add Artifact")
@@ -1085,7 +1198,7 @@ class MainWindow(QMainWindow):
         for artifact in artifacts:
             row = self.artifact_table.rowCount()
             self.artifact_table.insertRow(row)
-            for col, key in enumerate(["gene", "hgvsc", "reason"]):
+            for col, key in enumerate(["gene", "hgvsc", "max_af", "reason"]):
                 self.artifact_table.setItem(row, col, QTableWidgetItem(str(artifact.get(key) or "")))
 
     def _artifact_rules_from_table(self) -> list[dict[str, str]]:
@@ -1093,15 +1206,19 @@ class MainWindow(QMainWindow):
         for row in range(self.artifact_table.rowCount()):
             gene = self._table_text(self.artifact_table, row, 0).upper()
             hgvsc = self._table_text(self.artifact_table, row, 1)
-            reason = self._table_text(self.artifact_table, row, 2)
+            max_af = self._table_text(self.artifact_table, row, 2)
+            reason = self._table_text(self.artifact_table, row, 3)
             if hgvsc:
-                artifacts.append({"gene": gene, "hgvsc": hgvsc, "reason": reason})
+                artifact = {"gene": gene, "hgvsc": hgvsc, "reason": reason}
+                if max_af:
+                    artifact["max_af"] = max_af
+                artifacts.append(artifact)
         return artifacts
 
     def _add_artifact_row(self) -> None:
         row = self.artifact_table.rowCount()
         self.artifact_table.insertRow(row)
-        for col in range(3):
+        for col in range(4):
             self.artifact_table.setItem(row, col, QTableWidgetItem(""))
         self.artifact_table.setCurrentCell(row, 0)
 
@@ -1203,6 +1320,7 @@ class MainWindow(QMainWindow):
         thread.started.connect(worker.run)
         worker.status.connect(self._log)
         worker.progress.connect(self._update_run_progress)
+        worker.paused.connect(self._search_pause_changed)
         worker.patient_finished.connect(self._database_patient_finished)
         worker.finished.connect(self._database_finished)
         worker.cancelled.connect(self._search_cancelled)
@@ -1288,6 +1406,7 @@ class MainWindow(QMainWindow):
         thread.started.connect(worker.run)
         worker.status.connect(self._log)
         worker.progress.connect(self._update_run_progress)
+        worker.paused.connect(self._search_pause_changed)
         worker.patient_finished.connect(self._browser_patient_finished)
         worker.finished.connect(self._browser_review_finished)
         worker.cancelled.connect(self._search_cancelled)
@@ -1487,9 +1606,14 @@ class MainWindow(QMainWindow):
                 and isinstance(worker, (DatabaseWorker, BrowserReviewWorker))
             ):
                 thread.requestInterruption()
+                worker.resume_search()
                 requested = True
         if not requested:
             return
+        self._search_stop_requested = True
+        self._search_pause_requested = False
+        self.pause_search_btn.setEnabled(False)
+        self.pause_search_btn.setText("Pause Search")
         self.stop_search_btn.setEnabled(False)
         self.stop_search_btn.setText("Stopping…")
         self.run_progress.show()
@@ -1505,13 +1629,86 @@ class MainWindow(QMainWindow):
         )
         self._log("Stop requested; waiting for the current safe browser action")
 
+    def _toggle_search_pause(self) -> None:
+        active_workers = []
+        for thread, worker in (
+            (self.database_thread, self.database_worker),
+            (self.browser_thread, self.browser_worker),
+        ):
+            if (
+                thread is not None
+                and thread.isRunning()
+                and isinstance(worker, (DatabaseWorker, BrowserReviewWorker))
+            ):
+                active_workers.append(worker)
+        if not active_workers:
+            return
+        if self._search_pause_requested:
+            for worker in active_workers:
+                worker.resume_search()
+            self._search_pause_requested = False
+            self.pause_search_btn.setText("Pause Search")
+            self.run_progress.show()
+            self.run_progress.title.setText("Resuming evidence search")
+            self.run_progress.detail.setText(
+                "Continuing from the same patient and source queue."
+            )
+            self.status_badge.setText("Resuming")
+            self._log("Evidence search resumed from the same queue")
+            return
+        for worker in active_workers:
+            worker.request_pause()
+        self._search_pause_requested = True
+        self.pause_search_btn.setText("Resume Search")
+        self.run_progress.show()
+        self.run_progress.title.setText("Pause requested")
+        self.run_progress.detail.setText(
+            "The queue will pause at the next safe checkpoint in the current browser action."
+        )
+        self.status_badge.setText("Pausing")
+        self.status_badge.setStyleSheet(
+            f"background: {Palette.pale_yellow}; color: {Palette.yellow}; "
+            "border: 1px solid #E7CF91; border-radius: 12px; "
+            "padding: 5px 12px; font-weight: 700;"
+        )
+        self._log("Pause requested; waiting for a safe checkpoint")
+
+    def _search_pause_changed(self, paused: bool) -> None:
+        if self._search_stop_requested:
+            return
+        if paused:
+            self.activity_progress.hide()
+            self.run_progress.show()
+            self.run_progress.title.setText("Evidence search paused")
+            self.run_progress.detail.setText(
+                "Completed evidence is safe. Resume continues from this exact queue position."
+            )
+            self.status_badge.setText("Paused")
+            self.status_badge.setStyleSheet(
+                f"background: {Palette.pale_yellow}; color: {Palette.yellow}; "
+                "border: 1px solid #E7CF91; border-radius: 12px; "
+                "padding: 5px 12px; font-weight: 700;"
+            )
+            self.status_bar.showMessage("Evidence search paused")
+            return
+        self.status_badge.setText("Searching")
+        self.status_badge.setStyleSheet(
+            f"background: {Palette.pale_blue}; color: {Palette.blue}; "
+            f"border: 1px solid {Palette.blue}; border-radius: 12px; "
+            "padding: 5px 12px; font-weight: 700;"
+        )
+        self.status_bar.showMessage("Evidence search resumed")
+
     def _search_cancelled(self) -> None:
         self._refresh_evidence_table()
         self._auto_rewrite_workbook()
         self._set_ready()
         self.run_progress.show()
         self.run_progress.title.setText("Evidence search stopped")
-        detail = "Completed patient results were kept and written to the review workbook."
+        detail = (
+            "Completed patient results were kept and written to the review workbook. "
+            "Run Evidence Search starts a new run."
+        )
         if self.workbook_write_pending:
             detail = (
                 "Completed results were kept, but the workbook is open in Excel. "
@@ -1832,6 +2029,9 @@ class MainWindow(QMainWindow):
 
     def _set_busy(self, label: str) -> None:
         self.run_progress.hide()
+        is_search = label in {"Searching", "Browser lookups"}
+        self._search_pause_requested = False
+        self._search_stop_requested = False
         self.status_badge.setText(label)
         self.status_badge.setStyleSheet(
             f"background: {Palette.pale_blue}; color: {Palette.blue}; "
@@ -1841,8 +2041,10 @@ class MainWindow(QMainWindow):
         self.activity_progress.show()
         self.process_btn.setEnabled(False)
         self.search_btn.setEnabled(False)
+        self.pause_search_btn.setText("Pause Search")
+        self.pause_search_btn.setEnabled(is_search)
         self.stop_search_btn.setText("Stop Search")
-        self.stop_search_btn.setEnabled(label in {"Searching", "Browser lookups"})
+        self.stop_search_btn.setEnabled(is_search)
         self.browser_signin_btn.setEnabled(False)
         self.browser_review_btn.setEnabled(False)
         self.rewrite_btn.setEnabled(False)
@@ -1856,6 +2058,10 @@ class MainWindow(QMainWindow):
         self.activity_progress.hide()
         self._update_process_state()
         self.search_btn.setEnabled(self.result is not None)
+        self._search_pause_requested = False
+        self._search_stop_requested = False
+        self.pause_search_btn.setText("Pause Search")
+        self.pause_search_btn.setEnabled(False)
         self.stop_search_btn.setText("Stop Search")
         self.stop_search_btn.setEnabled(False)
         self.browser_signin_btn.setEnabled(True)
@@ -2027,6 +2233,16 @@ class MainWindow(QMainWindow):
             QPushButton#StopButton:hover {{
                 background: {Palette.pale_red};
                 border-color: {Palette.red};
+            }}
+            QPushButton#PauseButton {{
+                min-height: 24px;
+                background: {Palette.pale_yellow};
+                color: #714600;
+                border: 1px solid #D7AA4B;
+            }}
+            QPushButton#PauseButton:hover {{
+                background: #FFE9A8;
+                border-color: #B77A13;
             }}
             QPushButton#ReportButton {{
                 background: {Palette.green};

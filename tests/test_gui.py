@@ -2,7 +2,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from archer_processor.core import DatabaseEvidence, VariantProcessor
+from archer_processor.core import DatabaseEvidence, VariantProcessor, default_artifact_rules
 from archer_processor.gui.app import DatabaseWorker, MainWindow
 from archer_processor.reports import ExcelReportWriter
 from archer_processor.services import DatabaseSearchService
@@ -41,6 +41,8 @@ def test_database_tab_contains_current_sources(qt_app):
     assert not window.browser_review_btn.isEnabled()
     assert not window.stop_search_btn.isEnabled()
     assert window.stop_search_btn.text() == "Stop Search"
+    assert not window.pause_search_btn.isEnabled()
+    assert window.pause_search_btn.text() == "Pause Search"
     assert not window.patient_excel_btn.isEnabled()
     assert not hasattr(window, "patient_pdf_btn")
     assert not hasattr(window, "clinvar_key_edit")
@@ -51,6 +53,22 @@ def test_database_tab_contains_current_sources(qt_app):
         for index in range(window.evidence_table.columnCount())
     ]
     assert headers == ["Sample", "Gene", "HGVSc", *window.databases]
+
+
+def test_artifact_settings_show_catalog_and_af_exception(qt_app):
+    window = MainWindow()
+    window._load_artifact_table(default_artifact_rules())
+
+    headers = [
+        window.artifact_table.horizontalHeaderItem(index).text()
+        for index in range(window.artifact_table.columnCount())
+    ]
+
+    assert window.artifact_table.rowCount() == 36
+    assert headers == ["Gene", "HGVSc", "Artifact through AF", "Reason"]
+    assert window.artifact_table.item(0, 1).text() == "NM_015338.5:c.1934dup"
+    assert window.artifact_table.item(0, 2).text() == "5.5%"
+    assert window._artifact_rules_from_table() == default_artifact_rules()
 
 
 def test_sidebar_navigation_switches_workspace_pages(qt_app):
@@ -390,6 +408,7 @@ def test_stop_search_requests_safe_interruption_and_keeps_status(
 ):
     window = MainWindow()
     worker = DatabaseWorker([], [], [], tmp_path / "evidence", window.settings)
+    worker.request_pause()
 
     class ActiveThread:
         def __init__(self):
@@ -411,6 +430,7 @@ def test_stop_search_requests_safe_interruption_and_keeps_status(
     window._stop_evidence_search()
 
     assert thread.interrupted
+    assert not worker.pause_control.pause_requested
     assert window.stop_search_btn.text() == "Stopping…"
     assert "already collected" in window.run_progress.detail.text()
 
@@ -419,3 +439,30 @@ def test_stop_search_requests_safe_interruption_and_keeps_status(
     assert not window.stop_search_btn.isEnabled()
     assert window.status_badge.text() == "Search stopped"
     assert "kept" in window.run_progress.detail.text()
+
+
+def test_pause_and_resume_keep_the_same_active_search_queue(qt_app, tmp_path):
+    window = MainWindow()
+    worker = DatabaseWorker([], [], [], tmp_path / "evidence", window.settings)
+
+    class ActiveThread:
+        @staticmethod
+        def isRunning():
+            return True
+
+    window.database_worker = worker
+    window.database_thread = ActiveThread()
+    window._set_busy("Searching")
+
+    window._toggle_search_pause()
+
+    assert worker.pause_control.pause_requested
+    assert window.pause_search_btn.text() == "Resume Search"
+    assert window.status_badge.text() == "Pausing"
+    assert "current browser action" in window.run_progress.detail.text()
+
+    window._toggle_search_pause()
+
+    assert not worker.pause_control.pause_requested
+    assert window.pause_search_btn.text() == "Pause Search"
+    assert window.status_badge.text() == "Resuming"

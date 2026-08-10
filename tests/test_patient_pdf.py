@@ -47,9 +47,7 @@ def test_patient_pdf_writer_groups_included_variants_by_dit(tmp_path):
     )
 
     assert {path.name for path in outputs} == {
-        "26OUM00003_variant_review_2026-08-01.pdf",
         "26OUM00004_variant_review_2026-08-01.pdf",
-        "26OUM00005_variant_review_2026-08-01.pdf",
     }
     assert not list((tmp_path / "patient-reports").glob("26OUM00001*.pdf"))
     tp53_pdf = tmp_path / "patient-reports" / "26OUM00004_variant_review_2026-08-01.pdf"

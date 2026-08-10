@@ -60,6 +60,7 @@ class FilterRule:
     action: str = "excluded"
     gene: str = ""
     max_af_exclusive: float | None = None
+    max_af_inclusive: float | None = None
 
 
 @dataclass(slots=True)

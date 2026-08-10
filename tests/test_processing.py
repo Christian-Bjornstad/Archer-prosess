@@ -2,7 +2,12 @@ from pathlib import Path
 
 import openpyxl
 
-from archer_processor.core import FilterEngine, VariantProcessor, production_rules
+from archer_processor.core import (
+    FilterEngine,
+    VariantProcessor,
+    default_artifact_rules,
+    production_rules,
+)
 from archer_processor.core.models import DatabaseEvidence
 from archer_processor.io import ArcherTsvReader
 from archer_processor.reports import ExcelReportWriter
@@ -29,9 +34,47 @@ def test_production_rules_and_boundaries():
     by_sample = {variant.patient_id: variant for variant in variants}
     assert by_sample["26OUM00001"].decision == "excluded"
     assert by_sample["26OUM00002"].decision == "excluded"
-    assert by_sample["26OUM00003"].decision == "included"
+    assert by_sample["26OUM00003"].decision == "excluded"
     assert by_sample["26OUM00004"].warnings
+    assert by_sample["26OUM00005"].decision == "excluded"
     assert by_sample["26OUM00005"].warnings
+
+
+def test_default_artifact_catalog_comes_from_fragmentation_v2_hgvsc_column():
+    rules = default_artifact_rules()
+
+    assert len(rules) == 36
+    assert len({entry["hgvsc"] for entry in rules}) == 36
+    assert {entry["gene"] for entry in rules} >= {
+        "ASXL1",
+        "ATRX",
+        "CBL",
+        "CEBPA",
+        "DDX41",
+        "EZH2",
+        "FLT3",
+        "JAK2",
+        "NOTCH1",
+        "NPM1",
+        "PTEN",
+        "RUNX1",
+        "SRSF2",
+        "STAG2",
+    }
+
+
+def test_asxl1_1934dup_is_artifact_through_5_5_percent_only():
+    variants = ArcherTsvReader().read(FIXTURE)
+    at_threshold = variants[1]
+    above_threshold = variants[2]
+    at_threshold.af = 0.055
+    above_threshold.af = 0.055001
+
+    FilterEngine().apply([at_threshold, above_threshold])
+
+    assert at_threshold.decision == "excluded"
+    assert "artifact" in at_threshold.matched_rules[0]
+    assert above_threshold.decision == "included"
 
 
 def test_custom_artifact_rules_replace_default_artifact_list():
@@ -60,8 +103,8 @@ def test_processor_writes_excel(tmp_path):
 
     assert output.exists()
     assert result.total_count == 5
-    assert len(result.included) == 3
-    assert len(result.excluded) == 2
+    assert len(result.included) == 1
+    assert len(result.excluded) == 4
 
 
 def test_excel_export_preserves_raw_columns_and_adds_database_columns(tmp_path):
@@ -198,9 +241,10 @@ def test_excel_export_keeps_row_coloring_on_raw_sheets(tmp_path):
     workbook.close()
 
     assert by_sample["26OUM00001_VPM_S1_R1_001"] == "00FFC000"
-    assert by_sample["26OUM00002_VPM_S2_R1_001"] == "00000000"
+    assert by_sample["26OUM00002_VPM_S2_R1_001"] == "00FFC000"
+    assert by_sample["26OUM00005_VPM_S5_R1_001"] == "00FFC000"
     assert removed_by_sample["26OUM00004_VPM_S4_R1_001"] == "00FFFF00"
-    assert removed_by_sample["26OUM00005_VPM_S5_R1_001"] == "00E2F0D9"
+    assert "26OUM00005_VPM_S5_R1_001" not in removed_by_sample
 
 
 def test_excel_review_layout_hides_reference_columns_and_keeps_evidence_compact(tmp_path):

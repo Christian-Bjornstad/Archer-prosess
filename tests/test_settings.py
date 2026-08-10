@@ -1,5 +1,6 @@
 import json
 
+from archer_processor.core import default_artifact_rules
 from archer_processor.services import AppSettings
 
 
@@ -148,3 +149,49 @@ def test_recent_default_browser_delay_range_migrates(tmp_path, monkeypatch):
 
     assert loaded.browser_delay_seconds == 10
     assert loaded.browser_delay_max_seconds == 20
+
+
+def test_legacy_four_artifact_defaults_migrate_to_fragmentation_v2_catalog(
+    tmp_path, monkeypatch
+):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(AppSettings, "config_path", classmethod(lambda cls: config_path))
+    monkeypatch.setattr(
+        "archer_processor.services.settings.credentials.get_saved_password",
+        lambda provider, username: "",
+    )
+    config_path.write_text(
+        json.dumps(
+            {
+                "artifact_rules": [
+                    {"gene": "FLT3", "hgvsc": "NM_004119.2:c.1419-4dup"},
+                    {"gene": "FLT3", "hgvsc": "NM_004119.2:c.1419-4del"},
+                    {"gene": "JAK2", "hgvsc": "NM_004972.3:c.3291+16dup"},
+                    {"gene": "JAK2", "hgvsc": "NM_004972.3:c.3291+16del"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = AppSettings.load()
+
+    assert loaded.artifact_catalog_version == 2
+    assert loaded.artifact_rules == default_artifact_rules()
+
+
+def test_custom_artifacts_are_preserved_during_catalog_version_migration(
+    tmp_path, monkeypatch
+):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(AppSettings, "config_path", classmethod(lambda cls: config_path))
+    monkeypatch.setattr(
+        "archer_processor.services.settings.credentials.get_saved_password",
+        lambda provider, username: "",
+    )
+    custom = [{"gene": "TP53", "hgvsc": "NM_000546.6:c.524G>A"}]
+    config_path.write_text(json.dumps({"artifact_rules": custom}), encoding="utf-8")
+
+    loaded = AppSettings.load()
+
+    assert loaded.artifact_rules == custom
