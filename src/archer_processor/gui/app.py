@@ -55,6 +55,7 @@ from archer_processor.services import (
     BrowserReviewService,
     DatabaseSearchService,
     ProcessedWorkbookLoader,
+    is_completed_evidence,
     load_database_skip_keys,
 )
 
@@ -121,22 +122,13 @@ def _merge_evidence_results(target: dict, incoming: dict) -> None:
         target[key] = list(by_database.values())
 
 
-RETRYABLE_EVIDENCE_STATUSES = {
-    "error",
-    "login_required",
-    "rate_limited",
-    "timeout",
-    "unauthorized",
-}
-
-
 def _completed_evidence_sources(
     evidence: dict[str, list[DatabaseEvidence]],
 ) -> set[tuple[str, str]]:
     completed: set[tuple[str, str]] = set()
     for key, items in evidence.items():
         for item in items:
-            if item.status.strip().casefold() not in RETRYABLE_EVIDENCE_STATUSES:
+            if is_completed_evidence(item):
                 completed.add((key, item.database))
     return completed
 

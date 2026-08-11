@@ -4,7 +4,11 @@ import re
 from PIL import Image
 
 from archer_processor.core import DatabaseEvidence, VariantProcessor, default_artifact_rules
-from archer_processor.gui.app import DatabaseWorker, MainWindow
+from archer_processor.gui.app import (
+    DatabaseWorker,
+    MainWindow,
+    _completed_evidence_sources,
+)
 from archer_processor.reports import ExcelReportWriter
 from archer_processor.services import DatabaseSearchService
 
@@ -235,6 +239,21 @@ def test_new_search_results_merge_with_restored_evidence(qt_app, tmp_path, monke
     )
 
     assert {item.database for item in window.evidence[key]} == {"ClinVar", "OncoKB"}
+
+
+def test_resume_keeps_unverified_and_partial_evidence_pending():
+    key = "SYNTHETIC_VPM_1|NM_000546.6:c.524G>A"
+    for status in (
+        "identity_mismatch",
+        "partial_capture",
+        "verification_required",
+        "quota_exhausted",
+        "session_lost",
+    ):
+        completed = _completed_evidence_sources(
+            {key: [DatabaseEvidence("Franklin", status, "retry")]}
+        )
+        assert (key, "Franklin") not in completed
 
 
 def test_application_icon_is_packaged_and_loaded(qt_app):
