@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
+from archer_processor.services.capture_validation import validate_capture
 
 
 AUDIT_SCHEMA_VERSION = 2
@@ -28,6 +29,9 @@ RETRYABLE_EVIDENCE_STATUSES = frozenset(
         "quota_exhausted",
         "session_lost",
     }
+)
+SCREENSHOT_REQUIRED_DATABASES = frozenset(
+    {"COSMIC", "OncoKB", "Franklin", "ClinVar", "MTBP"}
 )
 
 
@@ -119,6 +123,21 @@ def migrate_loaded_evidence(
         evidence.status = "verification_required"
         evidence.summary = "Legacy ClinVar result requires explicit GRCh37 verification."
     _rebase_screenshot_paths(evidence.raw, artifact_root)
+    if (
+        evidence.status == "found"
+        and evidence.database in SCREENSHOT_REQUIRED_DATABASES
+    ):
+        records = evidence.raw.get("screenshots")
+        paths = [
+            Path(record["path"])
+            for record in records
+            if isinstance(record, dict) and record.get("path")
+        ] if isinstance(records, list) else []
+        if not paths and evidence.raw.get("screenshot"):
+            paths = [Path(str(evidence.raw["screenshot"]))]
+        if not paths or any(not validate_capture(path).valid for path in paths):
+            evidence.status = "partial_capture"
+            evidence.summary = f"{evidence.database} requires screenshot recapture."
     return evidence
 
 

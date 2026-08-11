@@ -5,6 +5,7 @@ from pathlib import Path
 
 import openpyxl
 import pytest
+from PIL import Image, ImageDraw
 
 from archer_processor.core import DatabaseEvidence, VariantProcessor
 from archer_processor.reports import ExcelReportWriter
@@ -154,7 +155,9 @@ def test_moved_screenshot_path_is_rebased_to_current_evidence_root(tmp_path):
     root = tmp_path / "moved_review_browser_evidence"
     expected = root / "patient-004" / "oncokb" / "evidence.png"
     expected.parent.mkdir(parents=True)
-    expected.write_bytes(b"synthetic-image")
+    image = Image.new("RGB", (800, 500), "white")
+    ImageDraw.Draw(image).rectangle((20, 20, 780, 300), fill="navy")
+    image.save(expected)
     audit = expected.with_name(f"{audit_digest('OncoKB', variant)}.audit.json")
     audit.write_text(json.dumps(asdict(evidence)), encoding="utf-8")
 
@@ -163,3 +166,27 @@ def test_moved_screenshot_path_is_rebased_to_current_evidence_root(tmp_path):
     restored = next(item for item in state.evidence[key] if item.database == "OncoKB")
     assert Path(restored.raw["screenshot"]) == expected
     assert Path(restored.raw["screenshots"][0]["path"]) == expected
+
+
+def test_blank_legacy_required_screenshot_is_marked_for_recapture(tmp_path):
+    output = tmp_path / "blank_review.xlsx"
+    result = VariantProcessor().process(FIXTURE, "2026-08-11", output)
+    variant = result.variants[3]
+    key = f"{variant.sample}|{variant.hgvsc}"
+    root = tmp_path / "blank_review_browser_evidence"
+    screenshot = root / "patient-004" / "oncokb" / "blank.png"
+    screenshot.parent.mkdir(parents=True)
+    Image.new("RGB", (800, 500), "white").save(screenshot)
+    evidence = DatabaseEvidence(
+        "OncoKB",
+        "found",
+        "synthetic",
+        raw={"screenshots": [{"label": "Overview", "path": str(screenshot)}]},
+    )
+    ExcelReportWriter().write(result, output, evidence={key: [evidence]})
+    audit = screenshot.with_name(f"{audit_digest('OncoKB', variant)}.audit.json")
+    audit.write_text(json.dumps(asdict(evidence)), encoding="utf-8")
+
+    restored = ProcessedWorkbookLoader().load(output).evidence[key][0]
+
+    assert restored.status == "partial_capture"
