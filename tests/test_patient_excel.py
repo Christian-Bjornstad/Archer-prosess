@@ -13,6 +13,34 @@ from archer_processor.services import DatabaseSearchService
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
 
 
+def test_patient_overview_uses_strong_and_weak_priority_green(tmp_path):
+    result = VariantProcessor().process(
+        FIXTURE, "2026-08-11", tmp_path / "review.xlsx"
+    )
+    base = result.variants[3]
+    strong = replace(base, history_matches=[{"Tier I": 6}], af=0.20)
+    weak = replace(
+        base,
+        source_row=base.source_row + 100,
+        hgvsc="NM_015338.5:c.1935dup",
+        history_matches=[{"Germ": 11}],
+        af=0.3499,
+    )
+    output = tmp_path / "patient.xlsx"
+
+    PatientExcelReportWriter().write_patient(
+        result, base.patient_id, [strong, weak], output, {}
+    )
+
+    workbook = openpyxl.load_workbook(output)
+    try:
+        overview = workbook["Oversikt"]
+        assert overview["A11"].fill.fgColor.rgb == "00C6EFCE"
+        assert overview["A12"].fill.fgColor.rgb == "00E9F6EF"
+    finally:
+        workbook.close()
+
+
 def test_patient_excel_report_uses_requested_sheet_layout_and_image_order(tmp_path):
     result = VariantProcessor().process(
         FIXTURE, "2026-08-03", tmp_path / "review.xlsx"

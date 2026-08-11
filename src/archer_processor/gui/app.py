@@ -41,7 +41,7 @@ from PyQt6.QtWidgets import (
 )
 
 from archer_processor.core import DatabaseEvidence, FilterEngine, ProcessingResult, VariantProcessor, default_artifact_rules, production_rules
-from archer_processor.core.highlights import variant_highlight
+from archer_processor.core.highlights import priority_warning, variant_highlight
 from archer_processor.io import ArcherTsvReader
 from archer_processor.knowledge import VariantHistoryRepository
 from archer_processor.reports import (
@@ -73,6 +73,7 @@ class Palette:
     yellow = "#A15C00"
     pale_blue = "#E7F4F7"
     pale_green = "#E9F6EF"
+    strong_green = "#CDEDD8"
     pale_orange = "#FCE4D6"
     pale_red = "#F8E8E8"
     pale_yellow = "#FFF5D6"
@@ -2090,16 +2091,20 @@ class MainWindow(QMainWindow):
                 "" if variant.depth is None else str(variant.depth),
                 variant.decision,
                 str(len(variant.history_matches)),
-                "; ".join(variant.warnings),
+                "; ".join(
+                    value
+                    for value in [*variant.warnings, priority_warning(variant)]
+                    if value
+                ),
             ]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 highlight = variant_highlight(variant)
                 if highlight == "artifact":
                     item.setBackground(QColor(Palette.pale_orange))
-                elif highlight == "tier":
-                    item.setBackground(QColor(Palette.pale_yellow))
-                elif highlight == "germline":
+                elif highlight in {"tier", "germline"}:
+                    item.setBackground(QColor(Palette.strong_green))
+                elif highlight == "germline_low_af":
                     item.setBackground(QColor(Palette.pale_green))
                 self.variant_table.setItem(row, col, item)
         self._apply_review_filters()

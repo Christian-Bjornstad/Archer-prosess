@@ -119,6 +119,26 @@ def test_review_filters_and_search_progress_are_visible(qt_app, tmp_path):
     assert window.run_progress.detail.text() == "Patient 3 is running"
 
 
+def test_variant_table_uses_distinct_strong_and_weak_green(qt_app, tmp_path):
+    window = MainWindow()
+    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+    window.result = VariantProcessor().process(
+        fixture, "2026-08-11", tmp_path / "review.xlsx"
+    )
+    window.result.variants[0].history_matches = [{"Tier I": 6}]
+    window.result.variants[0].artifact_status = ""
+    window.result.variants[0].matched_rules = []
+    window.result.variants[1].history_matches = [{"Germ": 11}]
+    window.result.variants[1].af = 0.3499
+    window.result.variants[1].artifact_status = ""
+    window.result.variants[1].matched_rules = []
+
+    window._refresh_variant_table()
+
+    assert window.variant_table.item(0, 0).background().color().name() == "#cdedd8"
+    assert window.variant_table.item(1, 0).background().color().name() == "#e9f6ef"
+
+
 def test_locked_workbook_shows_warning_without_raising(qt_app, tmp_path, monkeypatch):
     window = MainWindow()
     fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
