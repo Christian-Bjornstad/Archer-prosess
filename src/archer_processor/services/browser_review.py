@@ -14,6 +14,12 @@ from urllib.parse import quote
 
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
 from archer_processor.services.evidence_audit import persist_evidence_result
+from archer_processor.services.browser_popups import dismiss_known_overlays
+from archer_processor.services.capture_validation import (
+    CaptureValidation,
+    IncompleteCaptureError,
+    validate_capture,
+)
 from archer_processor.services.variant_identity import (
     GenomicIdentity,
     IdentityVerification,
@@ -35,7 +41,6 @@ LOGIN_URLS = {
 }
 
 FRANKLIN_HOME_URL = "https://franklin.genoox.com/clinical-db/home"
-FRANKLIN_ASSESSMENT_RENDER_BUFFER_MS = 5_000
 PROVIDER_SWITCH_DELAY_MS = 3_000
 
 _AMINO_ACID_3_TO_1 = {
@@ -92,6 +97,7 @@ class BrowserReviewService:
         stop_requested: Callable[[], bool] | None = None,
         pause_wait: Callable[[], None] | None = None,
         browser_background: bool = True,
+        capture_validator: Callable[[Path], CaptureValidation] = validate_capture,
     ) -> None:
         self.profile_root = profile_root or Path.home() / ".archer-prosess" / "browser_profiles"
         self.channel = channel
@@ -119,6 +125,7 @@ class BrowserReviewService:
         self.stop_requested = stop_requested or (lambda: False)
         self.pause_wait = pause_wait or (lambda: None)
         self.browser_background = bool(browser_background)
+        self.capture_validator = capture_validator
         self._cosmic_cache: dict[str, DatabaseEvidence] = {}
         self._mtbp_rejected_transcript_queries: set[str] = set()
 
@@ -942,6 +949,7 @@ class BrowserReviewService:
                     wait_until="domcontentloaded",
                     timeout=self.navigation_timeout_ms,
                 )
+                dismiss_known_overlays(page)
                 search = page.locator(
                     "input[placeholder='Enter variant, gene or select an example above']"
                 )
@@ -977,6 +985,10 @@ class BrowserReviewService:
                             "Franklin assessment-tools screenshot could not be captured: "
                             f"{exc}"
                         )
+                        evidence.status = "partial_capture"
+                        evidence.summary = (
+                            f"{evidence.summary} Franklin screenshots require retry."
+                        ).strip()
                     return evidence
                 quota = _franklin_quota_message(last_text)
                 if quota:
@@ -1815,6 +1827,7 @@ class BrowserReviewService:
         page: Any,
         artifact_directory: Path,
     ) -> DatabaseEvidence:
+        dismiss_known_overlays(page)
         if database == "OncoKB":
             self._reject_oncokb_cookies(page)
         current_url = page.url
@@ -1955,6 +1968,45 @@ class BrowserReviewService:
         page.evaluate("window.scrollTo(0, window.scrollY)")
         page.wait_for_timeout(250)
 
+    def _wait_for_nonempty_category_titles(
+        self,
+        page: Any,
+        categories: Any,
+        *,
+        required_title: str | None = None,
+    ) -> list[str]:
+        for _ in range(max(1, self.navigation_timeout_ms // 500)):
+            self._check_cancelled()
+            texts = categories.all_inner_texts()
+            titles = [_first_nonempty_line(text) for text in texts]
+            if (
+                titles
+                and all(titles)
+                and (required_title is None or required_title in titles)
+            ):
+                return titles
+            page.wait_for_timeout(500)
+        raise IncompleteCaptureError(
+            CaptureValidation(False, "semantic_content_missing", 0, 0, 0.0)
+        )
+
+    def _capture_with_incident_retry(
+        self,
+        page: Any,
+        path: Path,
+        capture: Callable[[], None],
+    ) -> CaptureValidation:
+        capture()
+        validation = self.capture_validator(path)
+        if validation.valid:
+            return validation
+        self._interruptible_page_wait(page, 5_000)
+        capture()
+        validation = self.capture_validator(path)
+        if not validation.valid:
+            raise IncompleteCaptureError(validation)
+        return validation
+
     def _capture_franklin_classification(
         self,
         page: Any,
@@ -1982,18 +2034,17 @@ class BrowserReviewService:
         panel.wait_for(state="visible", timeout=self.navigation_timeout_ms)
         panel.evaluate("el => { el.scrollTop = 0; }")
         categories = panel.locator("gnx-result-category")
-        category_texts = categories.all_inner_texts()
-        if not category_texts:
-            page.screenshot(path=str(base_path), full_page=True)
-            return [
-                {
-                    "label": "Full ACMG classification page",
-                    "path": str(base_path),
-                    "url": page.url,
-                }
-            ]
-        self._capture_franklin_classification_overview(
-            page, panel, categories.nth(0), base_path
+        category_titles = self._wait_for_nonempty_category_titles(
+            page,
+            categories,
+            required_title="De Novo Data",
+        )
+        self._capture_with_incident_retry(
+            page,
+            base_path,
+            lambda: self._capture_franklin_classification_overview(
+                page, panel, categories.nth(0), base_path
+            ),
         )
         screenshots = [
             {
@@ -2003,21 +2054,26 @@ class BrowserReviewService:
             }
         ]
         de_novo_indexes = [
-            index
-            for index, text in enumerate(category_texts)
-            if text.strip().splitlines()[0].strip() == "De Novo Data"
+            index for index, title in enumerate(category_titles)
+            if title == "De Novo Data"
         ]
         if len(de_novo_indexes) != 1:
             raise RuntimeError("Franklin ACMG De Novo evidence boundary was unavailable.")
         for index in range(de_novo_indexes[0] + 1):
             category = categories.nth(index)
-            title = category_texts[index].strip().splitlines()[0].strip()
+            title = category_titles[index]
             screenshot_path = base_path.with_name(
                 f"{base_path.stem}-evidence-{index + 1:02d}{base_path.suffix}"
             )
             category.scroll_into_view_if_needed()
             page.wait_for_timeout(200)
-            self._capture_franklin_evidence_box(page, category, screenshot_path)
+            self._capture_with_incident_retry(
+                page,
+                screenshot_path,
+                lambda category=category, path=screenshot_path: (
+                    self._capture_franklin_evidence_box(page, category, path)
+                ),
+            )
             screenshots.append(
                 {
                     "label": f"ACMG evidence: {title}",
@@ -2047,8 +2103,7 @@ class BrowserReviewService:
         panel.wait_for(state="visible", timeout=self.navigation_timeout_ms)
         panel.evaluate("el => { el.scrollTop = 0; }")
         categories = panel.locator("gnx-oncogenic-classification-tile")
-        category_texts = categories.all_inner_texts()
-        if not category_texts:
+        if hasattr(categories, "count") and categories.count() == 0:
             return self._capture_franklin_scroll_tiles(
                 page,
                 panel,
@@ -2056,8 +2111,15 @@ class BrowserReviewService:
                 "Oncogenic classification",
             )
 
-        self._capture_franklin_classification_overview(
-            page, panel, categories.nth(0), base_path
+        category_titles = self._wait_for_nonempty_category_titles(
+            page, categories
+        )
+        self._capture_with_incident_retry(
+            page,
+            base_path,
+            lambda: self._capture_franklin_classification_overview(
+                page, panel, categories.nth(0), base_path
+            ),
         )
         screenshots = [
             {
@@ -2066,15 +2128,20 @@ class BrowserReviewService:
                 "url": page.url,
             }
         ]
-        for index, text in enumerate(category_texts):
+        for index, title in enumerate(category_titles):
             category = categories.nth(index)
-            title = text.strip().splitlines()[0].strip() or f"Evidence {index + 1}"
             screenshot_path = base_path.with_name(
                 f"{base_path.stem}-evidence-{index + 1:02d}{base_path.suffix}"
             )
             category.scroll_into_view_if_needed()
             page.wait_for_timeout(200)
-            self._capture_franklin_evidence_box(page, category, screenshot_path)
+            self._capture_with_incident_retry(
+                page,
+                screenshot_path,
+                lambda category=category, path=screenshot_path: (
+                    self._capture_franklin_evidence_box(page, category, path)
+                ),
+            )
             screenshots.append(
                 {
                     "label": f"Oncogenic evidence: {title}",
@@ -2284,9 +2351,6 @@ class BrowserReviewService:
         population_heading.wait_for(
             state="visible", timeout=self.navigation_timeout_ms
         )
-        # Franklin renders the panel headings before its prediction and
-        # population-frequency contents have finished loading.
-        page.wait_for_timeout(FRANKLIN_ASSESSMENT_RENDER_BUFFER_MS)
         prediction_section = page.locator("div.section").filter(
             has=prediction_heading
         )
@@ -2354,14 +2418,18 @@ class BrowserReviewService:
             )
             clip_top = max(0, top - 64)
             clip_left = max(0, left)
-            page.screenshot(
-                path=str(screenshot_path),
-                clip={
-                    "x": clip_left,
-                    "y": clip_top,
-                    "width": right - clip_left + 16,
-                    "height": bottom - clip_top,
-                },
+            clip = {
+                "x": clip_left,
+                "y": clip_top,
+                "width": right - clip_left + 16,
+                "height": bottom - clip_top,
+            }
+            self._capture_with_incident_retry(
+                page,
+                screenshot_path,
+                lambda path=screenshot_path, area=clip: page.screenshot(
+                    path=str(path), clip=area
+                ),
             )
             screenshots.append(
                 {"label": label, "path": str(screenshot_path), "url": assessment_url}
@@ -2962,6 +3030,10 @@ def _protein_change(value: str) -> str:
 
 def _cdna_change(value: str) -> str:
     return (value or "").split(":", 1)[-1].strip()
+
+
+def _first_nonempty_line(value: str) -> str:
+    return next((line.strip() for line in (value or "").splitlines() if line.strip()), "")
 
 
 def _franklin_query(variant: VariantRecord) -> str:

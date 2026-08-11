@@ -1,13 +1,13 @@
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from archer_processor.io import ArcherTsvReader
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
 from archer_processor.services.browser_review import (
     BrowserReviewCancelled,
     BrowserReviewService,
-    FRANKLIN_ASSESSMENT_RENDER_BUFFER_MS,
     _cosmic_identifier,
     _cosmic_numeric_id,
     _cosmic_source_url,
@@ -21,6 +21,10 @@ from archer_processor.services.browser_review import (
     parse_mtbp_report,
     parse_oncokb_page,
 )
+from archer_processor.services.capture_validation import CaptureValidation
+
+
+VALID_CAPTURE = lambda _: CaptureValidation(True, "ok", 800, 500, 10.0)
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
@@ -519,6 +523,59 @@ def test_franklin_skips_fallback_after_verified_primary_result(tmp_path, monkeyp
     assert calls == ["LUC7L2:c.784dup"]
 
 
+def test_franklin_category_titles_wait_for_nonempty_de_novo(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path, navigation_timeout_ms=1_000)
+
+    class Categories:
+        calls = 0
+
+        def all_inner_texts(self):
+            self.calls += 1
+            if self.calls == 1:
+                return ["", ""]
+            return ["Case Control Studies\nLoaded", "De Novo Data\nLoaded"]
+
+    class Page:
+        waits = []
+
+        def wait_for_timeout(self, milliseconds):
+            self.waits.append(milliseconds)
+
+    page = Page()
+    titles = service._wait_for_nonempty_category_titles(
+        page, Categories(), required_title="De Novo Data"
+    )
+
+    assert titles == ["Case Control Studies", "De Novo Data"]
+    assert page.waits == [500]
+
+
+def test_capture_retries_once_only_after_blank_incident(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path)
+    path = tmp_path / "capture.png"
+    attempts = []
+
+    class Page:
+        waits = []
+
+        def wait_for_timeout(self, milliseconds):
+            self.waits.append(milliseconds)
+
+    def capture():
+        attempts.append(1)
+        image = Image.new("RGB", (800, 500), "white")
+        if len(attempts) == 2:
+            image.paste("navy", (20, 20, 780, 300))
+        image.save(path)
+
+    page = Page()
+    validation = service._capture_with_incident_retry(page, path, capture)
+
+    assert validation.valid
+    assert len(attempts) == 2
+    assert sum(page.waits) == 5_000
+
+
 def test_clinvar_capture_is_cropped_to_title_and_classification_summary(tmp_path):
     variant = ArcherTsvReader().read(FIXTURE)[3]
     service = BrowserReviewService(profile_root=tmp_path)
@@ -627,7 +684,9 @@ def test_franklin_primary_capture_uses_full_page(tmp_path):
 
 def test_franklin_assessment_waits_for_dynamic_panels_before_capture(tmp_path):
     variant = ArcherTsvReader().read(FIXTURE)[3]
-    service = BrowserReviewService(profile_root=tmp_path)
+    service = BrowserReviewService(
+        profile_root=tmp_path, capture_validator=VALID_CAPTURE
+    )
 
     class Heading:
         def __init__(self, name):
@@ -697,9 +756,7 @@ def test_franklin_assessment_waits_for_dynamic_panels_before_capture(tmp_path):
 
     screenshots = service._capture_franklin_assessment(page, variant, tmp_path)
 
-    assert page.waits[0] == FRANKLIN_ASSESSMENT_RENDER_BUFFER_MS
-    assert page.waits[1:] == [500, 500, 500, 500]
-    assert FRANKLIN_ASSESSMENT_RENDER_BUFFER_MS == 5_000
+    assert page.waits == [500, 500, 500, 500]
     assert [item["label"] for item in screenshots] == [
         "Predictions",
         "Population frequencies",
@@ -810,7 +867,9 @@ def test_browser_review_can_be_cancelled_before_opening_edge(tmp_path):
 
 def test_franklin_classification_capture_ends_with_complete_de_novo_card(tmp_path):
     variant = ArcherTsvReader().read(FIXTURE)[3]
-    service = BrowserReviewService(profile_root=tmp_path)
+    service = BrowserReviewService(
+        profile_root=tmp_path, capture_validator=VALID_CAPTURE
+    )
 
     captures = []
 
@@ -871,7 +930,7 @@ def test_franklin_classification_capture_ends_with_complete_de_novo_card(tmp_pat
             self.captures.append(kwargs)
 
         def wait_for_timeout(self, milliseconds):
-            assert milliseconds == 200
+            assert milliseconds in {200, 250}
 
     page = Page()
     screenshots = service._capture_franklin_classification(
@@ -896,7 +955,9 @@ def test_franklin_classification_capture_ends_with_complete_de_novo_card(tmp_pat
 
 def test_franklin_oncogenic_capture_uses_named_evidence_boxes(tmp_path):
     variant = ArcherTsvReader().read(FIXTURE)[3]
-    service = BrowserReviewService(profile_root=tmp_path)
+    service = BrowserReviewService(
+        profile_root=tmp_path, capture_validator=VALID_CAPTURE
+    )
     captures = []
 
     class Category:
@@ -958,7 +1019,7 @@ def test_franklin_oncogenic_capture_uses_named_evidence_boxes(tmp_path):
             return panel
 
         def wait_for_timeout(self, milliseconds):
-            assert milliseconds == 200
+            assert milliseconds in {200, 250}
 
         def screenshot(self, **kwargs):
             self.captures.append(kwargs)
