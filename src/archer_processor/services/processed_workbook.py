@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -16,6 +15,7 @@ from archer_processor.io import ArcherTsvReader
 from archer_processor.knowledge import VariantHistoryRepository
 
 from .database_selection import HGVSC_HEADER, SAMPLE_HEADER, SELECTION_SHEET, SKIP_HEADER
+from .evidence_audit import EvidenceAuditIndex, migrate_loaded_evidence
 
 
 @dataclass(slots=True)
@@ -141,6 +141,7 @@ class ProcessedWorkbookLoader:
         cell_evidence: dict[str, dict[str, str]],
     ) -> dict[str, list[DatabaseEvidence]]:
         artifact_root = workbook_path.parent / f"{workbook_path.stem}_browser_evidence"
+        audit_index = EvidenceAuditIndex.build(artifact_root)
         patient_order = list(dict.fromkeys(variant.patient_id for variant in variants))
         patient_indexes = {
             patient_id: index
@@ -153,6 +154,7 @@ class ProcessedWorkbookLoader:
             items: list[DatabaseEvidence] = []
             for database, cell_value in databases.items():
                 audit = self._load_audit(
+                    audit_index,
                     artifact_root,
                     patient_indexes[variant.patient_id],
                     database,
@@ -168,37 +170,18 @@ class ProcessedWorkbookLoader:
 
     def _load_audit(
         self,
+        audit_index: EvidenceAuditIndex,
         artifact_root: Path,
         patient_index: int,
         database: str,
         variant: VariantRecord,
     ) -> DatabaseEvidence | None:
-        digest = hashlib.sha256(
-            f"{database}|{variant.symbol}|{variant.hgvsc}|{variant.hgvsp}".encode(
-                "utf-8"
-            )
-        ).hexdigest()[:16]
-        filename = f"{digest}.audit.json"
-        expected = (
-            artifact_root
-            / f"patient-{patient_index:03d}"
-            / database.casefold()
-            / filename
-        )
-        candidates = [expected] if expected.exists() else []
-        if not candidates and artifact_root.exists():
-            candidates = list(artifact_root.rglob(filename))
-        if not candidates:
+        selected = audit_index.best(database, variant)
+        if selected is None:
             return None
-        audit_path = max(candidates, key=lambda path: path.stat().st_mtime)
-        try:
-            payload = json.loads(audit_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeError):
-            return None
-        if not isinstance(payload, dict):
-            return None
+        _, payload = selected
         raw = payload.get("raw")
-        return DatabaseEvidence(
+        evidence = DatabaseEvidence(
             database=database,
             status=self._text(payload.get("status")) or "found",
             summary=self._text(payload.get("summary")),
@@ -207,6 +190,7 @@ class ProcessedWorkbookLoader:
             url=self._text(payload.get("url")),
             raw=raw if isinstance(raw, dict) else {},
         )
+        return migrate_loaded_evidence(evidence, artifact_root)
 
     @staticmethod
     def _parse_evidence_cell(

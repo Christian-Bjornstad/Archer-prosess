@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
+from collections import defaultdict
 from collections.abc import Callable, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
 
@@ -28,8 +31,119 @@ RETRYABLE_EVIDENCE_STATUSES = frozenset(
 )
 
 
+@dataclass(slots=True)
+class EvidenceAuditIndex:
+    root: Path
+    by_digest: dict[str, list[Path]]
+
+    @classmethod
+    def build(cls, root: Path) -> "EvidenceAuditIndex":
+        by_digest: dict[str, list[Path]] = defaultdict(list)
+        for path in root.rglob("*.audit.json"):
+            match = re.match(
+                r"([0-9a-f]{16})(?:-[^.]+)?\.audit\.json$",
+                path.name,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                by_digest[match.group(1).casefold()].append(path)
+        return cls(root=root, by_digest=dict(by_digest))
+
+    def candidates(self, database: str, variant: VariantRecord) -> list[Path]:
+        digest = audit_digest(database, variant)
+        return [
+            path
+            for path in self.by_digest.get(digest, [])
+            if path.parent.name.casefold() == database.casefold()
+        ]
+
+    def best(
+        self,
+        database: str,
+        variant: VariantRecord,
+    ) -> tuple[Path, dict[str, Any]] | None:
+        canonical_name = f"{audit_digest(database, variant)}.audit.json"
+        ranked: list[tuple[tuple[int, int, int, float], Path, dict[str, Any]]] = []
+        for path in self.candidates(database, variant):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            raw = payload.get("raw") if isinstance(payload.get("raw"), dict) else {}
+            verification = raw.get("identity_verification")
+            verified = int(
+                raw.get("assembly_verified") == "GRCh37"
+                or (
+                    isinstance(verification, dict)
+                    and verification.get("accepted") is True
+                )
+            )
+            screenshots = raw.get("screenshots")
+            screenshot_count = sum(
+                bool(record.get("path"))
+                for record in screenshots
+                if isinstance(record, dict)
+            ) if isinstance(screenshots, list) else 0
+            try:
+                modified = path.stat().st_mtime
+            except OSError:
+                modified = 0.0
+            score = (
+                int(path.name == canonical_name),
+                verified,
+                screenshot_count,
+                modified,
+            )
+            ranked.append((score, path, payload))
+        if not ranked:
+            return None
+        _, path, payload = max(ranked, key=lambda item: (item[0], str(item[1])))
+        return path, payload
+
+
 def is_completed_evidence(evidence: DatabaseEvidence) -> bool:
     return evidence.status.strip().casefold() not in RETRYABLE_EVIDENCE_STATUSES
+
+
+def migrate_loaded_evidence(
+    evidence: DatabaseEvidence,
+    artifact_root: Path,
+) -> DatabaseEvidence:
+    if (
+        evidence.database == "ClinVar"
+        and evidence.status == "found"
+        and evidence.raw.get("assembly_verified") != "GRCh37"
+    ):
+        evidence.status = "verification_required"
+        evidence.summary = "Legacy ClinVar result requires explicit GRCh37 verification."
+    _rebase_screenshot_paths(evidence.raw, artifact_root)
+    return evidence
+
+
+def _rebase_screenshot_paths(raw: dict[str, Any], artifact_root: Path) -> None:
+    if raw.get("screenshot"):
+        raw["screenshot"] = _rebase_path(str(raw["screenshot"]), artifact_root)
+    screenshots = raw.get("screenshots")
+    if isinstance(screenshots, list):
+        for record in screenshots:
+            if isinstance(record, dict) and record.get("path"):
+                record["path"] = _rebase_path(str(record["path"]), artifact_root)
+
+
+def _rebase_path(value: str, artifact_root: Path) -> str:
+    path = Path(value)
+    if path.exists():
+        return str(path)
+    parts = path.parts
+    for index, part in enumerate(parts):
+        if part.casefold().endswith("_browser_evidence"):
+            candidate = artifact_root.joinpath(*parts[index + 1 :])
+            if candidate.exists():
+                return str(candidate)
+            break
+    return value
 
 
 def audit_digest(database: str, variant: VariantRecord) -> str:

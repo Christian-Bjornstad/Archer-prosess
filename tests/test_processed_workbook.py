@@ -9,6 +9,7 @@ import pytest
 from archer_processor.core import DatabaseEvidence, VariantProcessor
 from archer_processor.reports import ExcelReportWriter
 from archer_processor.services import ProcessedWorkbookLoader
+from archer_processor.services.evidence_audit import audit_digest
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
@@ -86,3 +87,79 @@ def test_processed_workbook_preserves_x_marked_row_without_hgvsc(tmp_path):
     assert state.result.total_count == result.total_count
     assert state.result.variants[-1].hgvsc == ""
     assert key in state.database_skip_keys
+
+
+def test_processed_workbook_indexes_evidence_directory_once(tmp_path, monkeypatch):
+    output = tmp_path / "indexed_review.xlsx"
+    result = VariantProcessor().process(FIXTURE, "2026-08-11", output)
+    ExcelReportWriter().write(result, output)
+    (tmp_path / "indexed_review_browser_evidence").mkdir()
+    calls = []
+    original = Path.rglob
+
+    def counted(path, pattern):
+        calls.append((path, pattern))
+        return original(path, pattern)
+
+    monkeypatch.setattr(Path, "rglob", counted)
+
+    ProcessedWorkbookLoader().load(output)
+
+    assert calls == [(tmp_path / "indexed_review_browser_evidence", "*.audit.json")]
+
+
+def test_legacy_clinvar_found_requires_grch37_reverification(tmp_path):
+    output = tmp_path / "legacy_review.xlsx"
+    result = VariantProcessor().process(FIXTURE, "2026-08-11", output)
+    variant = result.variants[3]
+    key = f"{variant.sample}|{variant.hgvsc}"
+    evidence = DatabaseEvidence(
+        "ClinVar", "found", "legacy", raw={"clinvar_id": "123"}
+    )
+    ExcelReportWriter().write(result, output, evidence={key: [evidence]})
+    audit = (
+        tmp_path
+        / "legacy_review_browser_evidence"
+        / "patient-004"
+        / "clinvar"
+        / f"{audit_digest('ClinVar', variant)}.audit.json"
+    )
+    audit.parent.mkdir(parents=True)
+    audit.write_text(json.dumps(asdict(evidence)), encoding="utf-8")
+
+    state = ProcessedWorkbookLoader().load(output)
+
+    restored = next(item for item in state.evidence[key] if item.database == "ClinVar")
+    assert restored.status == "verification_required"
+
+
+def test_moved_screenshot_path_is_rebased_to_current_evidence_root(tmp_path):
+    output = tmp_path / "moved_review.xlsx"
+    result = VariantProcessor().process(FIXTURE, "2026-08-11", output)
+    variant = result.variants[3]
+    key = f"{variant.sample}|{variant.hgvsc}"
+    old_path = Path(
+        "K:/old/moved_review_browser_evidence/patient-004/oncokb/evidence.png"
+    )
+    evidence = DatabaseEvidence(
+        "OncoKB",
+        "found",
+        "synthetic",
+        raw={
+            "screenshot": str(old_path),
+            "screenshots": [{"label": "Overview", "path": str(old_path), "url": ""}],
+        },
+    )
+    ExcelReportWriter().write(result, output, evidence={key: [evidence]})
+    root = tmp_path / "moved_review_browser_evidence"
+    expected = root / "patient-004" / "oncokb" / "evidence.png"
+    expected.parent.mkdir(parents=True)
+    expected.write_bytes(b"synthetic-image")
+    audit = expected.with_name(f"{audit_digest('OncoKB', variant)}.audit.json")
+    audit.write_text(json.dumps(asdict(evidence)), encoding="utf-8")
+
+    state = ProcessedWorkbookLoader().load(output)
+
+    restored = next(item for item in state.evidence[key] if item.database == "OncoKB")
+    assert Path(restored.raw["screenshot"]) == expected
+    assert Path(restored.raw["screenshots"][0]["path"]) == expected
