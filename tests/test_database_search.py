@@ -115,6 +115,72 @@ def test_clinvar_rate_limit_is_reported_after_retries(monkeypatch):
     assert len(calls) == 4
 
 
+def test_clinvar_accepts_only_exact_grch37_candidate(monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = DatabaseSearchService(timeout=1)
+
+    def xml_response(text):
+        response = FakeResponse({})
+        response.content = text.encode()
+        return response
+
+    def fake_get(url, params):
+        if "esearch" in url:
+            return xml_response("<eSearchResult><IdList><Id>38</Id><Id>37</Id></IdList></eSearchResult>")
+        if params["id"] == "38":
+            return xml_response(
+                '<VariationArchive Accession="VCV38" Version="1" VariationName="wrong">'
+                '<SequenceLocation Assembly="GRCh38" Chr="17" positionVCF="7675088" '
+                'referenceAlleleVCF="G" alternateAlleleVCF="A"/></VariationArchive>'
+            )
+        return xml_response(
+            '<VariationArchive Accession="VCV37" Version="2" VariationName="TP53">'
+            '<SequenceLocation Assembly="GRCh37" Chr="17" positionVCF="7578406" '
+            'referenceAlleleVCF="G" alternateAlleleVCF="A"/>'
+            '<GermlineClassification><Description>Pathogenic</Description>'
+            '</GermlineClassification></VariationArchive>'
+        )
+
+    monkeypatch.setattr(service, "_eutils_get", fake_get)
+    evidence = service._search_clinvar(variant)
+
+    assert evidence.status == "found"
+    assert evidence.accession == "VCV37.2"
+    assert evidence.raw["assembly_verified"] == "GRCh37"
+    assert evidence.raw["matched_location"]["position"] == 7578406
+
+
+def test_clinvar_fails_closed_when_candidates_do_not_match_grch37(monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = DatabaseSearchService(timeout=1)
+
+    def xml_response(text):
+        response = FakeResponse({})
+        response.content = text.encode()
+        return response
+
+    search_calls = 0
+
+    def fake_get(url, params):
+        nonlocal search_calls
+        if "esearch" in url:
+            search_calls += 1
+            ids = "<Id>99</Id>" if search_calls == 1 else ""
+            return xml_response(f"<eSearchResult><IdList>{ids}</IdList></eSearchResult>")
+        return xml_response(
+            '<VariationArchive Accession="VCV99" Version="1">'
+            '<SequenceLocation Assembly="GRCh38" Chr="17" positionVCF="7675088" '
+            'referenceAlleleVCF="G" alternateAlleleVCF="A"/></VariationArchive>'
+        )
+
+    monkeypatch.setattr(service, "_eutils_get", fake_get)
+
+    evidence = service._search_clinvar(variant)
+
+    assert evidence.status == "identity_mismatch"
+    assert evidence.raw["candidate_ids"] == ["99"]
+
+
 def test_gnomad_formatter_reports_population_frequency_context():
     variant = ArcherTsvReader().read(FIXTURE)[0]
     service = DatabaseSearchService()

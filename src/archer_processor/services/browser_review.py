@@ -609,6 +609,14 @@ class BrowserReviewService:
                     if api_evidence.status != "found" or not api_evidence.url:
                         results[key] = api_evidence
                         continue
+                    if api_evidence.raw.get("assembly_verified") != "GRCh37":
+                        api_evidence.status = "verification_required"
+                        api_evidence.summary = (
+                            "ClinVar result was not captured because its exact GRCh37 "
+                            "identity was not verified."
+                        )
+                        results[key] = api_evidence
+                        continue
                     try:
                         page.goto(
                             api_evidence.url,
