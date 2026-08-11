@@ -13,6 +13,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from PIL import Image as PillowImage
 
+from archer_processor.core.highlights import variant_highlight
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
 
 
@@ -74,6 +75,9 @@ class PatientExcelReportWriter:
         "blue": "2F75B5",
         "pale_blue": "EAF3FA",
         "pale_green": "EAF5ED",
+        "strong_green": "C6EFCE",
+        "weak_green": "E9F6EF",
+        "orange": "FFC000",
         "pale_orange": "FFF3E8",
         "gray": "F3F6F8",
         "muted": "5E6A73",
@@ -270,6 +274,17 @@ class PatientExcelReportWriter:
                     ws.cell(row, offset).style = "Hyperlink"
                     ws.cell(row, offset).alignment = Alignment(
                         vertical="top", wrap_text=True
+                    )
+            fill_color = {
+                "artifact": self.colors["orange"],
+                "tier": self.colors["strong_green"],
+                "germline": self.colors["strong_green"],
+                "germline_low_af": self.colors["weak_green"],
+            }.get(variant_highlight(variant))
+            if fill_color:
+                for column in range(1, 10):
+                    ws.cell(row, column).fill = PatternFill(
+                        "solid", fgColor=fill_color
                     )
             ws.row_dimensions[row].height = 76
         ws.column_dimensions["A"].width = 14

@@ -10,7 +10,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from archer_processor.core.highlights import variant_highlight
+from archer_processor.core.highlights import priority_warning, variant_highlight
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
 
 
@@ -88,6 +88,8 @@ class ExcelReportWriter:
         "blue": "2F75B5",
         "pale_blue": "D9EAF7",
         "green": "E2F0D9",
+        "strong_green": "C6EFCE",
+        "weak_green": "E9F6EF",
         "yellow": "FFFF00",
         "orange": "FFC000",
         "red": "C00000",
@@ -173,7 +175,11 @@ class ExcelReportWriter:
                 variant.consequence,
                 variant.clinical_significance,
                 "\n".join(str(item) for item in variant.history_matches),
-                "\n".join(variant.warnings),
+                "\n".join(
+                    value
+                    for value in [*variant.warnings, priority_warning(variant)]
+                    if value
+                ),
             ]
             for column, value in enumerate(values, start=1):
                 cell = ws.cell(row_index, column, value)
@@ -373,7 +379,11 @@ class ExcelReportWriter:
                 variant.report_status,
                 variant.artifact_status,
                 f"{len(variant.history_matches)} previous match(es)",
-                "; ".join(variant.warnings),
+                "; ".join(
+                    value
+                    for value in [*variant.warnings, priority_warning(variant)]
+                    if value
+                ),
                 *[self._evidence_cell(evidence_by_database.get(database, [])) for database in database_columns],
                 run_date,
             ]
@@ -489,8 +499,9 @@ class ExcelReportWriter:
     def _style_variant_row(self, ws, row_index: int, variant: VariantRecord) -> None:
         fill = {
             "artifact": self.colors["orange"],
-            "tier": self.colors["yellow"],
-            "germline": self.colors["green"],
+            "tier": self.colors["strong_green"],
+            "germline": self.colors["strong_green"],
+            "germline_low_af": self.colors["weak_green"],
         }.get(variant_highlight(variant))
         if fill:
             for cell in ws[row_index]:

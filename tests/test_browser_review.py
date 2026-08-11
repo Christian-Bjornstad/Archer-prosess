@@ -1,16 +1,17 @@
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from archer_processor.io import ArcherTsvReader
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
 from archer_processor.services.browser_review import (
     BrowserReviewCancelled,
     BrowserReviewService,
-    FRANKLIN_ASSESSMENT_RENDER_BUFFER_MS,
     _cosmic_identifier,
     _cosmic_numeric_id,
     _cosmic_source_url,
+    _franklin_queries,
     _mtbp_genomic_query,
     _mtbp_query_rejected,
     _mtbp_screenshot_row_matches,
@@ -20,6 +21,10 @@ from archer_processor.services.browser_review import (
     parse_mtbp_report,
     parse_oncokb_page,
 )
+from archer_processor.services.capture_validation import CaptureValidation
+
+
+VALID_CAPTURE = lambda _: CaptureValidation(True, "ok", 800, 500, 10.0)
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
@@ -386,7 +391,189 @@ def test_franklin_visible_page_parser_returns_only_classification():
     assert evidence.status == "found"
     assert evidence.clinical_significance == "Pathogenic"
     assert evidence.summary == "classification=Pathogenic;"
-    assert evidence.raw == {"classification": "Pathogenic"}
+    assert evidence.raw["classification"] == "Pathogenic"
+    assert evidence.raw["identity_verification"]["basis"] == "exact_transcript"
+
+
+def test_franklin_queries_use_transcript_then_genomic_fallback():
+    variant = VariantRecord(
+        source_file=Path("synthetic.tsv"),
+        source_row=1,
+        sample="SYNTHETIC_VPM_1",
+        symbol="LUC7L2",
+        hgvsc="NM_016019.4:c.784dup",
+        hgvsp="NP_057103.2:p.Arg262ProfsTer26",
+        genomic_location="chr7:139097298",
+        ref_allele="T",
+        alt_allele="TC",
+    )
+
+    assert _franklin_queries(variant) == [
+        "LUC7L2:c.784dup",
+        "chr7-139097298 T>TC",
+    ]
+
+
+def test_franklin_accepts_different_transcript_for_same_grch37_variant():
+    variant = VariantRecord(
+        source_file=Path("synthetic.tsv"),
+        source_row=1,
+        sample="SYNTHETIC_VPM_1",
+        symbol="LUC7L2",
+        hgvsc="NM_016019.4:c.784dup",
+        genomic_location="chr7:139097298",
+        ref_allele="T",
+        alt_allele="TC",
+    )
+    body = """
+    FMC1-LUC7L2:c.982dup
+    GRCh37 chr7:139097298 T>TC
+    Suggested classification
+    Likely pathogenic
+    """
+
+    evidence = parse_franklin_page(
+        body, variant, "https://franklin.genoox.com/clinical-db/variant/snpTumor/example"
+    )
+
+    assert evidence.status == "found"
+    assert evidence.raw["identity_verification"]["basis"] == "grch37_genomic"
+
+
+def test_franklin_rejects_same_gene_at_different_genomic_position():
+    variant = VariantRecord(
+        source_file=Path("synthetic.tsv"),
+        source_row=1,
+        sample="SYNTHETIC_VPM_1",
+        symbol="LUC7L2",
+        hgvsc="NM_016019.4:c.784dup",
+        genomic_location="chr7:139097298",
+        ref_allele="T",
+        alt_allele="TC",
+    )
+    body = """
+    LUC7L2:c.982dup
+    GRCh37 chr7:139097299 T>TC
+    Suggested classification
+    Likely pathogenic
+    """
+
+    evidence = parse_franklin_page(
+        body, variant, "https://franklin.genoox.com/clinical-db/variant/snpTumor/example"
+    )
+
+    assert evidence.status == "identity_mismatch"
+
+
+def test_franklin_falls_back_after_identity_mismatch(tmp_path, monkeypatch):
+    variant = VariantRecord(
+        source_file=Path("synthetic.tsv"),
+        source_row=1,
+        sample="SYNTHETIC_VPM_1",
+        symbol="LUC7L2",
+        hgvsc="NM_016019.4:c.784dup",
+        genomic_location="chr7:139097298",
+        ref_allele="T",
+        alt_allele="TC",
+    )
+    service = BrowserReviewService(profile_root=tmp_path)
+    calls = []
+
+    def attempt(page, current_variant, query, artifact_directory, *, progress):
+        calls.append(query)
+        status = "identity_mismatch" if len(calls) == 1 else "found"
+        return DatabaseEvidence("Franklin", status, query, accession=query)
+
+    monkeypatch.setattr(service, "_search_franklin_query", attempt, raising=False)
+
+    evidence = service._resolve_franklin_queries(
+        object(), variant, tmp_path / "franklin", progress=None
+    )
+
+    assert evidence.status == "found"
+    assert calls == ["LUC7L2:c.784dup", "chr7-139097298 T>TC"]
+    assert evidence.raw["query_attempts"] == calls
+
+
+def test_franklin_skips_fallback_after_verified_primary_result(tmp_path, monkeypatch):
+    variant = VariantRecord(
+        source_file=Path("synthetic.tsv"),
+        source_row=1,
+        sample="SYNTHETIC_VPM_1",
+        symbol="LUC7L2",
+        hgvsc="NM_016019.4:c.784dup",
+        genomic_location="chr7:139097298",
+        ref_allele="T",
+        alt_allele="TC",
+    )
+    service = BrowserReviewService(profile_root=tmp_path)
+    calls = []
+
+    def attempt(page, current_variant, query, artifact_directory, *, progress):
+        calls.append(query)
+        return DatabaseEvidence("Franklin", "found", query, accession=query)
+
+    monkeypatch.setattr(service, "_search_franklin_query", attempt, raising=False)
+
+    evidence = service._resolve_franklin_queries(
+        object(), variant, tmp_path / "franklin", progress=None
+    )
+
+    assert evidence.status == "found"
+    assert calls == ["LUC7L2:c.784dup"]
+
+
+def test_franklin_category_titles_wait_for_nonempty_de_novo(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path, navigation_timeout_ms=1_000)
+
+    class Categories:
+        calls = 0
+
+        def all_inner_texts(self):
+            self.calls += 1
+            if self.calls == 1:
+                return ["", ""]
+            return ["Case Control Studies\nLoaded", "De Novo Data\nLoaded"]
+
+    class Page:
+        waits = []
+
+        def wait_for_timeout(self, milliseconds):
+            self.waits.append(milliseconds)
+
+    page = Page()
+    titles = service._wait_for_nonempty_category_titles(
+        page, Categories(), required_title="De Novo Data"
+    )
+
+    assert titles == ["Case Control Studies", "De Novo Data"]
+    assert page.waits == [500]
+
+
+def test_capture_retries_once_only_after_blank_incident(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path)
+    path = tmp_path / "capture.png"
+    attempts = []
+
+    class Page:
+        waits = []
+
+        def wait_for_timeout(self, milliseconds):
+            self.waits.append(milliseconds)
+
+    def capture():
+        attempts.append(1)
+        image = Image.new("RGB", (800, 500), "white")
+        if len(attempts) == 2:
+            image.paste("navy", (20, 20, 780, 300))
+        image.save(path)
+
+    page = Page()
+    validation = service._capture_with_incident_retry(page, path, capture)
+
+    assert validation.valid
+    assert len(attempts) == 2
+    assert sum(page.waits) == 5_000
 
 
 def test_clinvar_capture_is_cropped_to_title_and_classification_summary(tmp_path):
@@ -497,7 +684,9 @@ def test_franklin_primary_capture_uses_full_page(tmp_path):
 
 def test_franklin_assessment_waits_for_dynamic_panels_before_capture(tmp_path):
     variant = ArcherTsvReader().read(FIXTURE)[3]
-    service = BrowserReviewService(profile_root=tmp_path)
+    service = BrowserReviewService(
+        profile_root=tmp_path, capture_validator=VALID_CAPTURE
+    )
 
     class Heading:
         def __init__(self, name):
@@ -567,9 +756,7 @@ def test_franklin_assessment_waits_for_dynamic_panels_before_capture(tmp_path):
 
     screenshots = service._capture_franklin_assessment(page, variant, tmp_path)
 
-    assert page.waits[0] == FRANKLIN_ASSESSMENT_RENDER_BUFFER_MS
-    assert page.waits[1:] == [500, 500, 500, 500]
-    assert FRANKLIN_ASSESSMENT_RENDER_BUFFER_MS == 5_000
+    assert page.waits == [500, 500, 500, 500]
     assert [item["label"] for item in screenshots] == [
         "Predictions",
         "Population frequencies",
@@ -680,7 +867,9 @@ def test_browser_review_can_be_cancelled_before_opening_edge(tmp_path):
 
 def test_franklin_classification_capture_ends_with_complete_de_novo_card(tmp_path):
     variant = ArcherTsvReader().read(FIXTURE)[3]
-    service = BrowserReviewService(profile_root=tmp_path)
+    service = BrowserReviewService(
+        profile_root=tmp_path, capture_validator=VALID_CAPTURE
+    )
 
     captures = []
 
@@ -741,7 +930,7 @@ def test_franklin_classification_capture_ends_with_complete_de_novo_card(tmp_pat
             self.captures.append(kwargs)
 
         def wait_for_timeout(self, milliseconds):
-            assert milliseconds == 200
+            assert milliseconds in {200, 250}
 
     page = Page()
     screenshots = service._capture_franklin_classification(
@@ -766,7 +955,9 @@ def test_franklin_classification_capture_ends_with_complete_de_novo_card(tmp_pat
 
 def test_franklin_oncogenic_capture_uses_named_evidence_boxes(tmp_path):
     variant = ArcherTsvReader().read(FIXTURE)[3]
-    service = BrowserReviewService(profile_root=tmp_path)
+    service = BrowserReviewService(
+        profile_root=tmp_path, capture_validator=VALID_CAPTURE
+    )
     captures = []
 
     class Category:
@@ -828,7 +1019,7 @@ def test_franklin_oncogenic_capture_uses_named_evidence_boxes(tmp_path):
             return panel
 
         def wait_for_timeout(self, milliseconds):
-            assert milliseconds == 200
+            assert milliseconds in {200, 250}
 
         def screenshot(self, **kwargs):
             self.captures.append(kwargs)
@@ -980,6 +1171,75 @@ def test_mtbp_screenshot_row_matching_requires_exact_variant_identity():
     assert not _mtbp_screenshot_row_matches(
         "EZH2 TS Mutation missense p.Arg175His exon 5/11", variant
     )
+
+
+def test_mtbp_screenshot_rediscovers_target_after_hidden_incident(tmp_path):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+    attempts = 0
+
+    class Cells:
+        def count(self):
+            return 0
+
+    class Accordion:
+        first = None
+
+        def __init__(self):
+            self.first = self
+
+        def count(self):
+            return 1
+
+        def is_visible(self):
+            return True
+
+        def scroll_into_view_if_needed(self):
+            pass
+
+        def screenshot(self, *, path):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("hidden")
+            image = Image.new("RGB", (800, 500), "white")
+            image.paste("navy", (20, 20, 780, 300))
+            image.save(path)
+
+    class Row:
+        def locator(self, selector):
+            return Cells() if selector == "td" else Accordion()
+
+        def is_visible(self):
+            return True
+
+        def wait_for(self, **kwargs):
+            pass
+
+        def bounding_box(self):
+            return None
+
+    class Rows:
+        def all_inner_texts(self):
+            return ["TP53 Mutation missense p.Arg175His exon 5/11"]
+
+        def nth(self, index):
+            return Row()
+
+    class Page:
+        waits = []
+
+        def locator(self, selector):
+            assert selector == "table tr"
+            return Rows()
+
+        def wait_for_timeout(self, milliseconds):
+            self.waits.append(milliseconds)
+
+    path = service._capture_mtbp_variant_screenshot(Page(), variant, tmp_path)
+
+    assert attempts == 2
+    assert path.exists()
 
 
 def test_mtbp_report_parser_fails_closed_on_variant_identity_mismatch():

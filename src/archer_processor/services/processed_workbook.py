@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 import openpyxl
@@ -16,6 +16,7 @@ from archer_processor.io import ArcherTsvReader
 from archer_processor.knowledge import VariantHistoryRepository
 
 from .database_selection import HGVSC_HEADER, SAMPLE_HEADER, SELECTION_SHEET, SKIP_HEADER
+from .evidence_audit import EvidenceAuditIndex, migrate_loaded_evidence
 
 
 @dataclass(slots=True)
@@ -38,7 +39,11 @@ class ProcessedWorkbookLoader:
         self.filter_engine = filter_engine or FilterEngine()
         self.history = history
 
-    def load(self, workbook_path: Path) -> ProcessedWorkbookState:
+    def load(
+        self,
+        workbook_path: Path,
+        progress: Callable[[int, int, str], None] | None = None,
+    ) -> ProcessedWorkbookState:
         workbook_path = workbook_path.resolve()
         if not workbook_path.exists():
             raise ValueError(f"Workbook not found: {workbook_path}")
@@ -82,6 +87,7 @@ class ProcessedWorkbookLoader:
                 if header != SKIP_HEADER and not header.endswith(" Evidence")
             ]
             variants: list[VariantRecord] = []
+            total_rows = max(1, worksheet.max_row - 1)
             skip_keys: set[str] = set()
             cell_evidence: dict[str, dict[str, str]] = {}
             for source_row, row in enumerate(
@@ -103,6 +109,10 @@ class ProcessedWorkbookLoader:
                         f"Row {source_row} is missing Sample and cannot be restored."
                     )
                 variants.append(variant)
+                if progress and (len(variants) == 1 or len(variants) % 25 == 0):
+                    progress(
+                        len(variants), total_rows, f"Reading variant {len(variants)}"
+                    )
                 key = self._variant_key(variant)
                 if self._text(row[headers[SKIP_HEADER]]).casefold() == "x":
                     skip_keys.add(key)
@@ -120,7 +130,7 @@ class ProcessedWorkbookLoader:
             self.history.annotate(variants)
 
         evidence = self._restore_evidence(
-            workbook_path, variants, cell_evidence
+            workbook_path, variants, cell_evidence, progress=progress
         )
         timestamp = datetime.fromtimestamp(workbook_path.stat().st_mtime)
         result = ProcessingResult(
@@ -139,20 +149,24 @@ class ProcessedWorkbookLoader:
         workbook_path: Path,
         variants: list[VariantRecord],
         cell_evidence: dict[str, dict[str, str]],
+        *,
+        progress: Callable[[int, int, str], None] | None = None,
     ) -> dict[str, list[DatabaseEvidence]]:
         artifact_root = workbook_path.parent / f"{workbook_path.stem}_browser_evidence"
+        audit_index = EvidenceAuditIndex.build(artifact_root)
         patient_order = list(dict.fromkeys(variant.patient_id for variant in variants))
         patient_indexes = {
             patient_id: index
             for index, patient_id in enumerate(patient_order, start=1)
         }
         restored: dict[str, list[DatabaseEvidence]] = {}
-        for variant in variants:
+        for index, variant in enumerate(variants, start=1):
             key = self._variant_key(variant)
             databases = cell_evidence.get(key, {})
             items: list[DatabaseEvidence] = []
             for database, cell_value in databases.items():
                 audit = self._load_audit(
+                    audit_index,
                     artifact_root,
                     patient_indexes[variant.patient_id],
                     database,
@@ -164,41 +178,24 @@ class ProcessedWorkbookLoader:
                     items.extend(self._parse_evidence_cell(database, cell_value))
             if items:
                 restored[key] = items
+            if progress:
+                progress(index, len(variants), f"Restoring evidence {index}/{len(variants)}")
         return restored
 
     def _load_audit(
         self,
+        audit_index: EvidenceAuditIndex,
         artifact_root: Path,
         patient_index: int,
         database: str,
         variant: VariantRecord,
     ) -> DatabaseEvidence | None:
-        digest = hashlib.sha256(
-            f"{database}|{variant.symbol}|{variant.hgvsc}|{variant.hgvsp}".encode(
-                "utf-8"
-            )
-        ).hexdigest()[:16]
-        filename = f"{digest}.audit.json"
-        expected = (
-            artifact_root
-            / f"patient-{patient_index:03d}"
-            / database.casefold()
-            / filename
-        )
-        candidates = [expected] if expected.exists() else []
-        if not candidates and artifact_root.exists():
-            candidates = list(artifact_root.rglob(filename))
-        if not candidates:
+        selected = audit_index.best(database, variant)
+        if selected is None:
             return None
-        audit_path = max(candidates, key=lambda path: path.stat().st_mtime)
-        try:
-            payload = json.loads(audit_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeError):
-            return None
-        if not isinstance(payload, dict):
-            return None
+        _, payload = selected
         raw = payload.get("raw")
-        return DatabaseEvidence(
+        evidence = DatabaseEvidence(
             database=database,
             status=self._text(payload.get("status")) or "found",
             summary=self._text(payload.get("summary")),
@@ -207,6 +204,7 @@ class ProcessedWorkbookLoader:
             url=self._text(payload.get("url")),
             raw=raw if isinstance(raw, dict) else {},
         )
+        return migrate_loaded_evidence(evidence, artifact_root)
 
     @staticmethod
     def _parse_evidence_cell(

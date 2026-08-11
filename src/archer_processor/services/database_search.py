@@ -15,6 +15,7 @@ import requests
 
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
 from archer_processor.services.settings import AppSettings
+from archer_processor.services.variant_identity import genomic_identity
 
 
 MANUAL_DATABASES = {
@@ -212,18 +213,24 @@ class DatabaseSearchService:
         query = variant.hgvsc
         if not query:
             return DatabaseEvidence("ClinVar", "invalid_query", "Missing HGVSc.")
+        expected = genomic_identity(variant)
+        if expected is None:
+            return DatabaseEvidence(
+                "ClinVar", "invalid_query", "Missing exact GRCh37 genomic identity."
+            )
         cache_key = "|".join(self._clinvar_queries(variant))
         if cache_key in self._clinvar_cache:
             return self._clinvar_cache[cache_key]
         try:
-            clinvar_id = ""
-            used_query = query
+            candidate_ids: list[str] = []
+            query_attempts: list[str] = []
             for candidate in self._clinvar_queries(variant):
+                query_attempts.append(candidate)
                 params = {
                     "db": "clinvar",
                     "term": candidate,
                     "retmode": "xml",
-                    "retmax": "1",
+                    "retmax": "20",
                 }
                 if self.settings.clinvar_api_key:
                     params["api_key"] = self.settings.clinvar_api_key
@@ -233,11 +240,10 @@ class DatabaseSearchService:
                 )
                 search.raise_for_status()
                 root = ET.fromstring(search.content)
-                clinvar_id = root.findtext(".//Id") or ""
-                if clinvar_id:
-                    used_query = candidate
-                    break
-            if not clinvar_id:
+                for node in root.findall(".//Id"):
+                    if node.text and node.text not in candidate_ids:
+                        candidate_ids.append(node.text)
+            if not candidate_ids:
                 evidence = DatabaseEvidence(
                     database="ClinVar",
                     status="not_found",
@@ -246,21 +252,52 @@ class DatabaseSearchService:
                 )
                 self._clinvar_cache[cache_key] = evidence
                 return evidence
-            fetch_params = {
-                "db": "clinvar",
-                "id": clinvar_id,
-                "retmode": "xml",
-                "rettype": "vcv",
-                "is_variationid": "true",
-            }
-            if self.settings.clinvar_api_key:
-                fetch_params["api_key"] = self.settings.clinvar_api_key
-            fetch = self._eutils_get(
-                "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
-                params=fetch_params,
+            for clinvar_id in candidate_ids:
+                fetch_params = {
+                    "db": "clinvar",
+                    "id": clinvar_id,
+                    "retmode": "xml",
+                    "rettype": "vcv",
+                    "is_variationid": "true",
+                }
+                if self.settings.clinvar_api_key:
+                    fetch_params["api_key"] = self.settings.clinvar_api_key
+                fetch = self._eutils_get(
+                    "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
+                    params=fetch_params,
+                )
+                fetch.raise_for_status()
+                matched = self._matching_clinvar_location(fetch.content, expected)
+                if matched is None:
+                    continue
+                evidence = self._parse_clinvar(fetch.content, query, clinvar_id)
+                evidence.raw.update(
+                    {
+                        "assembly_verified": "GRCh37",
+                        "matched_location": matched,
+                        "candidate_ids": candidate_ids,
+                        "query_attempts": query_attempts,
+                    }
+                )
+                self._clinvar_cache[cache_key] = evidence
+                return evidence
+            evidence = DatabaseEvidence(
+                database="ClinVar",
+                status="identity_mismatch",
+                summary="ClinVar candidates were found, but none matched the exact GRCh37 locus and alleles.",
+                url=self._clinvar_search_url(query),
+                raw={
+                    "candidate_ids": candidate_ids,
+                    "query_attempts": query_attempts,
+                    "expected_location": {
+                        "assembly": expected.assembly,
+                        "chromosome": expected.chromosome,
+                        "position": expected.position,
+                        "reference": expected.reference,
+                        "alternate": expected.alternate,
+                    },
+                },
             )
-            fetch.raise_for_status()
-            evidence = self._parse_clinvar(fetch.content, used_query, clinvar_id)
             self._clinvar_cache[cache_key] = evidence
             return evidence
         except requests.HTTPError as exc:
@@ -310,7 +347,11 @@ class DatabaseSearchService:
     def _parse_clinvar(self, content: bytes, query: str, clinvar_id: str) -> DatabaseEvidence:
         text = content.decode("utf-8", errors="replace")
         root = ET.fromstring(content)
-        archive = root.find(".//VariationArchive")
+        archive = (
+            root
+            if root.tag.rsplit("}", 1)[-1] == "VariationArchive"
+            else root.find(".//VariationArchive")
+        )
         title = ""
         accession = ""
         if archive is not None:
@@ -352,27 +393,50 @@ class DatabaseSearchService:
             raw={"query": query, "clinvar_id": clinvar_id, "xml_preview": text[:1000]},
         )
 
+    @staticmethod
+    def _matching_clinvar_location(content: bytes, expected) -> dict | None:
+        root = ET.fromstring(content)
+        for node in root.findall(".//SequenceLocation"):
+            assembly = node.attrib.get("Assembly", "")
+            chromosome = node.attrib.get("Chr", "").removeprefix("chr").upper()
+            if chromosome == "MT":
+                chromosome = "M"
+            position = node.attrib.get("positionVCF", "")
+            reference = node.attrib.get(
+                "referenceAlleleVCF", node.attrib.get("referenceAllele", "")
+            ).upper()
+            alternate = node.attrib.get(
+                "alternateAlleleVCF", node.attrib.get("alternateAllele", "")
+            ).upper()
+            if not position.isdigit():
+                continue
+            if (
+                assembly.startswith("GRCh37")
+                and chromosome == expected.chromosome
+                and int(position) == expected.position
+                and reference == expected.reference
+                and alternate == expected.alternate
+            ):
+                return {
+                    "assembly": "GRCh37",
+                    "chromosome": chromosome,
+                    "position": int(position),
+                    "reference": reference,
+                    "alternate": alternate,
+                }
+        return None
+
     def _clinvar_search_url(self, query: str) -> str:
         return "https://www.ncbi.nlm.nih.gov/clinvar/?term=" + urllib.parse.quote(query)
 
     def _clinvar_queries(self, variant: VariantRecord) -> list[str]:
-        cdna = self._cdna_without_transcript(variant.hgvsc)
-        protein = self._protein_change(variant.hgvsp)
-        queries = [
-            f"{variant.hgvsc}[VARNAME]",
-        ]
-        if variant.symbol and protein:
-            queries.append(f"{variant.symbol} {protein}")
-        if variant.symbol and cdna:
-            queries.append(f"{variant.symbol} {cdna}")
-        queries.append(variant.hgvsc)
-        if variant.genomic_location:
-            queries.append(variant.genomic_location)
-        unique = []
-        for query in queries:
-            if query and query not in unique:
-                unique.append(query)
-        return unique
+        queries = [f"{variant.hgvsc}[VARNAME]"] if variant.hgvsc else []
+        identity = genomic_identity(variant)
+        if identity is not None:
+            queries.append(
+                f"{identity.chromosome}[chr] AND {identity.position}[chrpos37]"
+            )
+        return list(dict.fromkeys(queries))
 
     def _search_cosmic(self, variant: VariantRecord) -> DatabaseEvidence:
         queries = self._cosmic_queries(variant)

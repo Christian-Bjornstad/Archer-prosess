@@ -6,6 +6,7 @@ from .browser_review import (
 )
 from .database_search import DatabaseSearchService
 from .database_selection import load_database_skip_keys
+from .evidence_audit import RETRYABLE_EVIDENCE_STATUSES, is_completed_evidence
 from .processed_workbook import ProcessedWorkbookLoader, ProcessedWorkbookState
 from .settings import AppSettings
 
@@ -16,7 +17,9 @@ __all__ = [
     "BrowserReviewCancelled",
     "BrowserReviewService",
     "DatabaseSearchService",
+    "RETRYABLE_EVIDENCE_STATUSES",
     "ProcessedWorkbookLoader",
     "ProcessedWorkbookState",
     "load_database_skip_keys",
+    "is_completed_evidence",
 ]

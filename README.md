@@ -59,7 +59,7 @@ flowchart LR
 3. Load the reviewed workbook back into the application.
 4. Select the evidence sources and run the patient-by-patient search.
 5. Verify the compact findings and captured source images.
-6. Create the final patient workbooks.
+6. Review the patient workbooks written automatically beside the main workbook.
 
 Use **Pause Search** to pause at the next safe browser checkpoint and **Resume
 Search** to continue the same queue without repeating completed work. **Stop
@@ -83,7 +83,7 @@ the provider exposes that choice.
 | --- | --- | --- |
 | **MTBP** | One pseudonymous report per variant and one alteration-centric screenshot | Transcript HGVS first, then a validated GRCh37 genomic fallback; returned variant identity is checked; personal report URLs are not exported |
 | **Franklin** | Classification-only ACMG/Oncology overviews, each named evidence card, Predictions, and Population Frequencies | Explicit **hg19** + **Somatic** search; clipped evidence cards are expanded for full capture; ACMG stops after De Novo Data; Somatic Clinical Evidence and Add More Evidence are excluded |
-| **ClinVar** | Variant title and focused germline/somatic classification summary | Resolves the canonical ClinVar variation before capture |
+| **ClinVar** | Variant title and focused germline/somatic classification summary | Opens a candidate only after chromosome, VCF position, reference, alternate, and **GRCh37** assembly all match exactly; older unverified results are queued for verification |
 | **OncoKB** | Variant Overview and Mutation Effect | Rejects the cookie overlay before taking the screenshot |
 | **COSMIC** | Overview, Tissue distribution, and Samples filtered to `lymphoid` | Uses the Archer `COSMICID` and resolves the canonical GRCh37 mutation page |
 
@@ -127,6 +127,10 @@ to be reused while keeping browser activity visible and auditable.
   Franklin rendering waits, and MTBP report polling.
 - If Excel has the workbook open, the app keeps evidence in memory, shows a clear
   warning, and allows the workbook update to be retried without closing the app.
+- Large processed workbooks are restored in a background thread with progress,
+  keeping the application responsive.
+- Blank, truncated, missing, or otherwise incomplete required screenshots are
+  marked for recapture instead of being treated as complete evidence.
 - Screenshot filenames use hashes or pseudonymous report identifiers rather than
   patient or sample identifiers.
 
@@ -156,6 +160,10 @@ Unique genes use the gene symbol as the sheet name. If a patient has multiple
 variants in the same gene, the protein change is added; the coding-DNA change is
 used when protein information is unavailable.
 
+Each report is updated beside the processed workbook after that patient finishes.
+If a report is open in Excel, its save is marked pending and retried during final
+reconciliation without stopping the evidence run.
+
 ## Resume a previous analysis
 
 Use **Open Processed Workbook** on the Import page to continue after restarting
@@ -168,6 +176,17 @@ the application. The loader restores:
 - matching screenshot and audit paths from the `*_browser_evidence` directory.
 
 New searches merge with restored evidence instead of discarding earlier results.
+Errors, timeouts, identity mismatches, unverified ClinVar records, and partial
+captures remain pending when **Resume Incomplete Search** is used.
+
+## Priority colours
+
+Artifact colouring always takes precedence. Non-artifact rows are highlighted:
+
+- strong green when `Tier I + Tier II > 5`;
+- strong green when `Germ > 10` and AF is at least 35%;
+- weak green when `Germ > 10` and AF is below 35%;
+- uncoloured with a warning when `Germ > 10` but AF is missing.
 
 ## Requirements
 
