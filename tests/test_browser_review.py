@@ -11,6 +11,7 @@ from archer_processor.services.browser_review import (
     _cosmic_identifier,
     _cosmic_numeric_id,
     _cosmic_source_url,
+    _franklin_queries,
     _mtbp_genomic_query,
     _mtbp_query_rejected,
     _mtbp_screenshot_row_matches,
@@ -386,7 +387,136 @@ def test_franklin_visible_page_parser_returns_only_classification():
     assert evidence.status == "found"
     assert evidence.clinical_significance == "Pathogenic"
     assert evidence.summary == "classification=Pathogenic;"
-    assert evidence.raw == {"classification": "Pathogenic"}
+    assert evidence.raw["classification"] == "Pathogenic"
+    assert evidence.raw["identity_verification"]["basis"] == "exact_transcript"
+
+
+def test_franklin_queries_use_transcript_then_genomic_fallback():
+    variant = VariantRecord(
+        source_file=Path("synthetic.tsv"),
+        source_row=1,
+        sample="SYNTHETIC_VPM_1",
+        symbol="LUC7L2",
+        hgvsc="NM_016019.4:c.784dup",
+        hgvsp="NP_057103.2:p.Arg262ProfsTer26",
+        genomic_location="chr7:139097298",
+        ref_allele="T",
+        alt_allele="TC",
+    )
+
+    assert _franklin_queries(variant) == [
+        "LUC7L2:c.784dup",
+        "chr7-139097298 T>TC",
+    ]
+
+
+def test_franklin_accepts_different_transcript_for_same_grch37_variant():
+    variant = VariantRecord(
+        source_file=Path("synthetic.tsv"),
+        source_row=1,
+        sample="SYNTHETIC_VPM_1",
+        symbol="LUC7L2",
+        hgvsc="NM_016019.4:c.784dup",
+        genomic_location="chr7:139097298",
+        ref_allele="T",
+        alt_allele="TC",
+    )
+    body = """
+    FMC1-LUC7L2:c.982dup
+    GRCh37 chr7:139097298 T>TC
+    Suggested classification
+    Likely pathogenic
+    """
+
+    evidence = parse_franklin_page(
+        body, variant, "https://franklin.genoox.com/clinical-db/variant/snpTumor/example"
+    )
+
+    assert evidence.status == "found"
+    assert evidence.raw["identity_verification"]["basis"] == "grch37_genomic"
+
+
+def test_franklin_rejects_same_gene_at_different_genomic_position():
+    variant = VariantRecord(
+        source_file=Path("synthetic.tsv"),
+        source_row=1,
+        sample="SYNTHETIC_VPM_1",
+        symbol="LUC7L2",
+        hgvsc="NM_016019.4:c.784dup",
+        genomic_location="chr7:139097298",
+        ref_allele="T",
+        alt_allele="TC",
+    )
+    body = """
+    LUC7L2:c.982dup
+    GRCh37 chr7:139097299 T>TC
+    Suggested classification
+    Likely pathogenic
+    """
+
+    evidence = parse_franklin_page(
+        body, variant, "https://franklin.genoox.com/clinical-db/variant/snpTumor/example"
+    )
+
+    assert evidence.status == "identity_mismatch"
+
+
+def test_franklin_falls_back_after_identity_mismatch(tmp_path, monkeypatch):
+    variant = VariantRecord(
+        source_file=Path("synthetic.tsv"),
+        source_row=1,
+        sample="SYNTHETIC_VPM_1",
+        symbol="LUC7L2",
+        hgvsc="NM_016019.4:c.784dup",
+        genomic_location="chr7:139097298",
+        ref_allele="T",
+        alt_allele="TC",
+    )
+    service = BrowserReviewService(profile_root=tmp_path)
+    calls = []
+
+    def attempt(page, current_variant, query, artifact_directory, *, progress):
+        calls.append(query)
+        status = "identity_mismatch" if len(calls) == 1 else "found"
+        return DatabaseEvidence("Franklin", status, query, accession=query)
+
+    monkeypatch.setattr(service, "_search_franklin_query", attempt, raising=False)
+
+    evidence = service._resolve_franklin_queries(
+        object(), variant, tmp_path / "franklin", progress=None
+    )
+
+    assert evidence.status == "found"
+    assert calls == ["LUC7L2:c.784dup", "chr7-139097298 T>TC"]
+    assert evidence.raw["query_attempts"] == calls
+
+
+def test_franklin_skips_fallback_after_verified_primary_result(tmp_path, monkeypatch):
+    variant = VariantRecord(
+        source_file=Path("synthetic.tsv"),
+        source_row=1,
+        sample="SYNTHETIC_VPM_1",
+        symbol="LUC7L2",
+        hgvsc="NM_016019.4:c.784dup",
+        genomic_location="chr7:139097298",
+        ref_allele="T",
+        alt_allele="TC",
+    )
+    service = BrowserReviewService(profile_root=tmp_path)
+    calls = []
+
+    def attempt(page, current_variant, query, artifact_directory, *, progress):
+        calls.append(query)
+        return DatabaseEvidence("Franklin", "found", query, accession=query)
+
+    monkeypatch.setattr(service, "_search_franklin_query", attempt, raising=False)
+
+    evidence = service._resolve_franklin_queries(
+        object(), variant, tmp_path / "franklin", progress=None
+    )
+
+    assert evidence.status == "found"
+    assert calls == ["LUC7L2:c.784dup"]
 
 
 def test_clinvar_capture_is_cropped_to_title_and_classification_summary(tmp_path):

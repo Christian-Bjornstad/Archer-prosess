@@ -15,6 +15,14 @@ class GenomicIdentity:
     alternate: str
 
 
+@dataclass(frozen=True, slots=True)
+class IdentityVerification:
+    accepted: bool
+    basis: str
+    reason: str
+    returned: GenomicIdentity | None = None
+
+
 def genomic_identity(
     variant: VariantRecord,
     assembly: str = "GRCh37",

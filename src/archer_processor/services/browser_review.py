@@ -13,6 +13,12 @@ from typing import Any
 from urllib.parse import quote
 
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
+from archer_processor.services.evidence_audit import persist_evidence_result
+from archer_processor.services.variant_identity import (
+    GenomicIdentity,
+    IdentityVerification,
+    genomic_identity,
+)
 
 
 BROWSER_DATABASES = ("COSMIC", "OncoKB", "Franklin", "ClinVar", "MTBP")
@@ -846,100 +852,17 @@ class BrowserReviewService:
                 for index, variant in enumerate(variants, start=1):
                     self._check_cancelled()
                     key = self.variant_key(variant)
-                    query = _franklin_search_query(variant)
-                    if not query:
-                        results[key] = DatabaseEvidence(
-                            "Franklin",
-                            "invalid_query",
-                            "Cannot build a Franklin HGVS or genomic query.",
-                            url=FRANKLIN_HOME_URL,
-                        )
-                        continue
                     if progress:
                         progress(
-                            f"Franklin browser lookup {index}/{len(variants)}: {query}"
+                            f"Franklin browser lookup {index}/{len(variants)}: "
+                            f"{_franklin_search_query(variant)}"
                         )
-                    last_text = ""
-                    last_error = ""
-                    for attempt in range(1, self.franklin_attempts + 1):
-                        try:
-                            page.goto(
-                                FRANKLIN_HOME_URL,
-                                wait_until="domcontentloaded",
-                                timeout=self.navigation_timeout_ms,
-                            )
-                            search = page.locator(
-                                "input[placeholder='Enter variant, gene or select an example above']"
-                            )
-                            search.wait_for(state="visible", timeout=self.navigation_timeout_ms)
-                            self._select_franklin_search_mode(page)
-                            search.fill(query)
-                            search.press("Enter")
-                            self._open_franklin_resolved_variant(page, variant)
-                            for _ in range(60):
-                                self._check_cancelled()
-                                last_text = page.locator("body").inner_text()
-                                if (
-                                    self._franklin_result_ready(page, last_text)
-                                    or "Something went wrong" in last_text
-                                    or _franklin_quota_message(last_text)
-                                ):
-                                    break
-                                page.wait_for_timeout(1_000)
-                            if self._franklin_result_ready(page, last_text):
-                                evidence = self._capture_result(
-                                    "Franklin", variant, page, artifact_directory
-                                )
-                                try:
-                                    assessment = self._capture_franklin_assessment(
-                                        page, variant, artifact_directory
-                                    )
-                                    evidence.raw.setdefault("screenshots", []).extend(
-                                        assessment
-                                    )
-                                except Exception as exc:
-                                    evidence.raw["screenshot_warning"] = (
-                                        "Franklin assessment-tools screenshot could not "
-                                        f"be captured: {exc}"
-                                    )
-                                self._write_audit(
-                                    evidence,
-                                    self._screenshot_path(
-                                        artifact_directory, "Franklin", variant
-                                    ).with_suffix(".audit.json"),
-                                )
-                                results[key] = evidence
-                                break
-                            quota = _franklin_quota_message(last_text)
-                            if quota:
-                                results[key] = DatabaseEvidence(
-                                    "Franklin",
-                                    "quota_exhausted",
-                                    quota,
-                                    accession=query,
-                                    url=page.url,
-                                )
-                                break
-                            last_error = "Franklin returned 'Something went wrong'."
-                        except browser_timeout:
-                            last_error = "Franklin timed out while resolving the variant."
-                        except Exception as exc:
-                            last_error = str(exc)
-                        if attempt < self.franklin_attempts:
-                            if progress:
-                                progress(
-                                    f"Franklin: retrying {query} ({attempt + 1}/{self.franklin_attempts})"
-                                )
-                            page.wait_for_timeout(2_000 * attempt)
-                    if key not in results:
-                        results[key] = DatabaseEvidence(
-                            "Franklin",
-                            "error",
-                            last_error or "Franklin did not return a classification.",
-                            accession=query,
-                            url=page.url,
-                            raw={"visible_text_preview": last_text[:12_000]},
-                        )
+                    results[key] = self._resolve_franklin_queries(
+                        page,
+                        variant,
+                        artifact_directory,
+                        progress=progress,
+                    )
                     if index < len(variants):
                         self._wait_between_queries(
                             page, "Franklin", progress=progress
@@ -951,6 +874,141 @@ class BrowserReviewService:
                 except browser_error:
                     pass
         return results
+
+    def _resolve_franklin_queries(
+        self,
+        page: Any,
+        variant: VariantRecord,
+        artifact_directory: Path,
+        *,
+        progress: Callable[[str], None] | None,
+    ) -> DatabaseEvidence:
+        started_at = time.monotonic()
+        query_attempts: list[str] = []
+        queries = _franklin_queries(variant)
+        evidence = DatabaseEvidence(
+            "Franklin",
+            "invalid_query",
+            "Cannot build a Franklin HGVS or genomic query.",
+            url=FRANKLIN_HOME_URL,
+        )
+        for query_index, query in enumerate(queries, start=1):
+            query_attempts.append(query)
+            if progress and query_index > 1:
+                progress(f"Franklin: retrying with GRCh37 genomic query {query}")
+            evidence = self._search_franklin_query(
+                page,
+                variant,
+                query,
+                artifact_directory,
+                progress=progress,
+            )
+            if evidence.status == "found":
+                break
+            if evidence.status not in {
+                "identity_mismatch",
+                "timeout",
+                "not_found",
+                "error",
+            }:
+                break
+        evidence.raw["query_attempts"] = list(query_attempts)
+        return persist_evidence_result(
+            artifact_directory,
+            "Franklin",
+            variant,
+            evidence,
+            query_attempts=query_attempts,
+            started_at=started_at,
+        )
+
+    def _search_franklin_query(
+        self,
+        page: Any,
+        variant: VariantRecord,
+        query: str,
+        artifact_directory: Path,
+        *,
+        progress: Callable[[str], None] | None,
+    ) -> DatabaseEvidence:
+        _, _, browser_timeout = self._browser_api()
+        last_text = ""
+        last_error = ""
+        last_status = "error"
+        for attempt in range(1, self.franklin_attempts + 1):
+            try:
+                page.goto(
+                    FRANKLIN_HOME_URL,
+                    wait_until="domcontentloaded",
+                    timeout=self.navigation_timeout_ms,
+                )
+                search = page.locator(
+                    "input[placeholder='Enter variant, gene or select an example above']"
+                )
+                search.wait_for(state="visible", timeout=self.navigation_timeout_ms)
+                self._select_franklin_search_mode(page)
+                search.fill(query)
+                search.press("Enter")
+                self._open_franklin_resolved_variant(page, variant)
+                for _ in range(60):
+                    self._check_cancelled()
+                    last_text = page.locator("body").inner_text()
+                    if (
+                        self._franklin_result_ready(page, last_text)
+                        or "Something went wrong" in last_text
+                        or _franklin_quota_message(last_text)
+                    ):
+                        break
+                    page.wait_for_timeout(1_000)
+                if self._franklin_result_ready(page, last_text):
+                    evidence = self._capture_result(
+                        "Franklin", variant, page, artifact_directory
+                    )
+                    evidence.accession = query
+                    if evidence.status != "found":
+                        return evidence
+                    try:
+                        assessment = self._capture_franklin_assessment(
+                            page, variant, artifact_directory
+                        )
+                        evidence.raw.setdefault("screenshots", []).extend(assessment)
+                    except Exception as exc:
+                        evidence.raw["screenshot_warning"] = (
+                            "Franklin assessment-tools screenshot could not be captured: "
+                            f"{exc}"
+                        )
+                    return evidence
+                quota = _franklin_quota_message(last_text)
+                if quota:
+                    return DatabaseEvidence(
+                        "Franklin",
+                        "quota_exhausted",
+                        quota,
+                        accession=query,
+                        url=page.url,
+                    )
+                last_error = "Franklin returned 'Something went wrong'."
+            except browser_timeout:
+                last_status = "timeout"
+                last_error = "Franklin timed out while resolving the variant."
+            except Exception as exc:
+                last_status = "error"
+                last_error = str(exc)
+            if attempt < self.franklin_attempts:
+                if progress:
+                    progress(
+                        f"Franklin: retrying {query} "
+                        f"({attempt + 1}/{self.franklin_attempts})"
+                    )
+                page.wait_for_timeout(2_000 * attempt)
+        return DatabaseEvidence(
+            "Franklin",
+            last_status,
+            last_error or "Franklin did not return a classification.",
+            accession=query,
+            url=page.url,
+            raw={"visible_text_preview": last_text[:12_000]},
+        )
 
     @staticmethod
     def _franklin_result_ready(page: Any, body_text: str) -> bool:
@@ -2682,13 +2740,26 @@ def parse_franklin_page(
     body_text: str, variant: VariantRecord, url: str
 ) -> DatabaseEvidence:
     query = _franklin_search_query(variant)
-    if not _franklin_page_matches(body_text, variant):
+    verification = _franklin_identity(body_text, url, variant)
+    verification_raw = {
+        "accepted": verification.accepted,
+        "basis": verification.basis,
+        "reason": verification.reason,
+        "requested": asdict(genomic_identity(variant))
+        if genomic_identity(variant)
+        else None,
+        "returned": asdict(verification.returned)
+        if verification.returned
+        else None,
+    }
+    if not verification.accepted:
         return DatabaseEvidence(
             "Franklin",
             "identity_mismatch",
             f"Franklin returned a different variant than {query}; result was not imported.",
             accession=query,
             url=url,
+            raw={"identity_verification": verification_raw},
         )
     classification = _after_heading(body_text, "Suggested classification")
     if not classification:
@@ -2703,7 +2774,10 @@ def parse_franklin_page(
         accession=query,
         clinical_significance=classification,
         url=url,
-        raw={"classification": classification},
+        raw={
+            "classification": classification,
+            "identity_verification": verification_raw,
+        },
     )
 
 
@@ -2891,38 +2965,97 @@ def _cdna_change(value: str) -> str:
 
 
 def _franklin_query(variant: VariantRecord) -> str:
-    if variant.genomic_location and variant.ref_allele and variant.alt_allele:
-        try:
-            chromosome, position = variant.genomic_location.split(":", 1)
-            chromosome = chromosome if chromosome.lower().startswith("chr") else f"chr{chromosome}"
-            return f"{chromosome}-{position.split('-', 1)[0]}-{variant.ref_allele}-{variant.alt_allele}"
-        except ValueError:
-            pass
-    if variant.symbol and _cdna_change(variant.hgvsc):
-        return f"{variant.symbol}:{_cdna_change(variant.hgvsc)}"
-    return variant.hgvsc or variant.genomic_location
+    queries = _franklin_queries(variant)
+    return queries[-1] if queries else ""
+
+
+def _franklin_queries(variant: VariantRecord) -> list[str]:
+    queries: list[str] = []
+    cdna = _cdna_change(variant.hgvsc)
+    if variant.symbol and cdna:
+        queries.append(f"{variant.symbol}:{cdna}")
+    identity = genomic_identity(variant)
+    if identity:
+        queries.append(
+            f"chr{identity.chromosome}-{identity.position} "
+            f"{identity.reference}>{identity.alternate}"
+        )
+    if not queries and variant.hgvsc:
+        queries.append(variant.hgvsc)
+    return list(dict.fromkeys(queries))
 
 
 def _franklin_search_query(variant: VariantRecord) -> str:
-    cdna = _cdna_change(variant.hgvsc)
-    if variant.symbol and cdna:
-        return f"{variant.symbol}:{cdna}"
-    if variant.hgvsc:
-        return variant.hgvsc
-    return _franklin_query(variant)
+    queries = _franklin_queries(variant)
+    return queries[0] if queries else ""
 
 
 def _franklin_page_matches(body_text: str, variant: VariantRecord) -> bool:
+    return _franklin_identity(body_text, "", variant).accepted
+
+
+def _franklin_identity(
+    body_text: str,
+    url: str,
+    variant: VariantRecord,
+) -> IdentityVerification:
     compact = re.sub(r"\s+", "", body_text or "").casefold()
     if variant.symbol and variant.symbol.casefold() not in compact:
-        return False
+        return IdentityVerification(False, "none", "Gene symbol did not match.")
     cdna = _cdna_change(variant.hgvsc)
-    if cdna:
-        return cdna.casefold() in compact
+    if cdna and cdna.casefold() in compact:
+        return IdentityVerification(
+            True,
+            "exact_transcript",
+            "Transcript cDNA matched exactly.",
+        )
+    expected = genomic_identity(variant)
+    returned = _franklin_genomic_identity(body_text, url)
+    if expected and returned:
+        if expected == returned:
+            return IdentityVerification(
+                True,
+                "grch37_genomic",
+                "GRCh37 chromosome, position, reference, and alternate matched.",
+                returned,
+            )
+        return IdentityVerification(
+            False,
+            "grch37_genomic",
+            "Returned GRCh37 genomic identity differed from the requested variant.",
+            returned,
+        )
     protein = _mtbp_normalized_protein(_protein_change(variant.hgvsp))
-    if protein:
-        return protein in _mtbp_proteins(body_text)
-    return bool(variant.symbol)
+    if not cdna and protein and protein in _mtbp_proteins(body_text):
+        return IdentityVerification(True, "exact_protein", "Protein matched exactly.")
+    return IdentityVerification(False, "none", "No exact variant identity matched.")
+
+
+def _franklin_genomic_identity(
+    body_text: str,
+    url: str,
+) -> GenomicIdentity | None:
+    combined = f"{body_text}\n{url}"
+    match = re.search(
+        r"chr(?P<chromosome>[0-9]{1,2}|X|Y|M|MT)"
+        r"[-:](?P<position>\d+)"
+        r"(?:\s+|[-:])(?P<reference>[ACGTN]+)"
+        r"\s*(?:>|/|-)\s*(?P<alternate>[ACGTN]+)",
+        combined,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    chromosome = match.group("chromosome").upper()
+    if chromosome == "MT":
+        chromosome = "M"
+    return GenomicIdentity(
+        "GRCh37",
+        chromosome,
+        int(match.group("position")),
+        match.group("reference").upper(),
+        match.group("alternate").upper(),
+    )
 
 
 def _franklin_quota_message(body_text: str) -> str:
