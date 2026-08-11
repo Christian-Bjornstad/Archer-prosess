@@ -12,6 +12,7 @@ dist/
 .coverage
 htmlcov/
 tmp/
+.worktrees/
 
 # Local generated outputs and sensitive clinical data
 outputs/
