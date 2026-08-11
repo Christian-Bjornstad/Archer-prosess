@@ -47,6 +47,8 @@ from archer_processor.knowledge import VariantHistoryRepository
 from archer_processor.reports import (
     ExcelReportWriter,
     PatientExcelReportWriter,
+    PatientReportCoordinator,
+    PatientReportOutcome,
 )
 from archer_processor.services import (
     AppSettings,
@@ -104,6 +106,35 @@ class ProcessingWorker(QObject):
             self.status.emit("Writing review workbook")
             ExcelReportWriter().write(result, self.output_path, hide_excluded=self.hide_excluded)
             self.finished.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class ProcessedWorkbookWorker(QObject):
+    finished = pyqtSignal(object, object)
+    failed = pyqtSignal(str)
+    progress = pyqtSignal(int, int, str)
+
+    def __init__(self, workbook_path: Path, settings: AppSettings):
+        super().__init__()
+        self.workbook_path = workbook_path
+        self.settings = settings
+
+    def run(self) -> None:
+        try:
+            history_path = Path(self.settings.history_workbook)
+            history = (
+                VariantHistoryRepository(history_path)
+                if history_path.exists()
+                else None
+            )
+            state = ProcessedWorkbookLoader(
+                filter_engine=FilterEngine(
+                    production_rules(self.settings.artifact_rules)
+                ),
+                history=history,
+            ).load(self.workbook_path, progress=self.progress.emit)
+            self.finished.emit(self.workbook_path, state)
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -177,6 +208,7 @@ class DatabaseWorker(QObject):
     status = pyqtSignal(str)
     progress = pyqtSignal(int, int, str)
     paused = pyqtSignal(bool)
+    report_outcome = pyqtSignal(object)
 
     def __init__(
         self,
@@ -187,6 +219,8 @@ class DatabaseWorker(QObject):
         settings: AppSettings,
         completed_sources: set[tuple[str, str]] | None = None,
         patient_indexes: dict[str, int] | None = None,
+        result: ProcessingResult | None = None,
+        existing_evidence: dict[str, list[DatabaseEvidence]] | None = None,
     ):
         super().__init__()
         self.variants = variants
@@ -198,6 +232,8 @@ class DatabaseWorker(QObject):
         self.completed_sources = set(completed_sources or set())
         self.patient_indexes = dict(patient_indexes or {})
         self.pause_control = SearchPauseControl()
+        self.result = result
+        self.existing_evidence = existing_evidence or {}
 
     def run(self) -> None:
         try:
@@ -209,6 +245,13 @@ class DatabaseWorker(QObject):
                 self.status.emit(f"{database}: website lookup in Microsoft Edge")
             patients = _variants_grouped_by_patient(self.variants)
             all_evidence: dict[str, list[DatabaseEvidence]] = {}
+            coordinator = (
+                PatientReportCoordinator(
+                    self.result, self.result.variants, self.existing_evidence
+                )
+                if self.result is not None
+                else None
+            )
             self.status.emit(
                 f"Patient-by-patient search started: {len(patients)} patients, "
                 f"{len(self.databases)} sources"
@@ -283,12 +326,18 @@ class DatabaseWorker(QObject):
                     _merge_evidence_results(patient_evidence, browser_evidence)
 
                 _merge_evidence_results(all_evidence, patient_evidence)
+                if coordinator is not None:
+                    coordinator.merge(patient_evidence)
+                    self.report_outcome.emit(coordinator.write_patient(patient_id))
                 self.status.emit(f"{prefix}: complete")
                 self.progress.emit(
                     patient_index,
                     len(patients),
                     f"Completed {patient_id}",
                 )
+            if coordinator is not None:
+                for outcome in coordinator.reconcile():
+                    self.report_outcome.emit(outcome)
             self.finished.emit(all_evidence)
         except BrowserReviewCancelled:
             self.cancelled.emit()
@@ -391,6 +440,7 @@ class BrowserReviewWorker(QObject):
     status = pyqtSignal(str)
     progress = pyqtSignal(int, int, str)
     paused = pyqtSignal(bool)
+    report_outcome = pyqtSignal(object)
 
     def __init__(
         self,
@@ -400,6 +450,8 @@ class BrowserReviewWorker(QObject):
         settings: AppSettings,
         completed_sources: set[tuple[str, str]] | None = None,
         patient_indexes: dict[str, int] | None = None,
+        result: ProcessingResult | None = None,
+        existing_evidence: dict[str, list[DatabaseEvidence]] | None = None,
     ):
         super().__init__()
         self.variants = variants
@@ -409,6 +461,8 @@ class BrowserReviewWorker(QObject):
         self.completed_sources = set(completed_sources or set())
         self.patient_indexes = dict(patient_indexes or {})
         self.pause_control = SearchPauseControl()
+        self.result = result
+        self.existing_evidence = existing_evidence or {}
 
     def run(self) -> None:
         try:
@@ -432,6 +486,13 @@ class BrowserReviewWorker(QObject):
             )
             all_evidence: dict[str, list[DatabaseEvidence]] = {}
             patients = _variants_grouped_by_patient(self.variants)
+            coordinator = (
+                PatientReportCoordinator(
+                    self.result, self.result.variants, self.existing_evidence
+                )
+                if self.result is not None
+                else None
+            )
             self.progress.emit(0, len(patients), "Preparing signed-in browser queue")
             original_patient_total = max(
                 self.patient_indexes.values(), default=len(patients)
@@ -460,6 +521,9 @@ class BrowserReviewWorker(QObject):
                     checkpoint=self.patient_finished.emit,
                 )
                 _merge_evidence_results(all_evidence, patient_evidence)
+                if coordinator is not None:
+                    coordinator.merge(patient_evidence)
+                    self.report_outcome.emit(coordinator.write_patient(patient_id))
                 self.status.emit(f"{prefix}: browser sources complete")
                 self.progress.emit(patient_index, len(patients), f"Completed {patient_id}")
                 if patient_index < len(patients):
@@ -480,6 +544,9 @@ class BrowserReviewWorker(QObject):
                             chunk = min(0.25, remaining)
                             time.sleep(chunk)
                             remaining -= chunk
+            if coordinator is not None:
+                for outcome in coordinator.reconcile():
+                    self.report_outcome.emit(outcome)
             self.finished.emit(all_evidence)
         except BrowserReviewCancelled:
             self.cancelled.emit()
@@ -574,9 +641,11 @@ class MainWindow(QMainWindow):
         self.evidence = {}
         self.database_skip_keys: set[str] = set()
         self.processing_thread: QThread | None = None
+        self.workbook_load_thread: QThread | None = None
         self.database_thread: QThread | None = None
         self.browser_thread: QThread | None = None
         self.processing_worker: ProcessingWorker | None = None
+        self.workbook_load_worker: ProcessedWorkbookWorker | None = None
         self.database_worker: DatabaseWorker | None = None
         self.browser_worker: BrowserLoginWorker | BrowserReviewWorker | None = None
         self._search_pause_requested = False
@@ -1427,6 +1496,8 @@ class MainWindow(QMainWindow):
             self.settings,
             completed_sources,
             self._patient_indexes(),
+            self.result,
+            self.evidence,
         )
         thread = QThread(self)
         worker.moveToThread(thread)
@@ -1435,6 +1506,7 @@ class MainWindow(QMainWindow):
         worker.progress.connect(self._update_run_progress)
         worker.paused.connect(self._search_pause_changed)
         worker.patient_finished.connect(self._database_patient_finished)
+        worker.report_outcome.connect(self._patient_report_outcome)
         worker.finished.connect(self._database_finished)
         worker.cancelled.connect(self._search_cancelled)
         worker.failed.connect(self._worker_failed)
@@ -1525,6 +1597,8 @@ class MainWindow(QMainWindow):
             self.settings,
             completed_sources,
             self._patient_indexes(),
+            self.result,
+            self.evidence,
         )
         thread = QThread(self)
         worker.moveToThread(thread)
@@ -1533,6 +1607,7 @@ class MainWindow(QMainWindow):
         worker.progress.connect(self._update_run_progress)
         worker.paused.connect(self._search_pause_changed)
         worker.patient_finished.connect(self._browser_patient_finished)
+        worker.report_outcome.connect(self._patient_report_outcome)
         worker.finished.connect(self._browser_review_finished)
         worker.cancelled.connect(self._search_cancelled)
         worker.failed.connect(self._browser_review_failed)
@@ -1658,31 +1733,32 @@ class MainWindow(QMainWindow):
             self._load_processed_workbook(Path(path))
 
     def _load_processed_workbook(self, workbook_path: Path) -> None:
-        self._set_busy("Loading workbook")
-        QApplication.processEvents()
-        try:
-            history_path = Path(self.settings.history_workbook)
-            history = (
-                VariantHistoryRepository(history_path)
-                if history_path.exists()
-                else None
-            )
-            state = ProcessedWorkbookLoader(
-                filter_engine=FilterEngine(
-                    production_rules(self.settings.artifact_rules)
-                ),
-                history=history,
-            ).load(workbook_path)
-        except Exception as exc:
-            self._set_ready()
-            self._log(f"Could not resume processed workbook: {exc}")
-            QMessageBox.critical(
-                self,
-                "Processed workbook could not be loaded",
-                f"{exc}\n\nChoose a workbook created by the current VPM Tolkning review workflow.",
-            )
+        if self.workbook_load_thread and self.workbook_load_thread.isRunning():
             return
+        self._set_busy("Loading workbook")
+        self.run_progress.show()
+        self.run_progress.title.setText("Loading processed workbook")
+        worker = ProcessedWorkbookWorker(workbook_path, self.settings)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._processed_workbook_progress)
+        worker.finished.connect(self._processed_workbook_loaded)
+        worker.failed.connect(self._processed_workbook_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self.workbook_load_worker = worker
+        self.workbook_load_thread = thread
+        thread.start()
 
+    def _processed_workbook_progress(
+        self, current: int, total: int, detail: str
+    ) -> None:
+        self.run_progress.update_progress(current, total, detail)
+
+    def _processed_workbook_loaded(self, workbook_path: Path, state) -> None:
         self.result = state.result
         self.evidence = state.evidence
         self.database_skip_keys = state.database_skip_keys
@@ -1724,6 +1800,15 @@ class MainWindow(QMainWindow):
             "The analysis is ready in Variants and Evidence.",
         )
 
+    def _processed_workbook_failed(self, message: str) -> None:
+        self._set_ready()
+        self._log(f"Could not resume processed workbook: {message}")
+        QMessageBox.critical(
+            self,
+            "Processed workbook could not be loaded",
+            f"{message}\n\nChoose a workbook created by the current VPM Tolkning review workflow.",
+        )
+
     def _browser_review_finished(self, browser_evidence: dict) -> None:
         self._merge_browser_evidence(browser_evidence)
         self._refresh_evidence_table()
@@ -1738,6 +1823,15 @@ class MainWindow(QMainWindow):
         self._refresh_evidence_table()
         self._update_evidence_summary()
         self._auto_rewrite_workbook()
+
+    def _patient_report_outcome(self, outcome: PatientReportOutcome) -> None:
+        if outcome.status == "written":
+            self._log(f"Patient workbook ready: {outcome.path}")
+        else:
+            self._log(
+                f"Patient workbook pending for {outcome.patient_id}; "
+                "close it in Excel and resume to retry."
+            )
 
     def _merge_browser_evidence(self, browser_evidence: dict) -> None:
         _merge_evidence_results(self.evidence, browser_evidence)

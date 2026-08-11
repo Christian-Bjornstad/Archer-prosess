@@ -1,5 +1,6 @@
 from pathlib import Path
 import re
+import time
 
 from PIL import Image
 
@@ -207,6 +208,14 @@ def test_processed_workbook_can_resume_into_review_pages(qt_app, tmp_path, monke
     window = MainWindow()
 
     window._load_processed_workbook(output)
+
+    deadline = time.monotonic() + 5
+    while window.result is None and time.monotonic() < deadline:
+        qt_app.processEvents()
+        time.sleep(0.01)
+    for _ in range(10):
+        qt_app.processEvents()
+        time.sleep(0.01)
 
     assert window.result is not None
     assert window.result.total_count == result.total_count

@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 import openpyxl
@@ -38,7 +39,11 @@ class ProcessedWorkbookLoader:
         self.filter_engine = filter_engine or FilterEngine()
         self.history = history
 
-    def load(self, workbook_path: Path) -> ProcessedWorkbookState:
+    def load(
+        self,
+        workbook_path: Path,
+        progress: Callable[[int, int, str], None] | None = None,
+    ) -> ProcessedWorkbookState:
         workbook_path = workbook_path.resolve()
         if not workbook_path.exists():
             raise ValueError(f"Workbook not found: {workbook_path}")
@@ -82,6 +87,7 @@ class ProcessedWorkbookLoader:
                 if header != SKIP_HEADER and not header.endswith(" Evidence")
             ]
             variants: list[VariantRecord] = []
+            total_rows = max(1, worksheet.max_row - 1)
             skip_keys: set[str] = set()
             cell_evidence: dict[str, dict[str, str]] = {}
             for source_row, row in enumerate(
@@ -103,6 +109,10 @@ class ProcessedWorkbookLoader:
                         f"Row {source_row} is missing Sample and cannot be restored."
                     )
                 variants.append(variant)
+                if progress and (len(variants) == 1 or len(variants) % 25 == 0):
+                    progress(
+                        len(variants), total_rows, f"Reading variant {len(variants)}"
+                    )
                 key = self._variant_key(variant)
                 if self._text(row[headers[SKIP_HEADER]]).casefold() == "x":
                     skip_keys.add(key)
@@ -120,7 +130,7 @@ class ProcessedWorkbookLoader:
             self.history.annotate(variants)
 
         evidence = self._restore_evidence(
-            workbook_path, variants, cell_evidence
+            workbook_path, variants, cell_evidence, progress=progress
         )
         timestamp = datetime.fromtimestamp(workbook_path.stat().st_mtime)
         result = ProcessingResult(
@@ -139,6 +149,8 @@ class ProcessedWorkbookLoader:
         workbook_path: Path,
         variants: list[VariantRecord],
         cell_evidence: dict[str, dict[str, str]],
+        *,
+        progress: Callable[[int, int, str], None] | None = None,
     ) -> dict[str, list[DatabaseEvidence]]:
         artifact_root = workbook_path.parent / f"{workbook_path.stem}_browser_evidence"
         audit_index = EvidenceAuditIndex.build(artifact_root)
@@ -148,7 +160,7 @@ class ProcessedWorkbookLoader:
             for index, patient_id in enumerate(patient_order, start=1)
         }
         restored: dict[str, list[DatabaseEvidence]] = {}
-        for variant in variants:
+        for index, variant in enumerate(variants, start=1):
             key = self._variant_key(variant)
             databases = cell_evidence.get(key, {})
             items: list[DatabaseEvidence] = []
@@ -166,6 +178,8 @@ class ProcessedWorkbookLoader:
                     items.extend(self._parse_evidence_cell(database, cell_value))
             if items:
                 restored[key] = items
+            if progress:
+                progress(index, len(variants), f"Restoring evidence {index}/{len(variants)}")
         return restored
 
     def _load_audit(
