@@ -1379,13 +1379,21 @@ class BrowserReviewService:
                     key = self.variant_key(variant)
                     evidence = parsed[key]
                     evidence.accession = query
-                    screenshot_path = (
-                        self._capture_mtbp_variant_screenshot(
-                            page, variant, artifact_directory
-                        )
-                        if evidence.status == "found"
-                        else None
-                    )
+                    screenshot_path = None
+                    if evidence.status == "found":
+                        try:
+                            screenshot_path = self._capture_mtbp_variant_screenshot(
+                                page, variant, artifact_directory
+                            )
+                        except IncompleteCaptureError as exc:
+                            evidence.status = "partial_capture"
+                            evidence.summary = (
+                                f"{evidence.summary} MTBP screenshot requires retry."
+                            ).strip()
+                            evidence.raw["capture_validation"] = {
+                                "valid": False,
+                                "reason": exc.validation.reason,
+                            }
                     screenshot_records = (
                         [
                             {
@@ -2472,6 +2480,42 @@ class BrowserReviewService:
         variant: VariantRecord,
         artifact_directory: Path,
     ) -> Path:
+        screenshot_path = self._screenshot_path(
+            artifact_directory, "MTBP", variant
+        )
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                row, target = self._locate_mtbp_screenshot_target(page, variant)
+                target.scroll_into_view_if_needed()
+                page.wait_for_timeout(250)
+                try:
+                    target.screenshot(path=str(screenshot_path))
+                except Exception:
+                    box = row.bounding_box()
+                    if box is None:
+                        raise RuntimeError(
+                            "MTBP matched the evidence row, but it was hidden for capture."
+                        )
+                    page.screenshot(path=str(screenshot_path), clip=box)
+                validation = self.capture_validator(screenshot_path)
+                if not validation.valid:
+                    raise IncompleteCaptureError(validation)
+                return screenshot_path
+            except Exception as exc:
+                last_error = exc
+                if attempt == 0:
+                    self._interruptible_page_wait(page, 2_000)
+                    continue
+        raise IncompleteCaptureError(
+            CaptureValidation(
+                False, f"mtbp_target:{last_error}", 0, 0, 0.0
+            )
+        )
+
+    def _locate_mtbp_screenshot_target(
+        self, page: Any, variant: VariantRecord
+    ) -> tuple[Any, Any]:
         rows = page.locator("table tr")
         row_texts = rows.all_inner_texts()
         alteration_texts: list[str] = []
@@ -2517,21 +2561,7 @@ class BrowserReviewService:
                 toggle.first.click()
         row.wait_for(state="visible", timeout=self.navigation_timeout_ms)
         target = accordion if accordion.count() == 1 and accordion.is_visible() else row
-        target.scroll_into_view_if_needed()
-        page.wait_for_timeout(250)
-        screenshot_path = self._screenshot_path(
-            artifact_directory, "MTBP", variant
-        )
-        try:
-            target.screenshot(path=str(screenshot_path))
-        except Exception:
-            box = row.bounding_box()
-            if box is None:
-                raise RuntimeError(
-                    "MTBP matched the evidence row, but it was not visible for capture."
-                )
-            page.screenshot(path=str(screenshot_path), clip=box)
-        return screenshot_path
+        return row, target
 
     @staticmethod
     def _screenshot_label(database: str) -> str:

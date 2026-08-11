@@ -1173,6 +1173,75 @@ def test_mtbp_screenshot_row_matching_requires_exact_variant_identity():
     )
 
 
+def test_mtbp_screenshot_rediscovers_target_after_hidden_incident(tmp_path):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+    attempts = 0
+
+    class Cells:
+        def count(self):
+            return 0
+
+    class Accordion:
+        first = None
+
+        def __init__(self):
+            self.first = self
+
+        def count(self):
+            return 1
+
+        def is_visible(self):
+            return True
+
+        def scroll_into_view_if_needed(self):
+            pass
+
+        def screenshot(self, *, path):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("hidden")
+            image = Image.new("RGB", (800, 500), "white")
+            image.paste("navy", (20, 20, 780, 300))
+            image.save(path)
+
+    class Row:
+        def locator(self, selector):
+            return Cells() if selector == "td" else Accordion()
+
+        def is_visible(self):
+            return True
+
+        def wait_for(self, **kwargs):
+            pass
+
+        def bounding_box(self):
+            return None
+
+    class Rows:
+        def all_inner_texts(self):
+            return ["TP53 Mutation missense p.Arg175His exon 5/11"]
+
+        def nth(self, index):
+            return Row()
+
+    class Page:
+        waits = []
+
+        def locator(self, selector):
+            assert selector == "table tr"
+            return Rows()
+
+        def wait_for_timeout(self, milliseconds):
+            self.waits.append(milliseconds)
+
+    path = service._capture_mtbp_variant_screenshot(Page(), variant, tmp_path)
+
+    assert attempts == 2
+    assert path.exists()
+
+
 def test_mtbp_report_parser_fails_closed_on_variant_identity_mismatch():
     variant = ArcherTsvReader().read(FIXTURE)[3]
     rows = [{
