@@ -222,7 +222,7 @@ def test_excel_export_keeps_row_coloring_on_raw_sheets(tmp_path):
     output = tmp_path / "review.xlsx"
     result = VariantProcessor().process(FIXTURE, "2026-07-26", output)
     by_patient = {variant.patient_id: variant for variant in result.variants}
-    by_patient["26OUM00004"].history_matches = [{"Tier I": 2, "Tier II": 3}]
+    by_patient["26OUM00004"].history_matches = [{"Tier I": 3, "Tier II": 3}]
     by_patient["26OUM00005"].history_matches = [{"Germ": 10}]
 
     ExcelReportWriter().write(result, output)
@@ -243,7 +243,7 @@ def test_excel_export_keeps_row_coloring_on_raw_sheets(tmp_path):
     assert by_sample["26OUM00001_VPM_S1_R1_001"] == "00FFC000"
     assert by_sample["26OUM00002_VPM_S2_R1_001"] == "00FFC000"
     assert by_sample["26OUM00005_VPM_S5_R1_001"] == "00FFC000"
-    assert removed_by_sample["26OUM00004_VPM_S4_R1_001"] == "00FFFF00"
+    assert removed_by_sample["26OUM00004_VPM_S4_R1_001"] == "00C6EFCE"
     assert "26OUM00005_VPM_S5_R1_001" not in removed_by_sample
 
 
