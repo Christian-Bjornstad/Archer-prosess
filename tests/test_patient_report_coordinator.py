@@ -55,3 +55,22 @@ def test_locked_patient_report_is_pending_and_reconciles(tmp_path, monkeypatch):
     assert first.status == "pending"
     assert final[0].status == "written"
     assert not coordinator.pending
+
+
+def test_reconcile_writes_every_selected_patient_once(tmp_path):
+    result, variant = _result(tmp_path)
+    second = VariantRecord(
+        source_file=variant.source_file,
+        source_row=3,
+        sample="SYNTHETIC02_VPM_A",
+        symbol="KRAS",
+        hgvsc="NM_004985.5:c.35G>A",
+    )
+    result.variants.append(second)
+    coordinator = PatientReportCoordinator(result, [variant, second], {})
+
+    coordinator.write_patient("SYNTHETIC01")
+    outcomes = coordinator.reconcile()
+
+    assert [item.patient_id for item in outcomes] == ["SYNTHETIC02"]
+    assert (tmp_path / "SYNTHETIC02_VPM_Tolkning.xlsx").exists()

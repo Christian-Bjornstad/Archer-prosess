@@ -30,6 +30,7 @@ class PatientReportCoordinator:
         self.evidence = {key: list(items) for key, items in evidence.items()}
         self.writer = writer or PatientExcelReportWriter()
         self.pending: set[str] = set()
+        self.written: set[str] = set()
 
     def merge(self, incoming: dict[str, list[DatabaseEvidence]]) -> None:
         for key, items in incoming.items():
@@ -51,9 +52,12 @@ class PatientReportCoordinator:
             self.pending.add(patient_id)
             return PatientReportOutcome(patient_id, output, "pending", str(exc))
         self.pending.discard(patient_id)
+        self.written.add(patient_id)
         return PatientReportOutcome(
             patient_id, output, "written", "Patient report written."
         )
 
     def reconcile(self) -> list[PatientReportOutcome]:
-        return [self.write_patient(patient_id) for patient_id in sorted(self.pending)]
+        patients = {variant.patient_id for variant in self.variants}
+        required = (patients - self.written) | self.pending
+        return [self.write_patient(patient_id) for patient_id in sorted(required)]

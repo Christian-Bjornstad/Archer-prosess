@@ -221,6 +221,7 @@ class DatabaseWorker(QObject):
         patient_indexes: dict[str, int] | None = None,
         result: ProcessingResult | None = None,
         existing_evidence: dict[str, list[DatabaseEvidence]] | None = None,
+        report_variants=None,
     ):
         super().__init__()
         self.variants = variants
@@ -234,6 +235,7 @@ class DatabaseWorker(QObject):
         self.pause_control = SearchPauseControl()
         self.result = result
         self.existing_evidence = existing_evidence or {}
+        self.report_variants = list(report_variants or variants)
 
     def run(self) -> None:
         try:
@@ -247,7 +249,7 @@ class DatabaseWorker(QObject):
             all_evidence: dict[str, list[DatabaseEvidence]] = {}
             coordinator = (
                 PatientReportCoordinator(
-                    self.result, self.result.variants, self.existing_evidence
+                    self.result, self.report_variants, self.existing_evidence
                 )
                 if self.result is not None
                 else None
@@ -452,6 +454,7 @@ class BrowserReviewWorker(QObject):
         patient_indexes: dict[str, int] | None = None,
         result: ProcessingResult | None = None,
         existing_evidence: dict[str, list[DatabaseEvidence]] | None = None,
+        report_variants=None,
     ):
         super().__init__()
         self.variants = variants
@@ -463,6 +466,7 @@ class BrowserReviewWorker(QObject):
         self.pause_control = SearchPauseControl()
         self.result = result
         self.existing_evidence = existing_evidence or {}
+        self.report_variants = list(report_variants or variants)
 
     def run(self) -> None:
         try:
@@ -488,7 +492,7 @@ class BrowserReviewWorker(QObject):
             patients = _variants_grouped_by_patient(self.variants)
             coordinator = (
                 PatientReportCoordinator(
-                    self.result, self.result.variants, self.existing_evidence
+                    self.result, self.report_variants, self.existing_evidence
                 )
                 if self.result is not None
                 else None
@@ -1498,6 +1502,7 @@ class MainWindow(QMainWindow):
             self._patient_indexes(),
             self.result,
             self.evidence,
+            eligible_variants,
         )
         thread = QThread(self)
         worker.moveToThread(thread)
@@ -1599,6 +1604,7 @@ class MainWindow(QMainWindow):
             self._patient_indexes(),
             self.result,
             self.evidence,
+            self._variants_for_search(),
         )
         thread = QThread(self)
         worker.moveToThread(thread)

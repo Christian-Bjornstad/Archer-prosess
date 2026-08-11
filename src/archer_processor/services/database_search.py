@@ -430,23 +430,13 @@ class DatabaseSearchService:
         return "https://www.ncbi.nlm.nih.gov/clinvar/?term=" + urllib.parse.quote(query)
 
     def _clinvar_queries(self, variant: VariantRecord) -> list[str]:
-        cdna = self._cdna_without_transcript(variant.hgvsc)
-        protein = self._protein_change(variant.hgvsp)
-        queries = [
-            f"{variant.hgvsc}[VARNAME]",
-        ]
-        if variant.symbol and protein:
-            queries.append(f"{variant.symbol} {protein}")
-        if variant.symbol and cdna:
-            queries.append(f"{variant.symbol} {cdna}")
-        queries.append(variant.hgvsc)
-        if variant.genomic_location:
-            queries.append(variant.genomic_location)
-        unique = []
-        for query in queries:
-            if query and query not in unique:
-                unique.append(query)
-        return unique
+        queries = [f"{variant.hgvsc}[VARNAME]"] if variant.hgvsc else []
+        identity = genomic_identity(variant)
+        if identity is not None:
+            queries.append(
+                f"{identity.chromosome}[chr] AND {identity.position}[chrpos37]"
+            )
+        return list(dict.fromkeys(queries))
 
     def _search_cosmic(self, variant: VariantRecord) -> DatabaseEvidence:
         queries = self._cosmic_queries(variant)

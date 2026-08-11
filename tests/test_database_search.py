@@ -150,6 +150,15 @@ def test_clinvar_accepts_only_exact_grch37_candidate(monkeypatch):
     assert evidence.raw["matched_location"]["position"] == 7578406
 
 
+def test_clinvar_automatic_queries_are_exact_and_grch37_scoped():
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+
+    assert DatabaseSearchService()._clinvar_queries(variant) == [
+        "NM_000546.6:c.524G>A[VARNAME]",
+        "17[chr] AND 7578406[chrpos37]",
+    ]
+
+
 def test_clinvar_fails_closed_when_candidates_do_not_match_grch37(monkeypatch):
     variant = ArcherTsvReader().read(FIXTURE)[3]
     service = DatabaseSearchService(timeout=1)
