@@ -74,3 +74,22 @@ def test_reconcile_writes_every_selected_patient_once(tmp_path):
 
     assert [item.patient_id for item in outcomes] == ["SYNTHETIC02"]
     assert (tmp_path / "SYNTHETIC02_VPM_Tolkning.xlsx").exists()
+
+
+def test_retry_pending_rewrites_only_locked_reports(tmp_path, monkeypatch):
+    result, variant = _result(tmp_path)
+    coordinator = PatientReportCoordinator(result, [variant], {})
+    coordinator.pending = {"SYNTHETIC01"}
+    calls = []
+    original = coordinator.write_patient
+
+    def record(patient_id):
+        calls.append(patient_id)
+        return original(patient_id)
+
+    monkeypatch.setattr(coordinator, "write_patient", record)
+
+    outcomes = coordinator.retry_pending()
+
+    assert calls == ["SYNTHETIC01"]
+    assert outcomes[0].status == "written"

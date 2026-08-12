@@ -61,3 +61,6 @@ class PatientReportCoordinator:
         patients = {variant.patient_id for variant in self.variants}
         required = (patients - self.written) | self.pending
         return [self.write_patient(patient_id) for patient_id in sorted(required)]
+
+    def retry_pending(self) -> list[PatientReportOutcome]:
+        return [self.write_patient(patient_id) for patient_id in sorted(self.pending)]

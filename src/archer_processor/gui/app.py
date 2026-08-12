@@ -134,6 +134,21 @@ class ProcessedWorkbookWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class ReportRetryWorker(QObject):
+    finished = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, coordinator: PatientReportCoordinator) -> None:
+        super().__init__()
+        self.coordinator = coordinator
+
+    def run(self) -> None:
+        try:
+            self.finished.emit(self.coordinator.retry_pending())
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 def _variants_grouped_by_patient(variants) -> list[tuple[str, list]]:
     grouped: dict[str, list] = {}
     for variant in variants:
@@ -653,6 +668,7 @@ class MainWindow(QMainWindow):
         self.report_outcomes: dict[str, PatientReportOutcome] = {}
         self.processing_thread: QThread | None = None
         self.workbook_load_thread: QThread | None = None
+        self.report_retry_thread: QThread | None = None
         self.database_thread: QThread | None = None
         self.browser_thread: QThread | None = None
         self.processing_worker: ProcessingWorker | None = None
@@ -1135,9 +1151,14 @@ class MainWindow(QMainWindow):
             "Creates one image-led Excel evidence report per DIT/patient."
         )
         self.patient_excel_btn.clicked.connect(self._export_patient_excels)
+        self.retry_report_saves_button = QPushButton("Retry Pending Saves")
+        self.retry_report_saves_button.setObjectName("OutlineButton")
+        self.retry_report_saves_button.clicked.connect(self._retry_pending_report_saves)
+        self.retry_report_saves_button.hide()
         export_layout.addWidget(export_help, 1)
         export_layout.addWidget(self.rewrite_btn)
         export_layout.addWidget(self.patient_excel_btn)
+        export_layout.addWidget(self.retry_report_saves_button)
         layout.addWidget(exports)
 
         evidence_group = QGroupBox("Evidence matrix")
@@ -2220,6 +2241,40 @@ class MainWindow(QMainWindow):
                 report_outcomes=report_statuses,
             )
         )
+        self.retry_report_saves_button.setVisible(
+            any(outcome.status == "pending" for outcome in self.report_outcomes.values())
+        )
+
+    def _retry_pending_report_saves(self) -> None:
+        if self.result is None or self.result.output_path is None:
+            return
+        pending = {
+            patient_id
+            for patient_id, outcome in self.report_outcomes.items()
+            if outcome.status == "pending"
+        }
+        if not pending:
+            return
+        coordinator = PatientReportCoordinator(
+            self.result, self._variants_for_search(), self.evidence
+        )
+        coordinator.pending = pending
+        worker = ReportRetryWorker(coordinator)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._report_retry_finished)
+        worker.failed.connect(self._worker_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self.report_retry_thread = thread
+        thread.start()
+
+    def _report_retry_finished(self, outcomes: list[PatientReportOutcome]) -> None:
+        for outcome in outcomes:
+            self._patient_report_outcome(outcome)
 
     def _activity_received(self, activity: RunActivity) -> None:
         self.current_activity.set_activity(activity)

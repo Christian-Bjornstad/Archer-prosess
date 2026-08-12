@@ -21,7 +21,7 @@ from archer_processor.gui.status_model import (
 )
 from archer_processor.gui.widgets.status_matrix import StatusMatrix
 from archer_processor.gui.widgets.run_status import RunStatusStrip
-from archer_processor.reports import ExcelReportWriter
+from archer_processor.reports import ExcelReportWriter, PatientReportOutcome
 from archer_processor.services import DatabaseSearchService
 from archer_processor.services import AppSettings
 
@@ -171,6 +171,22 @@ def test_activity_updates_current_provider_and_timeline(qt_app):
     assert window.current_activity.provider_value.text() == "Franklin"
     assert window.current_activity.patient_value.text() == "SYNTHETIC02"
     assert window.activity_timeline.rowCount() == 1
+
+
+def test_pending_report_exposes_retry_action(qt_app, tmp_path):
+    window = MainWindow()
+    window.report_outcomes = {
+        "SYNTHETIC02": PatientReportOutcome(
+            "SYNTHETIC02",
+            tmp_path / "SYNTHETIC02_VPM_Tolkning.xlsx",
+            "pending",
+            "locked",
+        )
+    }
+
+    window._refresh_operations_cockpit()
+
+    assert not window.retry_report_saves_button.isHidden()
 
 
 def test_review_filters_and_search_progress_are_visible(qt_app, tmp_path):
