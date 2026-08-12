@@ -61,10 +61,15 @@ from archer_processor.services import (
     inspect_recent_analysis,
     load_database_skip_keys,
 )
-from archer_processor.gui.status_model import RunPhase, RunSnapshot
+from archer_processor.gui.status_model import (
+    RunPhase,
+    RunSnapshot,
+    build_patient_status_rows,
+)
 from archer_processor.gui.theme import Palette, application_stylesheet
 from archer_processor.gui.widgets.navigation import NavigationRail
 from archer_processor.gui.widgets.run_status import RunStatusStrip
+from archer_processor.gui.widgets.status_matrix import StatusMatrix
 
 
 class ProcessingWorker(QObject):
@@ -629,6 +634,7 @@ class MainWindow(QMainWindow):
         self.result: ProcessingResult | None = None
         self.evidence = {}
         self.database_skip_keys: set[str] = set()
+        self.report_outcomes: dict[str, PatientReportOutcome] = {}
         self.processing_thread: QThread | None = None
         self.workbook_load_thread: QThread | None = None
         self.database_thread: QThread | None = None
@@ -1003,6 +1009,13 @@ class MainWindow(QMainWindow):
             grid.addWidget(check, row, column)
             grid.setColumnStretch(column, 1)
         layout.addWidget(checks)
+
+        status_group = QGroupBox("Patient progress")
+        status_layout = QVBoxLayout(status_group)
+        self.status_matrix = StatusMatrix(self.databases)
+        self.status_matrix.setMinimumHeight(210)
+        status_layout.addWidget(self.status_matrix)
+        layout.addWidget(status_group)
 
         options = QGroupBox("Search scope and browser session")
         options_grid = QGridLayout(options)
@@ -1819,6 +1832,8 @@ class MainWindow(QMainWindow):
         self._auto_rewrite_workbook()
 
     def _patient_report_outcome(self, outcome: PatientReportOutcome) -> None:
+        self.report_outcomes[outcome.patient_id] = outcome
+        self._refresh_operations_cockpit()
         if outcome.status == "written":
             self._log(f"Patient workbook ready: {outcome.path}")
         else:
@@ -2157,6 +2172,25 @@ class MainWindow(QMainWindow):
         )
         self._apply_review_filters()
         self._update_evidence_summary()
+        self._refresh_operations_cockpit()
+
+    def _refresh_operations_cockpit(self) -> None:
+        if not hasattr(self, "status_matrix"):
+            return
+        variants = self.result.variants if self.result else []
+        report_statuses = {
+            patient_id: outcome.status
+            for patient_id, outcome in self.report_outcomes.items()
+        }
+        self.status_matrix.set_rows(
+            build_patient_status_rows(
+                variants,
+                databases=self.databases,
+                evidence=self.evidence,
+                skipped_keys=self.database_skip_keys,
+                report_outcomes=report_statuses,
+            )
+        )
 
     def _refresh_variant_table(self) -> None:
         if not self.result:
@@ -2287,6 +2321,7 @@ class MainWindow(QMainWindow):
                 "No evidence collected yet. Process data before starting a search."
             )
             return
+        self._refresh_operations_cockpit()
         evidence_by_key = self.evidence or {}
         variants = [
             variant

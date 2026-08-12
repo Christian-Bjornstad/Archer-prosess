@@ -10,7 +10,14 @@ from archer_processor.gui.app import (
     MainWindow,
     _completed_evidence_sources,
 )
-from archer_processor.gui.status_model import RunPhase, RunSnapshot
+from archer_processor.gui.status_model import (
+    CellState,
+    PatientStatusRow,
+    RunPhase,
+    RunSnapshot,
+    StatusCell,
+)
+from archer_processor.gui.widgets.status_matrix import StatusMatrix
 from archer_processor.gui.widgets.run_status import RunStatusStrip
 from archer_processor.reports import ExcelReportWriter
 from archer_processor.services import DatabaseSearchService
@@ -122,6 +129,27 @@ def test_run_status_strip_exposes_interrupted_recovery_action(qt_app):
     assert strip.phase_label.text() == "Interrupted · resume available"
     assert "7 / 28" in strip.progress_label.text()
     assert not strip.resume_button.isHidden()
+
+
+def test_status_matrix_renders_visible_text_for_every_state(qt_app):
+    matrix = StatusMatrix(["ClinVar", "Franklin"])
+    matrix.set_rows(
+        [
+            PatientStatusRow(
+                "SYNTHETIC01",
+                2,
+                {
+                    "ClinVar": StatusCell(CellState.COMPLETE, "Complete"),
+                    "Franklin": StatusCell(CellState.RETRY, "Retry"),
+                    "Report": StatusCell(CellState.SAVE_PENDING, "Save pending"),
+                },
+            )
+        ]
+    )
+
+    assert matrix.item(0, 2).text() == "Complete"
+    assert matrix.item(0, 3).text() == "Retry"
+    assert matrix.item(0, 4).text() == "Save pending"
 
 
 def test_review_filters_and_search_progress_are_visible(qt_app, tmp_path):
