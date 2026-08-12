@@ -10,6 +10,8 @@ from archer_processor.gui.app import (
     MainWindow,
     _completed_evidence_sources,
 )
+from archer_processor.gui.status_model import RunPhase, RunSnapshot
+from archer_processor.gui.widgets.run_status import RunStatusStrip
 from archer_processor.reports import ExcelReportWriter
 from archer_processor.services import DatabaseSearchService
 
@@ -94,6 +96,31 @@ def test_sidebar_navigation_switches_workspace_pages(qt_app):
     assert window.nav_buttons[2].isChecked()
     assert window.page_title.text() == "Evidence search"
     assert window.page_eyebrow.text().endswith("EVIDENCE")
+
+
+def test_navigation_uses_short_labels_without_numbered_workflow_copy(qt_app):
+    window = MainWindow()
+
+    labels = [button.text() for button in window.navigation.buttons]
+
+    assert labels == ["Import", "Variants", "Evidence", "Settings"]
+    assert all(not re.match(r"\d", label) for label in labels)
+
+
+def test_run_status_strip_exposes_interrupted_recovery_action(qt_app):
+    strip = RunStatusStrip()
+    strip.set_snapshot(
+        RunSnapshot(
+            phase=RunPhase.INTERRUPTED,
+            current_patient=7,
+            patient_total=28,
+            patient_id="SYNTHETIC07",
+        )
+    )
+
+    assert strip.phase_label.text() == "Interrupted · resume available"
+    assert "7 / 28" in strip.progress_label.text()
+    assert not strip.resume_button.isHidden()
 
 
 def test_review_filters_and_search_progress_are_visible(qt_app, tmp_path):

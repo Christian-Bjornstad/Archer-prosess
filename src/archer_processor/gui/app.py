@@ -60,26 +60,10 @@ from archer_processor.services import (
     is_completed_evidence,
     load_database_skip_keys,
 )
-
-
-class Palette:
-    ink = "#163445"
-    muted = "#607886"
-    panel = "#FFFFFF"
-    app_bg = "#F3F7F9"
-    border = "#D3E0E6"
-    navy = "#0B2F43"
-    blue = "#087EA4"
-    cyan = "#0E98A8"
-    green = "#18794E"
-    red = "#B42318"
-    yellow = "#A15C00"
-    pale_blue = "#E7F4F7"
-    pale_green = "#E9F6EF"
-    strong_green = "#CDEDD8"
-    pale_orange = "#FCE4D6"
-    pale_red = "#F8E8E8"
-    pale_yellow = "#FFF5D6"
+from archer_processor.gui.status_model import RunPhase, RunSnapshot
+from archer_processor.gui.theme import Palette, application_stylesheet
+from archer_processor.gui.widgets.navigation import NavigationRail
+from archer_processor.gui.widgets.run_status import RunStatusStrip
 
 
 class ProcessingWorker(QObject):
@@ -676,60 +660,11 @@ class MainWindow(QMainWindow):
         shell.setContentsMargins(0, 0, 0, 0)
         shell.setSpacing(0)
 
-        sidebar = QFrame()
-        sidebar.setObjectName("Sidebar")
-        sidebar.setFixedWidth(226)
-        sidebar_layout = QVBoxLayout(sidebar)
-        sidebar_layout.setContentsMargins(18, 22, 18, 18)
-        sidebar_layout.setSpacing(8)
-
-        brand_mark = QLabel()
-        brand_mark.setObjectName("BrandMark")
-        brand_mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        brand_mark.setFixedSize(48, 48)
-        if self.app_icon_path.exists():
-            brand_mark.setPixmap(
-                QPixmap(str(self.app_icon_path)).scaled(
-                    48,
-                    48,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
-        brand_mark.setAccessibleName("VPM Tolkning application icon")
-        brand = QLabel("VPM Tolkning")
-        brand.setObjectName("BrandTitle")
-        sidebar_layout.addWidget(brand_mark)
-        sidebar_layout.addWidget(brand)
-        sidebar_layout.addSpacing(22)
-
-        nav_label = QLabel("ANALYSIS")
-        nav_label.setObjectName("SidebarEyebrow")
-        sidebar_layout.addWidget(nav_label)
-        self.nav_group = QButtonGroup(self)
-        self.nav_group.setExclusive(True)
-        self.nav_buttons: list[QPushButton] = []
-        nav_items = [
-            ("01", "Import", "Load the variant dataset"),
-            ("02", "Variants", "Review and prioritise"),
-            ("03", "Evidence", "Research and report"),
-            ("04", "Settings", "Sources and safety"),
-        ]
-        for index, (number, title, description) in enumerate(nav_items):
-            button = QPushButton(f"{number}   {title}\n       {description}")
-            button.setObjectName("SidebarButton")
-            button.setCheckable(True)
-            button.setMinimumHeight(58)
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.clicked.connect(
-                lambda checked=False, page_index=index: self._switch_page(page_index)
-            )
-            self.nav_group.addButton(button, index)
-            self.nav_buttons.append(button)
-            sidebar_layout.addWidget(button)
-        self.nav_buttons[0].setChecked(True)
-        sidebar_layout.addStretch()
-        shell.addWidget(sidebar)
+        self.navigation = NavigationRail(self.app_icon_path)
+        self.navigation.page_requested.connect(self._switch_page)
+        self.nav_group = self.navigation.group
+        self.nav_buttons = self.navigation.buttons
+        shell.addWidget(self.navigation)
 
         content = QWidget()
         content.setObjectName("ContentShell")
@@ -759,12 +694,13 @@ class MainWindow(QMainWindow):
         self.activity_progress.setFixedWidth(150)
         self.activity_progress.hide()
         header.addWidget(self.activity_progress)
-        self.status_badge = QLabel("Ready")
-        self.status_badge.setObjectName("StatusBadge")
-        self.status_badge.setFixedHeight(34)
-        self.status_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        header.addWidget(self.status_badge)
         layout.addLayout(header)
+
+        self.run_status_strip = RunStatusStrip()
+        self.run_status_strip.pause_requested.connect(self._toggle_search_pause)
+        self.run_status_strip.stop_requested.connect(self._stop_evidence_search)
+        self.status_badge = self.run_status_strip.phase_label
+        layout.addWidget(self.run_status_strip)
 
         metrics = QHBoxLayout()
         self.total_card = MetricCard("Total variants", "0", Palette.navy)
@@ -772,6 +708,7 @@ class MainWindow(QMainWindow):
         self.excluded_card = MetricCard("Excluded", "0", Palette.red)
         for card in [self.total_card, self.included_card, self.excluded_card]:
             metrics.addWidget(card)
+            card.hide()
         layout.addLayout(metrics)
 
         self.run_progress = RunProgressCard()
@@ -806,7 +743,7 @@ class MainWindow(QMainWindow):
         if not 0 <= index < len(pages):
             return
         self.tabs.setCurrentIndex(index)
-        self.nav_buttons[index].setChecked(True)
+        self.navigation.set_current(index)
         eyebrow, title, subtitle = pages[index]
         self.page_eyebrow.setText(f"VPM INTERPRETATION  /  {eyebrow}")
         self.page_title.setText(title)
@@ -2409,7 +2346,8 @@ class MainWindow(QMainWindow):
 
     def _apply_style(self) -> None:
         self.setStyleSheet(
-            f"""
+            application_stylesheet()
+            + f"""
             QMainWindow, QWidget {{
                 background: {Palette.app_bg};
                 color: {Palette.ink};
