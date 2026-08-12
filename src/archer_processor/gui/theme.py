@@ -49,6 +49,12 @@ def application_stylesheet() -> str:
             border: 1px solid {Palette.border};
             border-radius: 8px;
         }}
+        QFrame#RecentAnalysisPanel {{
+            background: {Palette.pale_blue};
+            border: 1px solid #99CDDA;
+            border-left: 4px solid {Palette.blue};
+            border-radius: 8px;
+        }}
         QLabel#RunPhaseLabel {{
             border-radius: 11px;
             padding: 4px 10px;

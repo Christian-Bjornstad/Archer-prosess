@@ -14,6 +14,7 @@ from archer_processor.gui.status_model import RunPhase, RunSnapshot
 from archer_processor.gui.widgets.run_status import RunStatusStrip
 from archer_processor.reports import ExcelReportWriter
 from archer_processor.services import DatabaseSearchService
+from archer_processor.services import AppSettings
 
 
 def test_database_tab_contains_current_sources(qt_app):
@@ -233,6 +234,8 @@ def test_processed_workbook_can_resume_into_review_pages(qt_app, tmp_path, monke
         lambda *args: messages.append(args),
     )
     window = MainWindow()
+    saved = []
+    monkeypatch.setattr(AppSettings, "save", lambda self: saved.append(True))
 
     window._load_processed_workbook(output)
 
@@ -251,7 +254,39 @@ def test_processed_workbook_can_resume_into_review_pages(qt_app, tmp_path, monke
     assert window.resume_edit.text() == str(output)
     assert "Restored 5 variants" in window.resume_status.text()
     assert not window.included_only_check.isChecked()
+    assert window.settings.last_processed_workbook == str(output)
+    assert saved == [True]
     assert messages[0][1] == "Analysis restored"
+
+
+def test_startup_offers_recent_analysis_without_loading_or_searching(
+    qt_app, tmp_path, monkeypatch
+):
+    workbook = tmp_path / "review.xlsx"
+    workbook.write_bytes(b"synthetic")
+    monkeypatch.setattr(
+        "archer_processor.gui.app.AppSettings.load",
+        lambda: AppSettings(last_processed_workbook=str(workbook)),
+    )
+    loads = []
+    searches = []
+    monkeypatch.setattr(
+        MainWindow,
+        "_load_processed_workbook",
+        lambda *args: loads.append(args),
+    )
+    monkeypatch.setattr(
+        DatabaseSearchService,
+        "search_variant",
+        lambda *args, **kwargs: searches.append((args, kwargs)),
+    )
+
+    window = MainWindow()
+
+    assert not window.recent_analysis_panel.isHidden()
+    assert window.recent_analysis_name.text() == "review.xlsx"
+    assert loads == []
+    assert searches == []
 
 
 def test_new_search_results_merge_with_restored_evidence(qt_app, tmp_path, monkeypatch):

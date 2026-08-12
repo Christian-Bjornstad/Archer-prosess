@@ -58,6 +58,7 @@ from archer_processor.services import (
     DatabaseSearchService,
     ProcessedWorkbookLoader,
     is_completed_evidence,
+    inspect_recent_analysis,
     load_database_skip_keys,
 )
 from archer_processor.gui.status_model import RunPhase, RunSnapshot
@@ -796,6 +797,46 @@ class MainWindow(QMainWindow):
         actions.addWidget(self.process_btn)
         layout.addLayout(actions)
 
+        self.recent_analysis_panel = QFrame()
+        self.recent_analysis_panel.setObjectName("RecentAnalysisPanel")
+        recent_layout = QHBoxLayout(self.recent_analysis_panel)
+        recent_layout.setContentsMargins(14, 12, 14, 12)
+        recent_copy = QVBoxLayout()
+        recent_title = QLabel("Continue recent analysis")
+        recent_title.setObjectName("SectionTitle")
+        self.recent_analysis_name = QLabel()
+        self.recent_analysis_name.setObjectName("FieldLabel")
+        self.recent_analysis_detail = QLabel()
+        self.recent_analysis_detail.setObjectName("HelperText")
+        recent_copy.addWidget(recent_title)
+        recent_copy.addWidget(self.recent_analysis_name)
+        recent_copy.addWidget(self.recent_analysis_detail)
+        recent_layout.addLayout(recent_copy, 1)
+        self.restore_recent_button = QPushButton("Restore analysis")
+        self.restore_recent_button.setObjectName("PrimaryButton")
+        self.restore_recent_button.setMinimumHeight(44)
+        self.dismiss_recent_button = QPushButton("Dismiss")
+        self.dismiss_recent_button.setMinimumHeight(44)
+        self.dismiss_recent_button.clicked.connect(self.recent_analysis_panel.hide)
+        recent_layout.addWidget(self.dismiss_recent_button)
+        recent_layout.addWidget(self.restore_recent_button)
+        self.recent_analysis_panel.hide()
+        if self.settings.offer_recent_analysis and self.settings.last_processed_workbook:
+            recent = inspect_recent_analysis(self.settings.last_processed_workbook)
+            if recent.valid:
+                self.recent_analysis_name.setText(recent.path.name)
+                modified = (
+                    recent.modified_at.strftime("%Y-%m-%d %H:%M")
+                    if recent.modified_at
+                    else "Unknown time"
+                )
+                self.recent_analysis_detail.setText(f"{modified} · {recent.message}")
+                self.restore_recent_button.clicked.connect(
+                    lambda checked=False, path=recent.path: self._load_processed_workbook(path)
+                )
+                self.recent_analysis_panel.show()
+        layout.addWidget(self.recent_analysis_panel)
+
         resume = QGroupBox("Continue previous analysis")
         resume_layout = QVBoxLayout(resume)
         resume_layout.setSpacing(8)
@@ -1396,6 +1437,8 @@ class MainWindow(QMainWindow):
         self.rewrite_btn.setEnabled(True)
         self.patient_excel_btn.setEnabled(True)
         self.load_selection_btn.setEnabled(True)
+        if result.output_path is not None:
+            self._remember_recent_workbook(result.output_path)
         self._set_ready()
         QMessageBox.information(self, "Complete", f"Workbook saved:\n{result.output_path}")
 
@@ -1727,6 +1770,7 @@ class MainWindow(QMainWindow):
         self._refresh_variant_table()
         self._refresh_evidence_table()
         self.load_selection_btn.setEnabled(True)
+        self._remember_recent_workbook(workbook_path)
         self._set_ready()
         self.status_badge.setText("Workbook loaded")
         self.status_badge.setStyleSheet(
@@ -1742,6 +1786,11 @@ class MainWindow(QMainWindow):
             f"Loaded {self.result.total_count} variants and {evidence_count} evidence result(s).\n\n"
             "The analysis is ready in Variants and Evidence.",
         )
+
+    def _remember_recent_workbook(self, workbook_path: Path) -> None:
+        self.settings.last_processed_workbook = str(workbook_path)
+        self.settings.save()
+        self.recent_analysis_panel.hide()
 
     def _processed_workbook_failed(self, message: str) -> None:
         self._set_ready()

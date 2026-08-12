@@ -32,6 +32,8 @@ class AppSettings:
     search_included_only: bool = True
     gnomad_dataset: str = "gnomad_r2_1"
     mtbp_cancer_type: str = "Blood"
+    last_processed_workbook: str = ""
+    offer_recent_analysis: bool = True
     artifact_catalog_version: int = 2
     artifact_rules: list[dict[str, str]] = field(default_factory=default_artifact_rules)
     enabled_databases: list[str] = field(
