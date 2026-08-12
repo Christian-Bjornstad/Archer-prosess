@@ -47,6 +47,15 @@ Selections are matched back to the same Archer run using Sample plus HGVSc.
 Search and recovery behavior:
 
 - Evidence collection and processed-workbook restoration run in background GUI threads.
+- The operations cockpit keeps the current patient, provider, action,
+  patient/provider matrix, and timestamped activity visible during long runs.
+- Matrix states are Queued, Running, Complete, Not found, Retry, Skipped, Report
+  saved, Save pending, and Not ready.
+- Recent-analysis recovery is local and passive: startup can offer the last
+  workbook, but it never opens Edge or contacts a provider until the operator
+  explicitly starts or resumes evidence collection.
+- **Retry Pending Saves** retries report writing only; it does not restart an
+  evidence provider.
 - Completed source results are restored from one indexed audit-directory scan.
 - Errors, timeouts, identity mismatches, partial captures, and unverified legacy ClinVar results remain resumable.
 - Patient workbooks are written beside the processed workbook as each patient completes; an Excel file lock is nonfatal and is retried at reconciliation.

@@ -1207,7 +1207,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(settings_content)
         layout.setSpacing(12)
 
-        local_group = QGroupBox("Local workspace")
+        local_group = QGroupBox("Local files")
         local_grid = QGridLayout(local_group)
         local_grid.setColumnStretch(1, 1)
         self.history_edit = QLineEdit(self.settings.history_workbook)
@@ -1224,7 +1224,7 @@ class MainWindow(QMainWindow):
         local_grid.addWidget(dir_btn, 1, 2)
         layout.addWidget(local_group)
 
-        access_group = QGroupBox("Provider access")
+        access_group = QGroupBox("Browser access")
         access_grid = QGridLayout(access_group)
         for column in range(1, 4):
             access_grid.setColumnStretch(column, 1)
@@ -1271,7 +1271,7 @@ class MainWindow(QMainWindow):
             access_grid.addWidget(password, row, 3)
         layout.addWidget(access_group)
 
-        safety_group = QGroupBox("Search safeguards")
+        safety_group = QGroupBox("Search pacing")
         safety_grid = QGridLayout(safety_group)
         safety_grid.setColumnStretch(1, 1)
         self.mtbp_cancer_type_edit = QLineEdit(self.settings.mtbp_cancer_type)
@@ -1329,7 +1329,7 @@ class MainWindow(QMainWindow):
         safety_grid.addWidget(self.browser_background_check, 4, 1)
         layout.addWidget(safety_group)
 
-        artifact_group = QGroupBox("Artifact exclusions")
+        artifact_group = QGroupBox("Artifact rules")
         artifact_layout = QVBoxLayout(artifact_group)
         artifact_note = QLabel(
             "Defaults: 36 HGVSc entries from ‘Artefakter DNA Fragmentering v2’. "
@@ -1363,6 +1363,12 @@ class MainWindow(QMainWindow):
         artifact_layout.addWidget(self.artifact_table)
         artifact_layout.addLayout(artifact_actions)
         layout.addWidget(artifact_group)
+        self.settings_groups = [
+            local_group,
+            access_group,
+            safety_group,
+            artifact_group,
+        ]
 
         save_row = QHBoxLayout()
         save_btn = QPushButton("Save Configuration")
@@ -1949,6 +1955,8 @@ class MainWindow(QMainWindow):
             "Finishing the current safe browser action. Evidence already collected will be kept."
         )
         self.status_badge.setText("Stopping")
+        self.run_status_strip.set_snapshot(RunSnapshot(phase=RunPhase.STOPPING))
+        self.status_badge.setText("Stopping")
         self.status_badge.setStyleSheet(
             f"background: {Palette.pale_yellow}; color: {Palette.yellow}; "
             "border: 1px solid #E7CF91; border-radius: 12px; "
@@ -1981,6 +1989,8 @@ class MainWindow(QMainWindow):
                 "Continuing from the same patient and source queue."
             )
             self.status_badge.setText("Resuming")
+            self.run_status_strip.set_snapshot(RunSnapshot(phase=RunPhase.RUNNING))
+            self.status_badge.setText("Resuming")
             self._log("Evidence search resumed from the same queue")
             return
         for worker in active_workers:
@@ -1992,6 +2002,8 @@ class MainWindow(QMainWindow):
         self.run_progress.detail.setText(
             "The queue will pause at the next safe checkpoint in the current browser action."
         )
+        self.status_badge.setText("Pausing")
+        self.run_status_strip.set_snapshot(RunSnapshot(phase=RunPhase.PAUSING))
         self.status_badge.setText("Pausing")
         self.status_badge.setStyleSheet(
             f"background: {Palette.pale_yellow}; color: {Palette.yellow}; "
@@ -2010,6 +2022,8 @@ class MainWindow(QMainWindow):
             self.run_progress.detail.setText(
                 "Completed evidence is safe. Resume continues from this exact queue position."
             )
+            self.status_badge.setText("Paused")
+            self.run_status_strip.set_snapshot(RunSnapshot(phase=RunPhase.PAUSED))
             self.status_badge.setText("Paused")
             self.status_badge.setStyleSheet(
                 f"background: {Palette.pale_yellow}; color: {Palette.yellow}; "
@@ -2371,6 +2385,14 @@ class MainWindow(QMainWindow):
         self.activity_progress.hide()
         self.run_progress.title.setText("Collecting evidence")
         self.run_progress.update_progress(current, total, detail)
+        self.run_status_strip.set_snapshot(
+            RunSnapshot(
+                phase=RunPhase.RUNNING,
+                current_patient=current,
+                patient_total=total,
+                action=detail,
+            )
+        )
 
     def _complete_run_progress(self, title: str) -> None:
         self.run_progress.show()
@@ -2386,6 +2408,15 @@ class MainWindow(QMainWindow):
         self._set_search_complete_status(save_pending=self.workbook_write_pending)
 
     def _set_search_complete_status(self, *, save_pending: bool) -> None:
+        self.run_status_strip.set_snapshot(
+            RunSnapshot(
+                phase=(
+                    RunPhase.REPORT_PENDING if save_pending else RunPhase.COMPLETE
+                ),
+                current_patient=self.run_progress.bar.maximum(),
+                patient_total=self.run_progress.bar.maximum(),
+            )
+        )
         if save_pending:
             self.status_badge.setText("Search complete · save pending")
             self.status_badge.setStyleSheet(
@@ -2455,6 +2486,14 @@ class MainWindow(QMainWindow):
         self._search_pause_requested = False
         self._search_stop_requested = False
         self.status_badge.setText(label)
+        self.run_status_strip.set_snapshot(
+            RunSnapshot(
+                phase=RunPhase.RUNNING if is_search else RunPhase.LOADING,
+                action=label,
+                started_at=datetime.now(),
+            )
+        )
+        self.status_badge.setText(label)
         self.status_badge.setStyleSheet(
             f"background: {Palette.pale_blue}; color: {Palette.blue}; "
             f"border: 1px solid {Palette.blue}; border-radius: 12px; "
@@ -2475,6 +2514,7 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(label)
 
     def _set_ready(self) -> None:
+        self.run_status_strip.set_snapshot(RunSnapshot())
         self.status_badge.setText("Ready")
         self.status_badge.setStyleSheet("")
         self.activity_progress.hide()

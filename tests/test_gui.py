@@ -93,6 +93,17 @@ def test_artifact_settings_show_catalog_and_af_exception(qt_app):
     assert window._artifact_rules_from_table() == default_artifact_rules()
 
 
+def test_settings_are_grouped_into_four_operator_sections(qt_app):
+    window = MainWindow()
+
+    assert [group.title() for group in window.settings_groups] == [
+        "Local files",
+        "Browser access",
+        "Search pacing",
+        "Artifact rules",
+    ]
+
+
 def test_sidebar_navigation_switches_workspace_pages(qt_app):
     window = MainWindow()
 

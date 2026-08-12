@@ -74,6 +74,14 @@ Manual **Sign In** windows still open visibly. Variant-to-variant pacing remains
 randomized according to Settings; switching between providers uses a fixed 3-second
 transition.
 
+The desktop interface is organised as an operations cockpit. A persistent strip
+distinguishes Ready, Running, Paused, Interrupted, Complete, Retry available, and
+Report save pending. The Evidence workspace keeps the current task, a
+patient-by-provider matrix, and timestamped activity visible. Startup can offer
+the most recent local workbook, but it never loads data or contacts a provider
+until **Restore analysis** is selected. **Retry Pending Saves** retries only
+locked report files and never repeats database searches.
+
 ## Evidence sources
 
 All browser sources are queried with the somatic workflow and GRCh37/hg19 where
