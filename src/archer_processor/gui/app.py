@@ -62,6 +62,7 @@ from archer_processor.services import (
     load_database_skip_keys,
 )
 from archer_processor.gui.status_model import (
+    RunActivity,
     RunPhase,
     RunSnapshot,
     build_patient_status_rows,
@@ -70,6 +71,10 @@ from archer_processor.gui.theme import Palette, application_stylesheet
 from archer_processor.gui.widgets.navigation import NavigationRail
 from archer_processor.gui.widgets.run_status import RunStatusStrip
 from archer_processor.gui.widgets.status_matrix import StatusMatrix
+from archer_processor.gui.widgets.activity_timeline import (
+    ActivityTimeline,
+    CurrentActivityPanel,
+)
 
 
 class ProcessingWorker(QObject):
@@ -433,6 +438,7 @@ class BrowserReviewWorker(QObject):
     progress = pyqtSignal(int, int, str)
     paused = pyqtSignal(bool)
     report_outcome = pyqtSignal(object)
+    activity = pyqtSignal(object)
 
     def __init__(
         self,
@@ -511,6 +517,16 @@ class BrowserReviewWorker(QObject):
                     self.artifact_root
                     / f"patient-{original_patient_index:03d}",
                     progress=lambda message, p=prefix: self.status.emit(f"{p}: {message}"),
+                    activity=lambda database, message, patient=patient_id, variants=patient_variants: self.activity.emit(
+                        RunActivity(
+                            occurred_at=datetime.now(),
+                            patient_id=patient,
+                            database=database,
+                            variant_label=(variants[0].display_name if len(variants) == 1 else f"{len(variants)} variants"),
+                            action=message,
+                            message=message,
+                        )
+                    ),
                     completed_sources=self.completed_sources,
                     checkpoint=self.patient_finished.emit,
                 )
@@ -982,6 +998,9 @@ class MainWindow(QMainWindow):
         command_layout.addWidget(self.stop_search_btn)
         layout.addWidget(command)
 
+        self.current_activity = CurrentActivityPanel()
+        layout.addWidget(self.current_activity)
+
         checks = QGroupBox("Evidence sources")
         checks.setMinimumHeight(250)
         grid = QGridLayout(checks)
@@ -1016,6 +1035,13 @@ class MainWindow(QMainWindow):
         self.status_matrix.setMinimumHeight(210)
         status_layout.addWidget(self.status_matrix)
         layout.addWidget(status_group)
+
+        timeline_group = QGroupBox("Activity timeline")
+        timeline_layout = QVBoxLayout(timeline_group)
+        self.activity_timeline = ActivityTimeline()
+        self.activity_timeline.setMinimumHeight(160)
+        timeline_layout.addWidget(self.activity_timeline)
+        layout.addWidget(timeline_group)
 
         options = QGroupBox("Search scope and browser session")
         options_grid = QGridLayout(options)
@@ -1507,6 +1533,8 @@ class MainWindow(QMainWindow):
         worker.paused.connect(self._search_pause_changed)
         worker.patient_finished.connect(self._database_patient_finished)
         worker.report_outcome.connect(self._patient_report_outcome)
+        if hasattr(worker, "activity"):
+            worker.activity.connect(self._activity_received)
         worker.finished.connect(self._database_finished)
         worker.cancelled.connect(self._search_cancelled)
         worker.failed.connect(self._worker_failed)
@@ -1609,6 +1637,7 @@ class MainWindow(QMainWindow):
         worker.paused.connect(self._search_pause_changed)
         worker.patient_finished.connect(self._browser_patient_finished)
         worker.report_outcome.connect(self._patient_report_outcome)
+        worker.activity.connect(self._activity_received)
         worker.finished.connect(self._browser_review_finished)
         worker.cancelled.connect(self._search_cancelled)
         worker.failed.connect(self._browser_review_failed)
@@ -2191,6 +2220,11 @@ class MainWindow(QMainWindow):
                 report_outcomes=report_statuses,
             )
         )
+
+    def _activity_received(self, activity: RunActivity) -> None:
+        self.current_activity.set_activity(activity)
+        self.activity_timeline.add_activity(activity)
+        self._log(activity.message or activity.action)
 
     def _refresh_variant_table(self) -> None:
         if not self.result:

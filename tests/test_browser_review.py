@@ -73,6 +73,35 @@ def test_browser_sources_use_canonical_order_with_mtbp_last(tmp_path, monkeypatc
     assert visited == ["COSMIC", "OncoKB", "Franklin", "MTBP"]
 
 
+def test_browser_review_reports_provider_with_progress(tmp_path, monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(
+        profile_root=tmp_path,
+        request_delay_ms=0,
+        request_delay_max_ms=0,
+        provider_switch_delay_ms=0,
+    )
+    seen = []
+
+    def record(database, variants, artifact_directory, *, progress):
+        return {
+            service.variant_key(variant): DatabaseEvidence(
+                database, "not_found", "synthetic"
+            )
+        }
+
+    monkeypatch.setattr(service, "_search_database", record)
+    service.search_variants(
+        [variant],
+        ["Franklin"],
+        tmp_path / "audit",
+        activity=lambda database, message: seen.append((database, message)),
+    )
+
+    assert seen[0][0] == "Franklin"
+    assert "starting" in seen[0][1].casefold()
+
+
 def test_browser_resume_skips_completed_sources_and_checkpoints_each_provider(
     tmp_path, monkeypatch
 ):

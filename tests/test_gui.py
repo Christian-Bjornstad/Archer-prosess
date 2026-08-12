@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 import re
 import time
@@ -14,6 +15,7 @@ from archer_processor.gui.status_model import (
     CellState,
     PatientStatusRow,
     RunPhase,
+    RunActivity,
     RunSnapshot,
     StatusCell,
 )
@@ -150,6 +152,25 @@ def test_status_matrix_renders_visible_text_for_every_state(qt_app):
     assert matrix.item(0, 2).text() == "Complete"
     assert matrix.item(0, 3).text() == "Retry"
     assert matrix.item(0, 4).text() == "Save pending"
+
+
+def test_activity_updates_current_provider_and_timeline(qt_app):
+    window = MainWindow()
+
+    window._activity_received(
+        RunActivity(
+            datetime.now(),
+            "SYNTHETIC02",
+            "Franklin",
+            "TP53 c.524G>A",
+            "Capturing",
+            "Population frequencies",
+        )
+    )
+
+    assert window.current_activity.provider_value.text() == "Franklin"
+    assert window.current_activity.patient_value.text() == "SYNTHETIC02"
+    assert window.activity_timeline.rowCount() == 1
 
 
 def test_review_filters_and_search_progress_are_visible(qt_app, tmp_path):

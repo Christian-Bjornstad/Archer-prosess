@@ -226,6 +226,7 @@ class BrowserReviewService:
         artifact_root: Path,
         *,
         progress: Callable[[str], None] | None = None,
+        activity: Callable[[str, str], None] | None = None,
         completed_sources: set[tuple[str, str]] | None = None,
         checkpoint: Callable[[dict[str, list[DatabaseEvidence]]], None] | None = None,
     ) -> dict[str, list[DatabaseEvidence]]:
@@ -251,6 +252,15 @@ class BrowserReviewService:
         jobs = [(database, pending) for database, pending in jobs if pending]
         for database_index, (database, pending_variants) in enumerate(jobs):
             self._check_cancelled()
+            if activity:
+                activity(database, "Starting provider")
+
+            def provider_progress(message: str, *, current=database) -> None:
+                if progress:
+                    progress(message)
+                if activity:
+                    activity(current, message)
+
             if progress:
                 progress(
                     f"Browser review: starting {database} for "
@@ -260,7 +270,7 @@ class BrowserReviewService:
                 database,
                 pending_variants,
                 artifact_root / database.lower().replace(" ", "-"),
-                progress=progress,
+                progress=provider_progress,
             )
             for key, evidence in database_results.items():
                 results[key].append(evidence)
@@ -276,7 +286,7 @@ class BrowserReviewService:
                 self._wait_between_databases(
                     database,
                     jobs[database_index + 1][0],
-                    progress=progress,
+                    progress=provider_progress,
                 )
         return results
 
