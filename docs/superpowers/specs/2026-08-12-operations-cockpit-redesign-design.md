@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-12
 **Branch:** `redesign/status-workspace`
-**Status:** Approved design direction; awaiting written-spec review
+**Status:** Approved
 
 ## Objective
 
