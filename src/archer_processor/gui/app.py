@@ -703,15 +703,6 @@ class MainWindow(QMainWindow):
         self.status_badge = self.run_status_strip.phase_label
         layout.addWidget(self.run_status_strip)
 
-        metrics = QHBoxLayout()
-        self.total_card = MetricCard("Total variants", "0", Palette.navy)
-        self.included_card = MetricCard("Included", "0", Palette.green)
-        self.excluded_card = MetricCard("Excluded", "0", Palette.red)
-        for card in [self.total_card, self.included_card, self.excluded_card]:
-            metrics.addWidget(card)
-            card.hide()
-        layout.addLayout(metrics)
-
         self.run_progress = RunProgressCard()
         layout.addWidget(self.run_progress)
 
@@ -884,9 +875,9 @@ class MainWindow(QMainWindow):
     def _review_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        toolbar = QFrame()
-        toolbar.setObjectName("ToolbarCard")
-        toolbar_layout = QHBoxLayout(toolbar)
+        self.variant_toolbar = QFrame()
+        self.variant_toolbar.setObjectName("VariantToolbar")
+        toolbar_layout = QHBoxLayout(self.variant_toolbar)
         toolbar_layout.setContentsMargins(14, 10, 14, 10)
         self.review_filter_edit = QLineEdit()
         self.review_filter_edit.setPlaceholderText("Filter sample, gene, HGVS, or warning")
@@ -897,11 +888,14 @@ class MainWindow(QMainWindow):
         self.review_decision_combo.currentIndexChanged.connect(self._apply_review_filters)
         self.review_count_label = QLabel("No variants loaded")
         self.review_count_label.setObjectName("HelperText")
+        self.variant_counters = QLabel("0 total · 0 included · 0 excluded")
+        self.variant_counters.setObjectName("VariantCounters")
         toolbar_layout.addWidget(QLabel("Find variants"))
         toolbar_layout.addWidget(self.review_filter_edit, 1)
         toolbar_layout.addWidget(self.review_decision_combo)
+        toolbar_layout.addWidget(self.variant_counters)
         toolbar_layout.addWidget(self.review_count_label)
-        layout.addWidget(toolbar)
+        layout.addWidget(self.variant_toolbar)
         self.variant_table = QTableWidget(0, 8)
         self.variant_table.setHorizontalHeaderLabels(
             ["Sample", "Gene", "HGVSc", "AF", "Depth", "Decision", "History", "Warnings"]
@@ -909,7 +903,15 @@ class MainWindow(QMainWindow):
         self.variant_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.variant_table.setAlternatingRowColors(True)
         self.variant_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        layout.addWidget(self.variant_table)
+        self.variant_table.setMinimumHeight(420)
+        layout.addWidget(self.variant_table, 1)
+        self.variant_empty_state = QLabel(
+            "No variants match the current filters. Clear filters to restore all rows."
+        )
+        self.variant_empty_state.setObjectName("VariantEmptyState")
+        self.variant_empty_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.variant_empty_state.hide()
+        layout.addWidget(self.variant_empty_state)
         return page
 
     def _database_tab(self) -> QWidget:
@@ -2148,9 +2150,11 @@ class MainWindow(QMainWindow):
     def _refresh_metrics(self) -> None:
         if not self.result:
             return
-        self.total_card.set_value(self.result.total_count)
-        self.included_card.set_value(len(self.result.included))
-        self.excluded_card.set_value(len(self.result.excluded))
+        self.variant_counters.setText(
+            f"{self.result.total_count} total · "
+            f"{len(self.result.included)} included · "
+            f"{len(self.result.excluded)} excluded"
+        )
         self._apply_review_filters()
         self._update_evidence_summary()
 
@@ -2211,6 +2215,7 @@ class MainWindow(QMainWindow):
         self.review_count_label.setText(
             f"Showing {visible} of {total}" if total else "No variants loaded"
         )
+        self.variant_empty_state.setVisible(total > 0 and visible == 0)
 
     def _update_evidence_summary(self) -> None:
         if not hasattr(self, "evidence_summary"):
@@ -2564,7 +2569,7 @@ class MainWindow(QMainWindow):
                 border: 1px solid {Palette.border};
                 border-radius: 8px;
             }}
-            QFrame#ToolbarCard, QFrame#RunProgressCard,
+            QFrame#ToolbarCard, QFrame#VariantToolbar, QFrame#RunProgressCard,
             QFrame#EvidenceCommand {{
                 background: {Palette.panel};
                 border: 1px solid {Palette.border};
@@ -2617,6 +2622,20 @@ class MainWindow(QMainWindow):
             QLabel#HelperText {{
                 color: {Palette.muted};
                 font-size: 12px;
+            }}
+            QLabel#VariantCounters {{
+                color: {Palette.navy};
+                background: {Palette.pale_blue};
+                border-radius: 6px;
+                padding: 6px 9px;
+                font-weight: 700;
+            }}
+            QLabel#VariantEmptyState {{
+                color: {Palette.muted};
+                background: {Palette.panel};
+                border: 1px dashed {Palette.border};
+                border-radius: 8px;
+                padding: 18px;
             }}
             QLabel#FieldLabel {{
                 color: {Palette.navy};

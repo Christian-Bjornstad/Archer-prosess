@@ -152,6 +152,37 @@ def test_review_filters_and_search_progress_are_visible(qt_app, tmp_path):
     assert window.run_progress.detail.text() == "Patient 3 is running"
 
 
+def test_variant_workspace_prioritises_toolbar_and_table(qt_app, tmp_path):
+    window = MainWindow()
+    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+    window.result = VariantProcessor().process(
+        fixture, "2026-08-12", tmp_path / "review.xlsx"
+    )
+    for index, variant in enumerate(window.result.variants):
+        variant.decision = "included" if index < 3 else "excluded"
+    window._refresh_metrics()
+    window._refresh_variant_table()
+
+    assert window.variant_toolbar.objectName() == "VariantToolbar"
+    assert window.variant_counters.text() == "5 total · 3 included · 2 excluded"
+    assert window.variant_table.minimumHeight() >= 420
+    assert not hasattr(window, "total_card")
+
+
+def test_filtered_empty_state_explains_how_to_restore_rows(qt_app, tmp_path):
+    window = MainWindow()
+    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+    window.result = VariantProcessor().process(
+        fixture, "2026-08-12", tmp_path / "review.xlsx"
+    )
+    window._refresh_variant_table()
+
+    window.review_filter_edit.setText("NO_SUCH_VARIANT")
+
+    assert not window.variant_empty_state.isHidden()
+    assert "Clear filters" in window.variant_empty_state.text()
+
+
 def test_variant_table_uses_distinct_strong_and_weak_green(qt_app, tmp_path):
     window = MainWindow()
     fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
