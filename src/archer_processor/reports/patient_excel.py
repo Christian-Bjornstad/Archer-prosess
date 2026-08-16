@@ -101,7 +101,7 @@ class PatientExcelReportWriter:
         outputs: list[Path] = []
         for patient_id, variants in sorted(grouped.items()):
             safe_patient = re.sub(r"[^A-Za-z0-9_-]+", "_", patient_id).strip("_")
-            output = output_directory / f"{safe_patient}_VPM_Tolkning.xlsx"
+            output = output_directory / f"{safe_patient}_VPM_Tolkning_APP.xlsx"
             self.write_patient(result, patient_id, variants, output, evidence)
             outputs.append(output)
         return outputs
