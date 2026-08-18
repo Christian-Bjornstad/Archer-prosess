@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="src/archer_processor/assets/vpm-tolkning-icon.png" alt="VPM Tolkning icon" width="104" height="104">
+  <img src="src/archer_processor/assets/vpm-tolkning-icon.png" alt="Myolid Tolkning icon" width="104" height="104">
 </p>
 
-<h1 align="center">VPM Tolkning</h1>
+<h1 align="center">Myolid Tolkning</h1>
 
 <p align="center">
   A focused Windows workstation for somatic variant review, evidence collection,<br>
@@ -22,12 +22,12 @@
 </p>
 
 > [!IMPORTANT]
-> VPM Tolkning is a research and interpretation-support tool. Database findings
+> Myolid Tolkning is a research and interpretation-support tool. Database findings
 > and generated reports must be reviewed by qualified personnel before clinical use.
 
 ## What it does
 
-VPM Tolkning turns an Archer Analysis TSV export into a controlled review and
+Myolid Tolkning turns an Archer Analysis TSV export into a controlled review and
 evidence workflow. It keeps variant selection, browser research, screenshots,
 audit data, and patient workbooks connected without sending patient or sample
 identifiers to the evidence providers.
@@ -265,12 +265,12 @@ src/archer_processor/
 
 tests/          Unit and workflow regression tests
 docs/           Workflow and design notes
-design-system/  VPM Tolkning visual and interaction rules
+design-system/  Myolid Tolkning visual and interaction rules
 ```
 
 ## Status
 
-VPM Tolkning is under active development for a specialised laboratory workflow.
+Myolid Tolkning is under active development for a specialised laboratory workflow.
 Provider websites can change without notice, so browser selectors and evidence
 boundaries are intentionally fail-closed and covered by regression tests wherever
 possible.

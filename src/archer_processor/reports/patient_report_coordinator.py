@@ -43,7 +43,7 @@ class PatientReportCoordinator:
             raise ValueError("Patient reports require a processed workbook path.")
         variants = [item for item in self.variants if item.patient_id == patient_id]
         safe_id = re.sub(r"[^A-Za-z0-9_-]+", "_", patient_id).strip("_")
-        output = self.result.output_path.parent / f"{safe_id}_VPM_Tolkning.xlsx"
+        output = self.result.output_path.parent / f"{safe_id}_Myolid_Tolkning.xlsx"
         try:
             self.writer.write_patient(
                 self.result, patient_id, variants, output, self.evidence

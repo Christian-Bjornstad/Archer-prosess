@@ -439,7 +439,7 @@ def test_application_icon_is_packaged_and_loaded(qt_app):
 
     assert window.app_icon_path.exists()
     assert window.app_icon_path.name == "vpm-tolkning-icon.png"
-    assert window.windowTitle() == "VPM Tolkning"
+    assert window.windowTitle() == "Myolid Tolkning"
     assert not window.windowIcon().isNull()
     with Image.open(window.app_icon_path) as icon:
         corners = [

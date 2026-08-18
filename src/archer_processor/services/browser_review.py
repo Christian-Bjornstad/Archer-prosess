@@ -2069,7 +2069,8 @@ class BrowserReviewService:
             page,
             base_path,
             lambda: self._capture_franklin_classification_overview(
-                page, panel, categories.nth(0), base_path
+                page, panel, categories.nth(0), base_path,
+                include_gene_header=True,  # Include gene header for first ACMG screenshot
             ),
         )
         screenshots = [
@@ -2144,7 +2145,8 @@ class BrowserReviewService:
             page,
             base_path,
             lambda: self._capture_franklin_classification_overview(
-                page, panel, categories.nth(0), base_path
+                page, panel, categories.nth(0), base_path,
+                include_gene_header=True,  # Include gene header for first Oncogenic screenshot
             ),
         )
         screenshots = [
@@ -2184,23 +2186,48 @@ class BrowserReviewService:
         panel: Any,
         first_category: Any,
         screenshot_path: Path,
+        *,
+        include_gene_header: bool = False,
     ) -> None:
-        """Crop the classification summary before the first evidence category."""
+        """Crop the classification summary before the first evidence category.
+        
+        Args:
+            page: Playwright page object
+            panel: The classification panel locator
+            first_category: The first evidence category locator
+            screenshot_path: Path to save the screenshot
+            include_gene_header: If True, capture from top of page to include gene symbol
+        """
         panel.evaluate("el => { el.scrollTop = 0; }")
+        page.evaluate("window.scrollTo(0, 0)")
         page.wait_for_timeout(200)
         panel_box = panel.bounding_box()
         category_box = first_category.bounding_box()
         if panel_box is None or category_box is None:
             raise RuntimeError("Franklin classification overview was not visible.")
-        height = float(category_box["y"]) - float(panel_box["y"])
+        
+        if include_gene_header:
+            # Capture from top of page to include gene symbol (e.g., ASXL)
+            # Use a fixed top margin to capture the gene header area
+            gene_header_height = 120  # Pixels to extend above panel for gene header
+            clip_y = max(0, float(panel_box["y"]) - gene_header_height)
+            height = float(category_box["y"]) - clip_y
+            clip_x = max(0, float(panel_box["x"]))
+            clip_width = float(panel_box["width"])
+        else:
+            clip_y = max(0, float(panel_box["y"]))
+            height = float(category_box["y"]) - float(panel_box["y"])
+            clip_x = max(0, float(panel_box["x"]))
+            clip_width = float(panel_box["width"])
+        
         if height <= 1:
             raise RuntimeError("Franklin classification overview could not be cropped.")
         page.screenshot(
             path=str(screenshot_path),
             clip={
-                "x": max(0, float(panel_box["x"])),
-                "y": max(0, float(panel_box["y"])),
-                "width": float(panel_box["width"]),
+                "x": clip_x,
+                "y": clip_y,
+                "width": clip_width,
                 "height": height,
             },
         )

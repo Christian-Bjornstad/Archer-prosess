@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import QByteArray, Qt
-from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
 
 
@@ -18,7 +18,18 @@ _PATHS = {
 }
 
 
-def icon(name: str, color: str = "#FFFFFF", size: int = 20) -> QIcon:
+def icon(name: str, color: str = "#FFFFFF", size: int = 20, corner_radius: int = 4) -> QIcon:
+    """Generate an icon with rounded corners.
+    
+    Args:
+        name: Icon name from _PATHS dictionary
+        color: Stroke color in hex format
+        size: Icon size in pixels
+        corner_radius: Radius for rounded corners (default 4)
+    
+    Returns:
+        QIcon with rounded corners applied
+    """
     path = _PATHS.get(name, _PATHS["document"])
     svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
@@ -29,6 +40,13 @@ def icon(name: str, color: str = "#FFFFFF", size: int = 20) -> QIcon:
     pixmap = QPixmap(size, size)
     pixmap.fill(QColor(Qt.GlobalColor.transparent))
     painter = QPainter(pixmap)
+    
+    # Create rounded rectangle clip path
+    if corner_radius > 0:
+        clip_path = QPainterPath()
+        clip_path.addRoundedRect(0, 0, size, size, corner_radius, corner_radius)
+        painter.setClipPath(clip_path)
+    
     renderer.render(painter)
     painter.end()
     return QIcon(pixmap)

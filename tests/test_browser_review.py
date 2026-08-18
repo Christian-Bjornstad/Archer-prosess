@@ -955,6 +955,9 @@ def test_franklin_classification_capture_ends_with_complete_de_novo_card(tmp_pat
             assert selector == "gnx-result-page"
             return panel
 
+        def evaluate(self, script):
+            pass
+
         def screenshot(self, **kwargs):
             self.captures.append(kwargs)
 
@@ -1047,6 +1050,9 @@ def test_franklin_oncogenic_capture_uses_named_evidence_boxes(tmp_path):
             assert selector == "gnx-oncogenic-classification-app"
             return panel
 
+        def evaluate(self, script):
+            pass
+
         def wait_for_timeout(self, milliseconds):
             assert milliseconds in {200, 250}
 
@@ -1065,7 +1071,7 @@ def test_franklin_oncogenic_capture_uses_named_evidence_boxes(tmp_path):
         "Oncogenic evidence: Predictive Data",
     ]
     assert [capture[0] for capture in captures] == [0, 1, 2]
-    assert page.captures[0]["clip"]["height"] == 100
+    assert page.captures[0]["clip"]["height"] == 120
 
 
 def test_franklin_search_explicitly_selects_hg19_and_somatic(tmp_path):

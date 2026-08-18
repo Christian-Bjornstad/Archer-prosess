@@ -243,4 +243,4 @@ def test_patient_excel_filename_is_dit_vpm_tolkning(tmp_path):
 
     outputs = PatientExcelReportWriter().write_all(result, tmp_path / "patients", {})
 
-    assert outputs[0].name.endswith("_VPM_Tolkning.xlsx")
+    assert outputs[0].name.endswith("_Myolid_Tolkning_APP.xlsx")

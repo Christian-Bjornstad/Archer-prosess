@@ -1,4 +1,4 @@
-# VPM Tolkning desktop workbench
+# Myolid Tolkning desktop workbench
 
 This native PyQt override replaces the web-oriented landing-page guidance in
 the master design system.
@@ -7,7 +7,7 @@ the master design system.
 
 - Present the application as a clinical variant interpretation console, not an
   Archer processing utility or a step-by-step workflow wizard.
-- Use VPM Tolkning branding and analysis language throughout the interface.
+- Use Myolid Tolkning branding and analysis language throughout the interface.
 - Somatic and hg19 / GRCh37 remain implementation requirements, but are not
   repeated as decorative profile labels in the interface.
 - Evidence order remains MTBP, Franklin, ClinVar, OncoKB, and COSMIC.
