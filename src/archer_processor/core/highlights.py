@@ -22,11 +22,8 @@ def priority_warning(variant: VariantRecord) -> str:
 
 
 def _is_artifact(variant: VariantRecord) -> bool:
-    if _truthy(variant.artifact_status):
-        return True
-    if any("artifact" in rule.lower() for rule in variant.matched_rules):
-        return True
-    return _variant_sum(variant, "Artf") > 0
+    # Only consider artifacts from user-configured rules (matched_rules)
+    return any("artifact" in rule.lower() for rule in variant.matched_rules)
 
 
 def _variant_sum(variant: VariantRecord, *columns: str) -> float:

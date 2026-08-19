@@ -18,8 +18,9 @@ def variant(**kwargs) -> VariantRecord:
 
 def test_artifact_highlight_is_orange_category():
     assert variant_highlight(variant(matched_rules=["flt3_1419_4dup_artifact"])) == "artifact"
-    assert variant_highlight(variant(artifact_status="Yes")) == "artifact"
-    assert variant_highlight(variant(history_matches=[{"Artf": 1}])) == "artifact"
+    # Only user-configured artifact rules (matched_rules) count as artifacts
+    assert variant_highlight(variant(artifact_status="Yes")) == ""
+    assert variant_highlight(variant(history_matches=[{"Artf": 1}])) == ""
 
 
 def test_tier_highlight_requires_sum_above_five():
