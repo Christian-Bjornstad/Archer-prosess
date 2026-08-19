@@ -8,15 +8,15 @@ from archer_processor.core.models import VariantRecord
 def variant_highlight(variant: VariantRecord) -> str:
     if _is_artifact(variant):
         return "artifact"
-    if _history_sum(variant, "Tier I", "Tier II") > 5:
+    if _variant_sum(variant, "Tier I", "Tier II") > 5:
         return "tier"
-    if _history_sum(variant, "Germ") > 10 and variant.af is not None:
+    if _variant_sum(variant, "Germ") > 10 and variant.af is not None:
         return "germline" if variant.af >= 0.35 else "germline_low_af"
     return ""
 
 
 def priority_warning(variant: VariantRecord) -> str:
-    if _history_sum(variant, "Germ") > 10 and variant.af is None:
+    if _variant_sum(variant, "Germ") > 10 and variant.af is None:
         return "Germline priority could not be colored because AF is missing."
     return ""
 
@@ -26,14 +26,21 @@ def _is_artifact(variant: VariantRecord) -> bool:
         return True
     if any("artifact" in rule.lower() for rule in variant.matched_rules):
         return True
-    return _history_sum(variant, "Artf") > 0
+    return _variant_sum(variant, "Artf") > 0
 
 
-def _history_sum(variant: VariantRecord, *columns: str) -> float:
+def _variant_sum(variant: VariantRecord, *columns: str) -> float:
+    """Sum values from variant.raw (TSV columns) first, fall back to history_matches."""
     total = 0.0
-    for match in variant.history_matches:
-        for column in columns:
-            total += _number(match.get(column))
+    # First check raw TSV columns
+    for column in columns:
+        if column in variant.raw:
+            total += _number(variant.raw.get(column))
+    # If no raw data, fall back to history_matches
+    if total == 0.0:
+        for match in variant.history_matches:
+            for column in columns:
+                total += _number(match.get(column))
     return total
 
 
