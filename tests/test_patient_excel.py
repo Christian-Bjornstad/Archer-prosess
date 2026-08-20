@@ -18,12 +18,12 @@ def test_patient_overview_uses_strong_and_weak_priority_green(tmp_path):
         FIXTURE, "2026-08-11", tmp_path / "review.xlsx"
     )
     base = result.variants[3]
-    strong = replace(base, history_matches=[{"Tier I": 6}], af=0.20)
+    strong = replace(base, raw={"Tier I": 6, "Tier II": 0}, af=0.20)
     weak = replace(
         base,
         source_row=base.source_row + 100,
         hgvsc="NM_015338.5:c.1935dup",
-        history_matches=[{"Germ": 11}],
+        raw={"Germ": 11},
         af=0.3499,
     )
     output = tmp_path / "patient.xlsx"

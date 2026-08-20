@@ -265,10 +265,11 @@ def test_variant_table_uses_distinct_strong_and_weak_green(qt_app, tmp_path):
     window.result = VariantProcessor().process(
         fixture, "2026-08-11", tmp_path / "review.xlsx"
     )
-    window.result.variants[0].history_matches = [{"Tier I": 6}]
+    window.result.variants[0].raw["Tier I"] = 6
+    window.result.variants[0].raw["Tier II"] = 0
     window.result.variants[0].artifact_status = ""
     window.result.variants[0].matched_rules = []
-    window.result.variants[1].history_matches = [{"Germ": 11}]
+    window.result.variants[1].raw["Germ"] = 11
     window.result.variants[1].af = 0.3499
     window.result.variants[1].artifact_status = ""
     window.result.variants[1].matched_rules = []

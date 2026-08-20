@@ -222,8 +222,8 @@ def test_excel_export_keeps_row_coloring_on_raw_sheets(tmp_path):
     output = tmp_path / "review.xlsx"
     result = VariantProcessor().process(FIXTURE, "2026-07-26", output)
     by_patient = {variant.patient_id: variant for variant in result.variants}
-    by_patient["26OUM00004"].history_matches = [{"Tier I": 3, "Tier II": 3}]
-    by_patient["26OUM00005"].history_matches = [{"Germ": 10}]
+    by_patient["26OUM00004"].raw.update({"Tier I": 3, "Tier II": 3})
+    by_patient["26OUM00005"].raw["Germ"] = 10
 
     ExcelReportWriter().write(result, output)
 

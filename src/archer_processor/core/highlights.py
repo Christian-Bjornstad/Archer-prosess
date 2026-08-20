@@ -27,18 +27,8 @@ def _is_artifact(variant: VariantRecord) -> bool:
 
 
 def _variant_sum(variant: VariantRecord, *columns: str) -> float:
-    """Sum values from variant.raw (TSV columns) first, fall back to history_matches."""
-    total = 0.0
-    # First check raw TSV columns
-    for column in columns:
-        if column in variant.raw:
-            total += _number(variant.raw.get(column))
-    # If no raw data, fall back to history_matches
-    if total == 0.0:
-        for match in variant.history_matches:
-            for column in columns:
-                total += _number(match.get(column))
-    return total
+    """Sum priority counts supplied directly by the Archer TSV."""
+    return sum(_number(variant.raw.get(column)) for column in columns)
 
 
 def _number(value: Any) -> float:
