@@ -41,6 +41,57 @@ def test_patient_overview_uses_strong_and_weak_priority_green(tmp_path):
         workbook.close()
 
 
+def test_patient_data_sheet_includes_artifacts_without_skip_column(tmp_path):
+    result = VariantProcessor().process(
+        FIXTURE, "2026-08-11", tmp_path / "review.xlsx"
+    )
+    base = result.variants[3]
+    strong = replace(base, raw={**base.raw, "Tier I": 6, "Tier II": 0})
+    artifact_raw = {
+        **base.raw,
+        "HGVSc": "NM_000546.6:c.525dup",
+        "Tier I": 0,
+        "Tier II": 0,
+    }
+    artifact = replace(
+        base,
+        source_row=base.source_row + 100,
+        hgvsc="NM_000546.6:c.525dup",
+        raw=artifact_raw,
+        matched_rules=["known-artifact"],
+    )
+    result.variants = [strong, artifact]
+    output = tmp_path / "patient.xlsx"
+
+    PatientExcelReportWriter().write_patient(
+        result, base.patient_id, [strong], output, {}
+    )
+
+    workbook = openpyxl.load_workbook(output)
+    try:
+        data = workbook["Data"]
+        headers = [cell.value for cell in data[1]]
+        assert headers[0] == "Sample"
+        assert "Skip Database Search (X)" not in headers
+        assert headers[-5:] == [
+            "ClinVar Evidence",
+            "MTBP Evidence",
+            "Franklin Evidence",
+            "OncoKB Evidence",
+            "COSMIC Evidence",
+        ]
+        assert data.max_row == 3
+        assert data.sheet_properties.tabColor.rgb == "004F8A5B"
+        assert data["A2"].fill.fgColor.rgb == "00C6EFCE"
+        assert data["A3"].fill.fgColor.rgb == "00FFC000"
+        report_column = headers.index("Report") + 1
+        assert data.column_dimensions[
+            openpyxl.utils.get_column_letter(report_column)
+        ].hidden
+    finally:
+        workbook.close()
+
+
 def test_patient_excel_report_uses_requested_sheet_layout_and_image_order(tmp_path):
     result = VariantProcessor().process(
         FIXTURE, "2026-08-03", tmp_path / "review.xlsx"
@@ -179,7 +230,7 @@ def test_patient_excel_report_uses_requested_sheet_layout_and_image_order(tmp_pa
     )
 
     workbook = openpyxl.load_workbook(output)
-    assert workbook.sheetnames == ["Oversikt", "Vedlegg", "TP53"]
+    assert workbook.sheetnames == ["Oversikt", "Vedlegg", "Data", "TP53"]
     overview = workbook["Oversikt"]
     assert overview["A1"].value == "VPM-tolkning – 26OUM00004"
     assert overview["A3"].value is None
@@ -230,6 +281,7 @@ def test_patient_excel_uses_variant_detail_only_for_duplicate_gene(tmp_path):
     assert workbook.sheetnames == [
         "Oversikt",
         "Vedlegg",
+        "Data",
         "TP53 p.R175H",
         "TP53 c.743G>A",
     ]

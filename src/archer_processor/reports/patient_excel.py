@@ -15,6 +15,7 @@ from PIL import Image as PillowImage
 
 from archer_processor.core.highlights import variant_highlight
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
+from archer_processor.reports.excel_report import ExcelReportWriter
 
 
 REPORT_DATABASES = ("MTBP", "Franklin", "ClinVar", "OncoKB", "COSMIC")
@@ -75,6 +76,7 @@ class PatientExcelReportWriter:
         "blue": "2F75B5",
         "pale_blue": "EAF3FA",
         "pale_green": "EAF5ED",
+        "green": "4F8A5B",
         "strong_green": "C6EFCE",
         "weak_green": "E9F6EF",
         "orange": "FFC000",
@@ -119,8 +121,13 @@ class PatientExcelReportWriter:
         self._overview_sheet(workbook, result, patient_id, variants, evidence)
         workbook.remove(placeholder)
         self._attachment_sheet(workbook, patient_id)
+        patient_data = [
+            variant for variant in result.variants
+            if variant.patient_id == patient_id
+        ]
+        self._data_sheet(workbook, patient_data, evidence)
         gene_counts = Counter((variant.symbol or "Variant").casefold() for variant in variants)
-        used_names = {"Oversikt", "Vedlegg"}
+        used_names = {"Oversikt", "Vedlegg", "Data"}
         for index, variant in enumerate(variants, start=1):
             title = self._variant_sheet_name(
                 variant,
@@ -304,6 +311,24 @@ class PatientExcelReportWriter:
         ws["A1"] = patient_id
         ws["A1"].font = Font(size=18, bold=True, color=self.colors["navy"])
         ws.column_dimensions["A"].width = max(18, len(patient_id) + 4)
+
+    def _data_sheet(
+        self,
+        workbook: Workbook,
+        variants: list[VariantRecord],
+        evidence: dict[str, list[DatabaseEvidence]],
+    ) -> None:
+        raw_writer = ExcelReportWriter()
+        raw_writer._raw_variant_sheet(
+            workbook,
+            "Data",
+            variants,
+            evidence,
+            include_selection=False,
+        )
+        ws = workbook["Data"]
+        ws.sheet_properties.tabColor = self.colors["green"]
+        ws.sheet_view.showGridLines = False
 
     def _variant_sheet(
         self,
