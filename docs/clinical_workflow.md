@@ -7,8 +7,8 @@ Core workflow:
 1. Load `all_samples_filtered_variants.tsv` or equivalent Archer TSV export.
 2. Validate required columns before processing.
 3. Apply local artifact/filter rules.
-4. Compare variants against the yearly history workbook, normally `2026_VPM_Variantfunn.xlsx`.
-5. Review included, excluded, warning-flagged, and history-matched variants.
+4. Prioritize rows from Archer `Tier I`, `Tier II`, `Germ`, and AF values.
+5. Review included, excluded, and warning-flagged variants.
 6. Search or record external database evidence.
 7. Export an Excel workbook for review and interpretation.
 

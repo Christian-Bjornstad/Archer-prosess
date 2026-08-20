@@ -35,7 +35,7 @@ identifiers to the evidence providers.
 | Capability | Result |
 | --- | --- |
 | Structured import | Validates Archer TSV exports and normalizes variant records |
-| Local prioritisation | Applies configurable artifact rules and compares against the yearly VPM history workbook |
+| Local prioritisation | Applies configurable artifact rules and Archer `Tier I`, `Tier II`, and `Germ` counts |
 | Review-first workflow | Produces a full Excel workbook where unwanted searches can be marked with `X` |
 | Evidence collection | Searches MTBP, Franklin, ClinVar, OncoKB, and COSMIC in minimized Microsoft Edge sessions |
 | Screenshot capture | Saves focused, variant-specific evidence images in a consistent order |
@@ -228,7 +228,6 @@ python -m archer_processor
 
 Use the in-app **Settings** page to configure:
 
-- yearly VPM history workbook;
 - default output directory;
 - provider sign-in details;
 - browser safety-buffer range;
