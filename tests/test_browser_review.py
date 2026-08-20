@@ -985,6 +985,63 @@ def test_franklin_classification_capture_ends_with_complete_de_novo_card(tmp_pat
     assert not any("Population" in item["label"] for item in screenshots)
 
 
+def test_franklin_overview_starts_above_visible_gene_header(tmp_path):
+    service = BrowserReviewService(
+        profile_root=tmp_path, capture_validator=VALID_CAPTURE
+    )
+    captures = []
+
+    class Element:
+        def __init__(self, box):
+            self.box = box
+
+        def bounding_box(self):
+            return self.box
+
+    class Matches:
+        def count(self):
+            return 1
+
+        def nth(self, index):
+            assert index == 0
+            return Element({"x": 70, "y": 90, "width": 180, "height": 42})
+
+    class Page:
+        def evaluate(self, script):
+            pass
+
+        def wait_for_timeout(self, milliseconds):
+            assert milliseconds == 200
+
+        def get_by_text(self, text, *, exact):
+            assert text == "TP53"
+            assert exact is True
+            return Matches()
+
+        def screenshot(self, **kwargs):
+            captures.append(kwargs)
+
+    class Panel(Element):
+        def evaluate(self, script):
+            pass
+
+    page = Page()
+    service._capture_franklin_classification_overview(
+        page,
+        Panel({"x": 100, "y": 150, "width": 900, "height": 600}),
+        Element({"x": 100, "y": 360, "width": 900, "height": 100}),
+        tmp_path / "overview.png",
+        gene_symbol="TP53",
+    )
+
+    assert captures[0]["clip"] == {
+        "x": 70,
+        "y": 74,
+        "width": 930,
+        "height": 286,
+    }
+
+
 def test_franklin_oncogenic_capture_uses_named_evidence_boxes(tmp_path):
     variant = ArcherTsvReader().read(FIXTURE)[3]
     service = BrowserReviewService(

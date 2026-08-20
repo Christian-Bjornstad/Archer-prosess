@@ -2070,7 +2070,7 @@ class BrowserReviewService:
             base_path,
             lambda: self._capture_franklin_classification_overview(
                 page, panel, categories.nth(0), base_path,
-                include_gene_header=True,  # Include gene header for first ACMG screenshot
+                gene_symbol=variant.symbol,
             ),
         )
         screenshots = [
@@ -2146,7 +2146,7 @@ class BrowserReviewService:
             base_path,
             lambda: self._capture_franklin_classification_overview(
                 page, panel, categories.nth(0), base_path,
-                include_gene_header=True,  # Include gene header for first Oncogenic screenshot
+                gene_symbol=variant.symbol,
             ),
         )
         screenshots = [
@@ -2187,17 +2187,9 @@ class BrowserReviewService:
         first_category: Any,
         screenshot_path: Path,
         *,
-        include_gene_header: bool = False,
+        gene_symbol: str = "",
     ) -> None:
-        """Crop the classification summary before the first evidence category.
-        
-        Args:
-            page: Playwright page object
-            panel: The classification panel locator
-            first_category: The first evidence category locator
-            screenshot_path: Path to save the screenshot
-            include_gene_header: If True, capture from top of page to include gene symbol
-        """
+        """Capture the gene heading and summary before the first evidence category."""
         panel.evaluate("el => { el.scrollTop = 0; }")
         page.evaluate("window.scrollTo(0, 0)")
         page.wait_for_timeout(200)
@@ -2205,21 +2197,24 @@ class BrowserReviewService:
         category_box = first_category.bounding_box()
         if panel_box is None or category_box is None:
             raise RuntimeError("Franklin classification overview was not visible.")
-        
-        if include_gene_header:
-            # Capture from top of page to include gene symbol (e.g., ASXL)
-            # Use a fixed top margin to capture the gene header area
-            gene_header_height = 120  # Pixels to extend above panel for gene header
-            clip_y = max(0, float(panel_box["y"]) - gene_header_height)
-            height = float(category_box["y"]) - clip_y
-            clip_x = max(0, float(panel_box["x"]))
+
+        panel_x = float(panel_box["x"])
+        panel_y = float(panel_box["y"])
+        panel_right = panel_x + float(panel_box["width"])
+        header_box = self._franklin_gene_header_box(
+            page, gene_symbol, panel_y, float(category_box["y"])
+        )
+        if header_box is None:
+            clip_x = max(0, panel_x)
+            clip_y = max(0, panel_y - 220)
             clip_width = float(panel_box["width"])
         else:
-            clip_y = max(0, float(panel_box["y"]))
-            height = float(category_box["y"]) - float(panel_box["y"])
-            clip_x = max(0, float(panel_box["x"]))
-            clip_width = float(panel_box["width"])
-        
+            header_x = float(header_box["x"])
+            header_right = header_x + float(header_box["width"])
+            clip_x = max(0, min(panel_x, header_x))
+            clip_y = max(0, float(header_box["y"]) - 16)
+            clip_width = max(panel_right, header_right) - clip_x
+        height = float(category_box["y"]) - clip_y
         if height <= 1:
             raise RuntimeError("Franklin classification overview could not be cropped.")
         page.screenshot(
@@ -2231,6 +2226,30 @@ class BrowserReviewService:
                 "height": height,
             },
         )
+
+    @staticmethod
+    def _franklin_gene_header_box(
+        page: Any,
+        gene_symbol: str,
+        panel_y: float,
+        category_y: float,
+    ) -> dict[str, float] | None:
+        if not gene_symbol:
+            return None
+        try:
+            matches = page.get_by_text(gene_symbol, exact=True)
+            candidates = []
+            for index in range(matches.count()):
+                box = matches.nth(index).bounding_box()
+                if box is None:
+                    continue
+                top = float(box["y"])
+                bottom = top + float(box["height"])
+                if top <= panel_y + 40 and bottom < category_y:
+                    candidates.append(box)
+            return max(candidates, key=lambda box: float(box["y"]), default=None)
+        except (AttributeError, TypeError):
+            return None
 
     def _capture_franklin_evidence_box(
         self,
