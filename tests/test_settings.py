@@ -8,6 +8,20 @@ def test_automated_edge_runs_minimized_by_default():
     assert AppSettings().browser_background is True
 
 
+def test_external_history_workbook_is_not_persisted(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(AppSettings, "config_path", classmethod(lambda cls: config_path))
+    monkeypatch.setattr(
+        "archer_processor.services.settings.credentials.save_password",
+        lambda *args: None,
+    )
+
+    AppSettings().save()
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+
+    assert "history_workbook" not in payload
+
+
 def test_recent_workbook_path_persists_without_evidence(tmp_path, monkeypatch):
     config_path = tmp_path / "config.json"
     monkeypatch.setattr(AppSettings, "config_path", classmethod(lambda cls: config_path))

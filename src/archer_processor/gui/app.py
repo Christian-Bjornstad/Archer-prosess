@@ -43,7 +43,6 @@ from PyQt6.QtWidgets import (
 from archer_processor.core import DatabaseEvidence, FilterEngine, ProcessingResult, VariantProcessor, default_artifact_rules, production_rules
 from archer_processor.core.highlights import priority_warning, variant_highlight
 from archer_processor.io import ArcherTsvReader
-from archer_processor.knowledge import VariantHistoryRepository
 from archer_processor.reports import (
     ExcelReportWriter,
     PatientExcelReportWriter,
@@ -93,10 +92,8 @@ class ProcessingWorker(QObject):
     def run(self) -> None:
         try:
             self.status.emit("Reading variant TSV")
-            history_path = Path(self.settings.history_workbook)
-            history = VariantHistoryRepository(history_path) if history_path.exists() else None
             filter_engine = FilterEngine(production_rules(self.settings.artifact_rules))
-            processor = VariantProcessor(history=history, filter_engine=filter_engine)
+            processor = VariantProcessor(filter_engine=filter_engine)
             result = processor.process(self.input_path, self.run_date, self.output_path)
             self.status.emit("Writing review workbook")
             ExcelReportWriter().write(result, self.output_path, hide_excluded=self.hide_excluded)
@@ -117,17 +114,10 @@ class ProcessedWorkbookWorker(QObject):
 
     def run(self) -> None:
         try:
-            history_path = Path(self.settings.history_workbook)
-            history = (
-                VariantHistoryRepository(history_path)
-                if history_path.exists()
-                else None
-            )
             state = ProcessedWorkbookLoader(
                 filter_engine=FilterEngine(
                     production_rules(self.settings.artifact_rules)
                 ),
-                history=history,
             ).load(self.workbook_path, progress=self.progress.emit)
             self.finished.emit(self.workbook_path, state)
         except Exception as exc:
@@ -934,9 +924,9 @@ class MainWindow(QMainWindow):
         toolbar_layout.addWidget(self.variant_counters)
         toolbar_layout.addWidget(self.review_count_label)
         layout.addWidget(self.variant_toolbar)
-        self.variant_table = QTableWidget(0, 8)
+        self.variant_table = QTableWidget(0, 7)
         self.variant_table.setHorizontalHeaderLabels(
-            ["Sample", "Gene", "HGVSc", "AF", "Depth", "Decision", "History", "Warnings"]
+            ["Sample", "Gene", "HGVSc", "AF", "Depth", "Decision", "Warnings"]
         )
         self.variant_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.variant_table.setAlternatingRowColors(True)
@@ -1210,18 +1200,12 @@ class MainWindow(QMainWindow):
         local_group = QGroupBox("Local files")
         local_grid = QGridLayout(local_group)
         local_grid.setColumnStretch(1, 1)
-        self.history_edit = QLineEdit(self.settings.history_workbook)
-        history_btn = QPushButton("Browse")
-        history_btn.clicked.connect(self._browse_history)
         self.output_dir_edit = QLineEdit(self.settings.default_output_dir)
         dir_btn = QPushButton("Browse")
         dir_btn.clicked.connect(self._browse_output_dir)
-        local_grid.addWidget(QLabel("Variant history workbook"), 0, 0)
-        local_grid.addWidget(self.history_edit, 0, 1)
-        local_grid.addWidget(history_btn, 0, 2)
-        local_grid.addWidget(QLabel("Default report folder"), 1, 0)
-        local_grid.addWidget(self.output_dir_edit, 1, 1)
-        local_grid.addWidget(dir_btn, 1, 2)
+        local_grid.addWidget(QLabel("Default report folder"), 0, 0)
+        local_grid.addWidget(self.output_dir_edit, 0, 1)
+        local_grid.addWidget(dir_btn, 0, 2)
         layout.addWidget(local_group)
 
         access_group = QGroupBox("Browser access")
@@ -1394,11 +1378,6 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(self, "Save Workbook", "", "Excel workbook (*.xlsx)")
         if path:
             self.output_edit.setText(path if path.lower().endswith(".xlsx") else f"{path}.xlsx")
-
-    def _browse_history(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Select History Workbook", "", "Excel workbook (*.xlsx *.xlsm)")
-        if path:
-            self.history_edit.setText(path)
 
     def _browse_output_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Select Default Output Folder", self.output_dir_edit.text())
@@ -2194,7 +2173,6 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Error", message)
 
     def _save_settings(self, silent: bool = False) -> None:
-        self.settings.history_workbook = self.history_edit.text()
         self.settings.default_output_dir = self.output_dir_edit.text()
         self.settings.clinvar_api_key = ""
         self.settings.cosmic_email = self.cosmic_email_edit.text()
@@ -2309,7 +2287,6 @@ class MainWindow(QMainWindow):
                 "" if variant.af is None else f"{variant.af:.2%}",
                 "" if variant.depth is None else str(variant.depth),
                 variant.decision,
-                str(len(variant.history_matches)),
                 "; ".join(
                     value
                     for value in [*variant.warnings, priority_warning(variant)]

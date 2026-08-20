@@ -102,6 +102,26 @@ def test_settings_are_grouped_into_four_operator_sections(qt_app):
         "Search pacing",
         "Artifact rules",
     ]
+    assert not hasattr(window, "history_edit")
+
+
+def test_variant_workspace_has_no_external_history_column(qt_app):
+    window = MainWindow()
+
+    headers = [
+        window.variant_table.horizontalHeaderItem(column).text()
+        for column in range(window.variant_table.columnCount())
+    ]
+
+    assert headers == [
+        "Sample",
+        "Gene",
+        "HGVSc",
+        "AF",
+        "Depth",
+        "Decision",
+        "Warnings",
+    ]
 
 
 def test_sidebar_navigation_switches_workspace_pages(qt_app):

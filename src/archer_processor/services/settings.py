@@ -11,7 +11,6 @@ from archer_processor.services import credentials
 
 @dataclass(slots=True)
 class AppSettings:
-    history_workbook: str = r"C:\Users\molpa\Desktop\HTS\Resultat_VPM\2026_VPM_Variantfunn.xlsx"
     default_output_dir: str = str(Path.home() / "Desktop")
     clinvar_api_key: str = ""
     cosmic_email: str = ""
