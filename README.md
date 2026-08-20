@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="src/archer_processor/assets/vpm-tolkning-icon.png" alt="VPM Tolkning icon" width="104" height="104">
+  <img src="src/archer_processor/assets/vpm-tolkning-icon.png" alt="Myolid Tolkning icon" width="104" height="104">
 </p>
 
-<h1 align="center">VPM Tolkning</h1>
+<h1 align="center">Myolid Tolkning</h1>
 
 <p align="center">
   A focused Windows workstation for somatic variant review, evidence collection,<br>
@@ -22,12 +22,12 @@
 </p>
 
 > [!IMPORTANT]
-> VPM Tolkning is a research and interpretation-support tool. Database findings
+> Myolid Tolkning is a research and interpretation-support tool. Database findings
 > and generated reports must be reviewed by qualified personnel before clinical use.
 
 ## What it does
 
-VPM Tolkning turns an Archer Analysis TSV export into a controlled review and
+Myolid Tolkning turns an Archer Analysis TSV export into a controlled review and
 evidence workflow. It keeps variant selection, browser research, screenshots,
 audit data, and patient workbooks connected without sending patient or sample
 identifiers to the evidence providers.
@@ -35,7 +35,7 @@ identifiers to the evidence providers.
 | Capability | Result |
 | --- | --- |
 | Structured import | Validates Archer TSV exports and normalizes variant records |
-| Local prioritisation | Applies configurable artifact rules and compares against the yearly VPM history workbook |
+| Local prioritisation | Applies configurable artifact rules and Archer `Tier I`, `Tier II`, and `Germ` counts |
 | Review-first workflow | Produces a full Excel workbook where unwanted searches can be marked with `X` |
 | Evidence collection | Searches MTBP, Franklin, ClinVar, OncoKB, and COSMIC in minimized Microsoft Edge sessions |
 | Screenshot capture | Saves focused, variant-specific evidence images in a consistent order |
@@ -73,6 +73,14 @@ Automated Edge windows run minimized by default so the workstation remains usabl
 Manual **Sign In** windows still open visibly. Variant-to-variant pacing remains
 randomized according to Settings; switching between providers uses a fixed 3-second
 transition.
+
+The desktop interface is organised as an operations cockpit. A persistent strip
+distinguishes Ready, Running, Paused, Interrupted, Complete, Retry available, and
+Report save pending. The Evidence workspace keeps the current task, a
+patient-by-provider matrix, and timestamped activity visible. Startup can offer
+the most recent local workbook, but it never loads data or contacts a provider
+until **Restore analysis** is selected. **Retry Pending Saves** retries only
+locked report files and never repeats database searches.
 
 ## Evidence sources
 
@@ -220,7 +228,6 @@ python -m archer_processor
 
 Use the in-app **Settings** page to configure:
 
-- yearly VPM history workbook;
 - default output directory;
 - provider sign-in details;
 - browser safety-buffer range;
@@ -257,12 +264,12 @@ src/archer_processor/
 
 tests/          Unit and workflow regression tests
 docs/           Workflow and design notes
-design-system/  VPM Tolkning visual and interaction rules
+design-system/  Myolid Tolkning visual and interaction rules
 ```
 
 ## Status
 
-VPM Tolkning is under active development for a specialised laboratory workflow.
+Myolid Tolkning is under active development for a specialised laboratory workflow.
 Provider websites can change without notice, so browser selectors and evidence
 boundaries are intentionally fail-closed and covered by regression tests wherever
 possible.

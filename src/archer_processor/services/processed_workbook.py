@@ -13,7 +13,6 @@ import openpyxl
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
 from archer_processor.core.rules import FilterEngine
 from archer_processor.io import ArcherTsvReader
-from archer_processor.knowledge import VariantHistoryRepository
 
 from .database_selection import HGVSC_HEADER, SAMPLE_HEADER, SELECTION_SHEET, SKIP_HEADER
 from .evidence_audit import EvidenceAuditIndex, migrate_loaded_evidence
@@ -33,11 +32,9 @@ class ProcessedWorkbookLoader:
         self,
         *,
         filter_engine: FilterEngine | None = None,
-        history: VariantHistoryRepository | None = None,
     ) -> None:
         self.reader = ArcherTsvReader()
         self.filter_engine = filter_engine or FilterEngine()
-        self.history = history
 
     def load(
         self,
@@ -126,9 +123,6 @@ class ProcessedWorkbookLoader:
         if not variants:
             raise ValueError("The processed workbook does not contain any variants.")
         self.filter_engine.apply(variants)
-        if self.history:
-            self.history.annotate(variants)
-
         evidence = self._restore_evidence(
             workbook_path, variants, cell_evidence, progress=progress
         )

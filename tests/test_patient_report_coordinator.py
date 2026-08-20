@@ -31,7 +31,7 @@ def test_patient_report_written_beside_processed_workbook(tmp_path):
     outcome = coordinator.write_patient("SYNTHETIC01")
 
     assert outcome.status == "written"
-    assert outcome.path == tmp_path / "SYNTHETIC01_VPM_Tolkning.xlsx"
+    assert outcome.path == tmp_path / "SYNTHETIC01_Myolid_Tolkning.xlsx"
     assert outcome.path.exists()
 
 
@@ -73,4 +73,23 @@ def test_reconcile_writes_every_selected_patient_once(tmp_path):
     outcomes = coordinator.reconcile()
 
     assert [item.patient_id for item in outcomes] == ["SYNTHETIC02"]
-    assert (tmp_path / "SYNTHETIC02_VPM_Tolkning.xlsx").exists()
+    assert (tmp_path / "SYNTHETIC02_Myolid_Tolkning.xlsx").exists()
+
+
+def test_retry_pending_rewrites_only_locked_reports(tmp_path, monkeypatch):
+    result, variant = _result(tmp_path)
+    coordinator = PatientReportCoordinator(result, [variant], {})
+    coordinator.pending = {"SYNTHETIC01"}
+    calls = []
+    original = coordinator.write_patient
+
+    def record(patient_id):
+        calls.append(patient_id)
+        return original(patient_id)
+
+    monkeypatch.setattr(coordinator, "write_patient", record)
+
+    outcomes = coordinator.retry_pending()
+
+    assert calls == ["SYNTHETIC01"]
+    assert outcomes[0].status == "written"

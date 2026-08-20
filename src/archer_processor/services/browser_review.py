@@ -226,6 +226,7 @@ class BrowserReviewService:
         artifact_root: Path,
         *,
         progress: Callable[[str], None] | None = None,
+        activity: Callable[[str, str], None] | None = None,
         completed_sources: set[tuple[str, str]] | None = None,
         checkpoint: Callable[[dict[str, list[DatabaseEvidence]]], None] | None = None,
     ) -> dict[str, list[DatabaseEvidence]]:
@@ -251,6 +252,15 @@ class BrowserReviewService:
         jobs = [(database, pending) for database, pending in jobs if pending]
         for database_index, (database, pending_variants) in enumerate(jobs):
             self._check_cancelled()
+            if activity:
+                activity(database, "Starting provider")
+
+            def provider_progress(message: str, *, current=database) -> None:
+                if progress:
+                    progress(message)
+                if activity:
+                    activity(current, message)
+
             if progress:
                 progress(
                     f"Browser review: starting {database} for "
@@ -260,7 +270,7 @@ class BrowserReviewService:
                 database,
                 pending_variants,
                 artifact_root / database.lower().replace(" ", "-"),
-                progress=progress,
+                progress=provider_progress,
             )
             for key, evidence in database_results.items():
                 results[key].append(evidence)
@@ -276,7 +286,7 @@ class BrowserReviewService:
                 self._wait_between_databases(
                     database,
                     jobs[database_index + 1][0],
-                    progress=progress,
+                    progress=provider_progress,
                 )
         return results
 
@@ -468,27 +478,15 @@ class BrowserReviewService:
                             f"{variant.cosmic_id}"
                         )
                     try:
-                        page.goto(
+                        results[key] = self._lookup_cosmic_with_retry(
+                            page,
+                            variant,
                             query_url,
-                            wait_until="domcontentloaded",
-                            timeout=self.navigation_timeout_ms,
+                            artifact_directory,
+                            progress=progress,
                         )
-                        self._resolve_cosmic_mutation_page(page, variant)
-                        if self._login_required("COSMIC", page.url):
-                            results[key] = DatabaseEvidence(
-                                "COSMIC",
-                                "login_required",
-                                "COSMIC session expired; use Sign In / Refresh and retry.",
-                                accession=variant.cosmic_id,
-                                url=page.url,
-                            )
-                        else:
-                            self._wait_for_cosmic_result(page)
-                            results[key] = self._capture_cosmic_result(
-                                variant, page, artifact_directory
-                            )
-                            if results[key].status == "found":
-                                self._cosmic_cache[cosmic_id] = results[key]
+                        if results[key].status == "found":
+                            self._cosmic_cache[cosmic_id] = results[key]
                     except Exception as exc:
                         results[key] = DatabaseEvidence(
                             "COSMIC",
@@ -505,6 +503,49 @@ class BrowserReviewService:
                 except browser_error:
                     pass
         return results
+
+    def _lookup_cosmic_with_retry(
+        self,
+        page: Any,
+        variant: VariantRecord,
+        query_url: str,
+        artifact_directory: Path,
+        *,
+        progress: Callable[[str], None] | None,
+    ) -> DatabaseEvidence:
+        """Retry one transient COSMIC navigation/render failure without changing identity."""
+        for attempt in range(2):
+            try:
+                page.goto(
+                    query_url,
+                    wait_until="domcontentloaded",
+                    timeout=self.navigation_timeout_ms,
+                )
+                dismiss_known_overlays(page)
+                self._resolve_cosmic_mutation_page(page, variant)
+                dismiss_known_overlays(page)
+                if self._login_required("COSMIC", page.url):
+                    return DatabaseEvidence(
+                        "COSMIC",
+                        "login_required",
+                        "COSMIC session expired; use Sign In / Refresh and retry.",
+                        accession=variant.cosmic_id,
+                        url=page.url,
+                    )
+                self._wait_for_cosmic_result(page)
+                return self._capture_cosmic_result(
+                    variant, page, artifact_directory
+                )
+            except Exception:
+                if attempt == 1:
+                    raise
+                if progress:
+                    progress(
+                        f"COSMIC: transient page failure for {variant.cosmic_id}; "
+                        "retrying once"
+                    )
+                page.wait_for_timeout(750)
+        raise RuntimeError("COSMIC retry loop ended unexpectedly.")
 
     def _resolve_cosmic_mutation_page(
         self, page: Any, variant: VariantRecord
@@ -710,15 +751,16 @@ class BrowserReviewService:
         return evidence
 
     def _wait_for_cosmic_result(self, page: Any) -> None:
-        overview = page.get_by_role("heading", name="Overview", exact=True)
-        overview.wait_for(state="visible", timeout=self.navigation_timeout_ms)
-        samples = page.get_by_role("heading", name="Samples", exact=True)
-        samples.wait_for(state="visible", timeout=self.navigation_timeout_ms)
-        rows = self._cosmic_section(page, "Samples").locator("tbody tr")
         attempts = max(1, self.navigation_timeout_ms // 500)
         for _ in range(attempts):
-            if rows.count() > 0:
-                return
+            try:
+                self._cosmic_section(page, "Overview")
+                self._cosmic_section(page, "Tissue distribution")
+                rows = self._cosmic_section(page, "Samples").locator("tbody tr")
+                if rows.count() > 0:
+                    return
+            except RuntimeError:
+                pass
             page.wait_for_timeout(500)
         raise TimeoutError("COSMIC sample table did not finish loading.")
 
@@ -1156,7 +1198,158 @@ class BrowserReviewService:
                             f"MTBP: safety buffer {delay_ms / 1_000:.1f}s before next variant"
                         )
                     self._interruptible_sleep(delay_ms / 1_000)
+        pending = [
+            (variant, results[self.variant_key(variant)])
+            for variant in variants
+            if self.variant_key(variant) in results
+            and results[self.variant_key(variant)].status == "timeout"
+            and results[self.variant_key(variant)].raw.get("analysis_id")
+        ]
+        if pending:
+            if progress:
+                progress(
+                    f"MTBP: rechecking {len(pending)} late report(s) without resubmitting"
+                )
+            try:
+                recovered = self._recover_mtbp_timeouts(
+                    pending,
+                    artifact_directory,
+                    progress=progress,
+                )
+            except Exception as exc:
+                recovered = {}
+                if progress:
+                    progress(
+                        "MTBP: late-report recovery could not run; keeping the "
+                        f"retryable timeout ({exc})"
+                    )
+            for evidence in recovered.values():
+                evidence.url = ""
+                for record in evidence.raw.get("screenshots", []):
+                    if isinstance(record, dict):
+                        record["url"] = ""
+            results.update(recovered)
         return results
+
+    def _recover_mtbp_timeouts(
+        self,
+        pending: list[tuple[VariantRecord, DatabaseEvidence]],
+        artifact_directory: Path,
+        *,
+        progress: Callable[[str], None] | None,
+    ) -> dict[str, DatabaseEvidence]:
+        """Capture reports that appeared after their deadline without a new submission."""
+        sync_browser, browser_error, browser_timeout = self._browser_api()
+        recovered: dict[str, DatabaseEvidence] = {}
+        with sync_browser() as runtime:
+            context = runtime.chromium.launch_persistent_context(
+                str(self.profile_directory("MTBP")),
+                channel=self.channel,
+                headless=False,
+                accept_downloads=True,
+                viewport={"width": 1440, "height": 1000},
+                background=self.browser_background,
+            )
+            page = context.pages[0] if context.pages else context.new_page()
+            try:
+                self._goto_with_retries(page, self.login_url("MTBP"))
+                if not self._session_authenticated("MTBP", page):
+                    self._try_saved_login("MTBP", page)
+                if not self._session_authenticated("MTBP", page):
+                    return recovered
+                for variant, timed_out in pending:
+                    self._check_cancelled()
+                    analysis_id = str(timed_out.raw.get("analysis_id") or "")
+                    self._goto_with_retries(page, MTBP_REPORTS_URL, attempts=2)
+                    report_link = page.get_by_role(
+                        "link", name=analysis_id, exact=True
+                    )
+                    if report_link.count() != 1:
+                        if progress:
+                            progress(f"MTBP: late report is still pending ({analysis_id})")
+                        continue
+                    report_link.click()
+                    page.wait_for_url(
+                        re.compile(r"https://mtbp\.org/patients/.+/report/\d+/?"),
+                        timeout=self.navigation_timeout_ms,
+                    )
+                    body_text = page.locator("body").inner_text(
+                        timeout=self.navigation_timeout_ms
+                    )
+                    version_tooltip = page.locator("[data-tooltip-html*='VEP:']")
+                    if version_tooltip.count():
+                        version_html = (
+                            version_tooltip.first.get_attribute("data-tooltip-html")
+                            or ""
+                        )
+                        body_text += "\n" + re.sub(
+                            r"<br\s*/?>", "\n", version_html, flags=re.IGNORECASE
+                        )
+                    evidence = parse_mtbp_report(
+                        body_text,
+                        self._extract_mtbp_rows(page),
+                        [variant],
+                        page.url,
+                        cancer_type=self.mtbp_cancer_type,
+                    )[self.variant_key(variant)]
+                    evidence.accession = timed_out.accession
+                    screenshot_path = None
+                    if evidence.status == "found":
+                        try:
+                            screenshot_path = self._capture_mtbp_variant_screenshot(
+                                page, variant, artifact_directory
+                            )
+                        except IncompleteCaptureError as exc:
+                            evidence.status = "partial_capture"
+                            evidence.summary = (
+                                f"{evidence.summary} MTBP screenshot requires retry."
+                            ).strip()
+                            evidence.raw["capture_validation"] = {
+                                "valid": False,
+                                "reason": exc.validation.reason,
+                            }
+                    screenshots = (
+                        [
+                            {
+                                "label": "Alteration-centric functional evidence",
+                                "path": str(screenshot_path),
+                                "url": "",
+                            }
+                        ]
+                        if screenshot_path is not None
+                        else []
+                    )
+                    evidence.raw.update(
+                        {
+                            "analysis_id": analysis_id,
+                            "submitted_query": timed_out.raw.get(
+                                "submitted_query", timed_out.accession
+                            ),
+                            "query_attempts": timed_out.raw.get("query_attempts", []),
+                            "captured_at": datetime.now(timezone.utc).isoformat(),
+                            "screenshot": str(screenshot_path or ""),
+                            "screenshots": screenshots,
+                            "visible_text_preview": body_text[:12_000],
+                            "late_report_recovered": True,
+                        }
+                    )
+                    self._write_audit(
+                        evidence,
+                        self._screenshot_path(
+                            artifact_directory, "MTBP", variant
+                        ).with_suffix(".audit.json"),
+                    )
+                    recovered[self.variant_key(variant)] = evidence
+                    if progress:
+                        progress(f"MTBP: recovered late report ({analysis_id})")
+            except browser_timeout:
+                return recovered
+            finally:
+                try:
+                    context.close()
+                except browser_error:
+                    pass
+        return recovered
 
     def _search_mtbp_batch(
         self,
@@ -1464,14 +1657,26 @@ class BrowserReviewService:
                 key = self.variant_key(variant)
                 if key in results:
                     continue
-                results[key] = DatabaseEvidence(
+                evidence = DatabaseEvidence(
                     "MTBP",
                     "timeout",
                     "MTBP did not produce a report before the configured "
                     f"{self.analysis_timeout_ms // 60_000}-minute timeout.",
                     accession=query,
                     url=current_url,
+                    raw={
+                        "analysis_id": analysis_id,
+                        "submitted_query": query,
+                        "query_attempts": query_attempts.get(key, [query]),
+                    },
                 )
+                self._write_audit(
+                    evidence,
+                    self._screenshot_path(
+                        artifact_directory, "MTBP", variant
+                    ).with_suffix(".audit.json"),
+                )
+                results[key] = evidence
         except (browser_timeout, TimeoutError) as exc:
             current_url = context.pages[0].url if context and context.pages else self.login_url("MTBP")
             for variant, query in query_pairs:
@@ -2059,7 +2264,8 @@ class BrowserReviewService:
             page,
             base_path,
             lambda: self._capture_franklin_classification_overview(
-                page, panel, categories.nth(0), base_path
+                page, panel, categories.nth(0), base_path,
+                gene_symbol=variant.symbol,
             ),
         )
         screenshots = [
@@ -2134,7 +2340,8 @@ class BrowserReviewService:
             page,
             base_path,
             lambda: self._capture_franklin_classification_overview(
-                page, panel, categories.nth(0), base_path
+                page, panel, categories.nth(0), base_path,
+                gene_symbol=variant.symbol,
             ),
         )
         screenshots = [
@@ -2174,26 +2381,70 @@ class BrowserReviewService:
         panel: Any,
         first_category: Any,
         screenshot_path: Path,
+        *,
+        gene_symbol: str = "",
     ) -> None:
-        """Crop the classification summary before the first evidence category."""
+        """Capture the gene heading and summary before the first evidence category."""
         panel.evaluate("el => { el.scrollTop = 0; }")
+        page.evaluate("window.scrollTo(0, 0)")
         page.wait_for_timeout(200)
         panel_box = panel.bounding_box()
         category_box = first_category.bounding_box()
         if panel_box is None or category_box is None:
             raise RuntimeError("Franklin classification overview was not visible.")
-        height = float(category_box["y"]) - float(panel_box["y"])
+
+        panel_x = float(panel_box["x"])
+        panel_y = float(panel_box["y"])
+        panel_right = panel_x + float(panel_box["width"])
+        header_box = self._franklin_gene_header_box(
+            page, gene_symbol, panel_y, float(category_box["y"])
+        )
+        if header_box is None:
+            clip_x = max(0, panel_x)
+            clip_y = max(0, panel_y - 220)
+            clip_width = float(panel_box["width"])
+        else:
+            header_x = float(header_box["x"])
+            header_right = header_x + float(header_box["width"])
+            clip_x = max(0, min(panel_x, header_x))
+            clip_y = max(0, float(header_box["y"]) - 16)
+            clip_width = max(panel_right, header_right) - clip_x
+        height = float(category_box["y"]) - clip_y
         if height <= 1:
             raise RuntimeError("Franklin classification overview could not be cropped.")
         page.screenshot(
             path=str(screenshot_path),
             clip={
-                "x": max(0, float(panel_box["x"])),
-                "y": max(0, float(panel_box["y"])),
-                "width": float(panel_box["width"]),
+                "x": clip_x,
+                "y": clip_y,
+                "width": clip_width,
                 "height": height,
             },
         )
+
+    @staticmethod
+    def _franklin_gene_header_box(
+        page: Any,
+        gene_symbol: str,
+        panel_y: float,
+        category_y: float,
+    ) -> dict[str, float] | None:
+        if not gene_symbol:
+            return None
+        try:
+            matches = page.get_by_text(gene_symbol, exact=True)
+            candidates = []
+            for index in range(matches.count()):
+                box = matches.nth(index).bounding_box()
+                if box is None:
+                    continue
+                top = float(box["y"])
+                bottom = top + float(box["height"])
+                if top <= panel_y + 40 and bottom < category_y:
+                    candidates.append(box)
+            return max(candidates, key=lambda box: float(box["y"]), default=None)
+        except (AttributeError, TypeError):
+            return None
 
     def _capture_franklin_evidence_box(
         self,

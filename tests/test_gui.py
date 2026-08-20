@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 import re
 import time
@@ -10,8 +11,19 @@ from archer_processor.gui.app import (
     MainWindow,
     _completed_evidence_sources,
 )
-from archer_processor.reports import ExcelReportWriter
+from archer_processor.gui.status_model import (
+    CellState,
+    PatientStatusRow,
+    RunPhase,
+    RunActivity,
+    RunSnapshot,
+    StatusCell,
+)
+from archer_processor.gui.widgets.status_matrix import StatusMatrix
+from archer_processor.gui.widgets.run_status import RunStatusStrip
+from archer_processor.reports import ExcelReportWriter, PatientReportOutcome
 from archer_processor.services import DatabaseSearchService
+from archer_processor.services import AppSettings
 
 
 def test_database_tab_contains_current_sources(qt_app):
@@ -81,6 +93,37 @@ def test_artifact_settings_show_catalog_and_af_exception(qt_app):
     assert window._artifact_rules_from_table() == default_artifact_rules()
 
 
+def test_settings_are_grouped_into_four_operator_sections(qt_app):
+    window = MainWindow()
+
+    assert [group.title() for group in window.settings_groups] == [
+        "Local files",
+        "Browser access",
+        "Search pacing",
+        "Artifact rules",
+    ]
+    assert not hasattr(window, "history_edit")
+
+
+def test_variant_workspace_has_no_external_history_column(qt_app):
+    window = MainWindow()
+
+    headers = [
+        window.variant_table.horizontalHeaderItem(column).text()
+        for column in range(window.variant_table.columnCount())
+    ]
+
+    assert headers == [
+        "Sample",
+        "Gene",
+        "HGVSc",
+        "AF",
+        "Depth",
+        "Decision",
+        "Warnings",
+    ]
+
+
 def test_sidebar_navigation_switches_workspace_pages(qt_app):
     window = MainWindow()
 
@@ -94,6 +137,87 @@ def test_sidebar_navigation_switches_workspace_pages(qt_app):
     assert window.nav_buttons[2].isChecked()
     assert window.page_title.text() == "Evidence search"
     assert window.page_eyebrow.text().endswith("EVIDENCE")
+
+
+def test_navigation_uses_short_labels_without_numbered_workflow_copy(qt_app):
+    window = MainWindow()
+
+    labels = [button.text() for button in window.navigation.buttons]
+
+    assert labels == ["Import", "Variants", "Evidence", "Settings"]
+    assert all(not re.match(r"\d", label) for label in labels)
+
+
+def test_run_status_strip_exposes_interrupted_recovery_action(qt_app):
+    strip = RunStatusStrip()
+    strip.set_snapshot(
+        RunSnapshot(
+            phase=RunPhase.INTERRUPTED,
+            current_patient=7,
+            patient_total=28,
+            patient_id="SYNTHETIC07",
+        )
+    )
+
+    assert strip.phase_label.text() == "Interrupted · resume available"
+    assert "7 / 28" in strip.progress_label.text()
+    assert not strip.resume_button.isHidden()
+
+
+def test_status_matrix_renders_visible_text_for_every_state(qt_app):
+    matrix = StatusMatrix(["ClinVar", "Franklin"])
+    matrix.set_rows(
+        [
+            PatientStatusRow(
+                "SYNTHETIC01",
+                2,
+                {
+                    "ClinVar": StatusCell(CellState.COMPLETE, "Complete"),
+                    "Franklin": StatusCell(CellState.RETRY, "Retry"),
+                    "Report": StatusCell(CellState.SAVE_PENDING, "Save pending"),
+                },
+            )
+        ]
+    )
+
+    assert matrix.item(0, 2).text() == "Complete"
+    assert matrix.item(0, 3).text() == "Retry"
+    assert matrix.item(0, 4).text() == "Save pending"
+
+
+def test_activity_updates_current_provider_and_timeline(qt_app):
+    window = MainWindow()
+
+    window._activity_received(
+        RunActivity(
+            datetime.now(),
+            "SYNTHETIC02",
+            "Franklin",
+            "TP53 c.524G>A",
+            "Capturing",
+            "Population frequencies",
+        )
+    )
+
+    assert window.current_activity.provider_value.text() == "Franklin"
+    assert window.current_activity.patient_value.text() == "SYNTHETIC02"
+    assert window.activity_timeline.rowCount() == 1
+
+
+def test_pending_report_exposes_retry_action(qt_app, tmp_path):
+    window = MainWindow()
+    window.report_outcomes = {
+        "SYNTHETIC02": PatientReportOutcome(
+            "SYNTHETIC02",
+            tmp_path / "SYNTHETIC02_VPM_Tolkning.xlsx",
+            "pending",
+            "locked",
+        )
+    }
+
+    window._refresh_operations_cockpit()
+
+    assert not window.retry_report_saves_button.isHidden()
 
 
 def test_review_filters_and_search_progress_are_visible(qt_app, tmp_path):
@@ -124,16 +248,48 @@ def test_review_filters_and_search_progress_are_visible(qt_app, tmp_path):
     assert window.run_progress.detail.text() == "Patient 3 is running"
 
 
+def test_variant_workspace_prioritises_toolbar_and_table(qt_app, tmp_path):
+    window = MainWindow()
+    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+    window.result = VariantProcessor().process(
+        fixture, "2026-08-12", tmp_path / "review.xlsx"
+    )
+    for index, variant in enumerate(window.result.variants):
+        variant.decision = "included" if index < 3 else "excluded"
+    window._refresh_metrics()
+    window._refresh_variant_table()
+
+    assert window.variant_toolbar.objectName() == "VariantToolbar"
+    assert window.variant_counters.text() == "5 total · 3 included · 2 excluded"
+    assert window.variant_table.minimumHeight() >= 420
+    assert not hasattr(window, "total_card")
+
+
+def test_filtered_empty_state_explains_how_to_restore_rows(qt_app, tmp_path):
+    window = MainWindow()
+    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+    window.result = VariantProcessor().process(
+        fixture, "2026-08-12", tmp_path / "review.xlsx"
+    )
+    window._refresh_variant_table()
+
+    window.review_filter_edit.setText("NO_SUCH_VARIANT")
+
+    assert not window.variant_empty_state.isHidden()
+    assert "Clear filters" in window.variant_empty_state.text()
+
+
 def test_variant_table_uses_distinct_strong_and_weak_green(qt_app, tmp_path):
     window = MainWindow()
     fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
     window.result = VariantProcessor().process(
         fixture, "2026-08-11", tmp_path / "review.xlsx"
     )
-    window.result.variants[0].history_matches = [{"Tier I": 6}]
+    window.result.variants[0].raw["Tier I"] = 6
+    window.result.variants[0].raw["Tier II"] = 0
     window.result.variants[0].artifact_status = ""
     window.result.variants[0].matched_rules = []
-    window.result.variants[1].history_matches = [{"Germ": 11}]
+    window.result.variants[1].raw["Germ"] = 11
     window.result.variants[1].af = 0.3499
     window.result.variants[1].artifact_status = ""
     window.result.variants[1].matched_rules = []
@@ -206,6 +362,8 @@ def test_processed_workbook_can_resume_into_review_pages(qt_app, tmp_path, monke
         lambda *args: messages.append(args),
     )
     window = MainWindow()
+    saved = []
+    monkeypatch.setattr(AppSettings, "save", lambda self: saved.append(True))
 
     window._load_processed_workbook(output)
 
@@ -224,7 +382,39 @@ def test_processed_workbook_can_resume_into_review_pages(qt_app, tmp_path, monke
     assert window.resume_edit.text() == str(output)
     assert "Restored 5 variants" in window.resume_status.text()
     assert not window.included_only_check.isChecked()
+    assert window.settings.last_processed_workbook == str(output)
+    assert saved == [True]
     assert messages[0][1] == "Analysis restored"
+
+
+def test_startup_offers_recent_analysis_without_loading_or_searching(
+    qt_app, tmp_path, monkeypatch
+):
+    workbook = tmp_path / "review.xlsx"
+    workbook.write_bytes(b"synthetic")
+    monkeypatch.setattr(
+        "archer_processor.gui.app.AppSettings.load",
+        lambda: AppSettings(last_processed_workbook=str(workbook)),
+    )
+    loads = []
+    searches = []
+    monkeypatch.setattr(
+        MainWindow,
+        "_load_processed_workbook",
+        lambda *args: loads.append(args),
+    )
+    monkeypatch.setattr(
+        DatabaseSearchService,
+        "search_variant",
+        lambda *args, **kwargs: searches.append((args, kwargs)),
+    )
+
+    window = MainWindow()
+
+    assert not window.recent_analysis_panel.isHidden()
+    assert window.recent_analysis_name.text() == "review.xlsx"
+    assert loads == []
+    assert searches == []
 
 
 def test_new_search_results_merge_with_restored_evidence(qt_app, tmp_path, monkeypatch):
@@ -270,7 +460,7 @@ def test_application_icon_is_packaged_and_loaded(qt_app):
 
     assert window.app_icon_path.exists()
     assert window.app_icon_path.name == "vpm-tolkning-icon.png"
-    assert window.windowTitle() == "VPM Tolkning"
+    assert window.windowTitle() == "Myolid Tolkning"
     assert not window.windowIcon().isNull()
     with Image.open(window.app_icon_path) as icon:
         corners = [

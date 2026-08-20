@@ -11,7 +11,6 @@ from archer_processor.services import credentials
 
 @dataclass(slots=True)
 class AppSettings:
-    history_workbook: str = r"C:\Users\molpa\Desktop\HTS\Resultat_VPM\2026_VPM_Variantfunn.xlsx"
     default_output_dir: str = str(Path.home() / "Desktop")
     clinvar_api_key: str = ""
     cosmic_email: str = ""
@@ -32,6 +31,8 @@ class AppSettings:
     search_included_only: bool = True
     gnomad_dataset: str = "gnomad_r2_1"
     mtbp_cancer_type: str = "Blood"
+    last_processed_workbook: str = ""
+    offer_recent_analysis: bool = True
     artifact_catalog_version: int = 2
     artifact_rules: list[dict[str, str]] = field(default_factory=default_artifact_rules)
     enabled_databases: list[str] = field(

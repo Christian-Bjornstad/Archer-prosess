@@ -6,7 +6,7 @@
 
 ---
 
-**Project:** VPM Tolkning
+**Project:** Myolid Tolkning
 **Generated:** 2026-08-04 19:38:19
 **Category:** Analytics Dashboard
 **Design Dials:** Variance 6/10 (Balanced / Modern) | Motion 2/10 (Subtle) | Density 8/10 (Dense / Dashboard)
