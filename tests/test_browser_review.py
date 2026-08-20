@@ -201,6 +201,109 @@ def test_cosmic_search_resolves_canonical_internal_mutation_id(tmp_path):
     assert _cosmic_source_url(page.url, variant.cosmic_id) == grch37
 
 
+def test_cosmic_lookup_retries_transient_render_failure(tmp_path, monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path, navigation_timeout_ms=100)
+    attempts = []
+
+    class Page:
+        url = "https://cancer.sanger.ac.uk/cosmic/search?q=COSM10648"
+
+        def goto(self, url, **kwargs):
+            self.url = url
+            attempts.append(url)
+
+        def wait_for_timeout(self, milliseconds):
+            pass
+
+    page = Page()
+    waits = 0
+
+    monkeypatch.setattr(service, "_resolve_cosmic_mutation_page", lambda page, variant: None)
+
+    def wait_for_result(page):
+        nonlocal waits
+        waits += 1
+        if waits == 1:
+            raise TimeoutError("transient render")
+
+    monkeypatch.setattr(service, "_wait_for_cosmic_result", wait_for_result)
+    monkeypatch.setattr(
+        service,
+        "_capture_cosmic_result",
+        lambda variant, page, directory: DatabaseEvidence("COSMIC", "found", "ok"),
+    )
+
+    evidence = service._lookup_cosmic_with_retry(
+        page,
+        variant,
+        service.query_url("COSMIC", variant),
+        tmp_path / "cosmic",
+        progress=None,
+    )
+
+    assert evidence.status == "found"
+    assert len(attempts) == 2
+
+
+def test_cosmic_lookup_does_not_retry_user_cancellation(tmp_path, monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+    gotos = []
+
+    class Page:
+        url = ""
+
+        def goto(self, url, **kwargs):
+            gotos.append(url)
+
+        def wait_for_timeout(self, milliseconds):
+            pass
+
+    monkeypatch.setattr(
+        service,
+        "_resolve_cosmic_mutation_page",
+        lambda page, variant: (_ for _ in ()).throw(BrowserReviewCancelled()),
+    )
+
+    with pytest.raises(BrowserReviewCancelled):
+        service._lookup_cosmic_with_retry(
+            Page(),
+            variant,
+            service.query_url("COSMIC", variant),
+            tmp_path,
+            progress=None,
+        )
+
+    assert len(gotos) == 1
+
+
+def test_cosmic_ready_check_uses_sections_instead_of_duplicate_headings(
+    tmp_path, monkeypatch
+):
+    service = BrowserReviewService(profile_root=tmp_path, navigation_timeout_ms=100)
+
+    class Rows:
+        def count(self):
+            return 1
+
+    class Section:
+        def locator(self, selector):
+            assert selector == "tbody tr"
+            return Rows()
+
+    monkeypatch.setattr(service, "_cosmic_section", lambda page, heading: Section())
+
+    class Page:
+        def get_by_role(self, *args, **kwargs):
+            raise AssertionError("duplicate responsive headings must not be awaited")
+
+        def wait_for_timeout(self, milliseconds):
+            pass
+
+    service._wait_for_cosmic_result(Page())
+
+
 def test_oncokb_rejects_cookie_banner_before_capture(tmp_path):
     service = BrowserReviewService(profile_root=tmp_path)
 
@@ -1609,6 +1712,200 @@ def test_mtbp_queue_recovers_report_from_reports_list(tmp_path):
 
     assert page.url.endswith("/report/2/")
     assert page.gotos == ["https://mtbp.org/patients/"]
+
+
+def test_mtbp_rechecks_late_reports_without_resubmitting(tmp_path, monkeypatch):
+    variants = ArcherTsvReader().read(FIXTURE)[3:5]
+    service = BrowserReviewService(
+        profile_root=tmp_path,
+        request_delay_ms=0,
+        request_delay_max_ms=0,
+    )
+    calls = []
+
+    def run_one(batch, artifact_directory, *, progress):
+        variant = batch[0]
+        calls.append(("submit", variant.hgvsc))
+        status = "timeout" if len(calls) == 1 else "found"
+        return {
+            service.variant_key(variant): DatabaseEvidence(
+                "MTBP",
+                status,
+                status,
+                accession=variant.hgvsc,
+                raw={"analysis_id": "ARCHER-late"} if status == "timeout" else {},
+            )
+        }
+
+    def recover(pending, artifact_directory, *, progress):
+        calls.append(("recover", pending[0][0].hgvsc))
+        variant = pending[0][0]
+        return {
+            service.variant_key(variant): DatabaseEvidence("MTBP", "found", "late")
+        }
+
+    monkeypatch.setattr(service, "_search_mtbp_batch", run_one)
+    monkeypatch.setattr(service, "_recover_mtbp_timeouts", recover)
+
+    results = service._search_mtbp(variants, tmp_path / "mtbp", progress=None)
+
+    assert calls == [
+        ("submit", variants[0].hgvsc),
+        ("submit", variants[1].hgvsc),
+        ("recover", variants[0].hgvsc),
+    ]
+    assert results[service.variant_key(variants[0])].status == "found"
+
+
+def test_mtbp_late_recovery_failure_keeps_original_timeout(tmp_path, monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(
+        profile_root=tmp_path,
+        request_delay_ms=0,
+        request_delay_max_ms=0,
+    )
+    timeout = DatabaseEvidence(
+        "MTBP", "timeout", "late", raw={"analysis_id": "ARCHER-late"}
+    )
+    monkeypatch.setattr(
+        service,
+        "_search_mtbp_batch",
+        lambda batch, directory, *, progress: {
+            service.variant_key(variant): timeout
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "_recover_mtbp_timeouts",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("Edge unavailable")),
+    )
+
+    results = service._search_mtbp([variant], tmp_path / "mtbp", progress=None)
+
+    assert results[service.variant_key(variant)] is timeout
+
+
+def test_mtbp_late_recovery_opens_existing_report_without_form_submission(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path, navigation_timeout_ms=100)
+    analysis_id = "ARCHER-late"
+
+    class Locator:
+        def __init__(self, text=""):
+            self.text = text
+
+        def inner_text(self, **kwargs):
+            return self.text
+
+        def count(self):
+            return 0
+
+    class Link:
+        def __init__(self, page):
+            self.page = page
+
+        def count(self):
+            return 1
+
+        def click(self):
+            self.page.url = "https://mtbp.org/patients/1/sample/1/report/2/"
+
+    class Page:
+        def __init__(self):
+            self.url = "https://mtbp.org/patients/"
+
+        def get_by_role(self, role, *, name, exact):
+            assert (role, name, exact) == ("link", analysis_id, True)
+            return Link(self)
+
+        def wait_for_url(self, pattern, *, timeout):
+            assert pattern.fullmatch(self.url)
+
+        def locator(self, selector):
+            if selector == "body":
+                return Locator(
+                    "Pipeline version: 7.6.4\nHuman genome: GRCh37/hg19\n"
+                    "Cancer type: Blood"
+                )
+            if selector == "[data-tooltip-html*='VEP:']":
+                return Locator()
+            raise AssertionError(f"unexpected selector: {selector}")
+
+    page = Page()
+    visited = []
+
+    class Context:
+        pages = [page]
+
+        def close(self):
+            pass
+
+    class Runtime:
+        chromium = None
+
+        def __init__(self):
+            self.chromium = self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def launch_persistent_context(self, *args, **kwargs):
+            return Context()
+
+    monkeypatch.setattr(
+        service, "_browser_api", lambda: (lambda: Runtime(), Exception, TimeoutError)
+    )
+    monkeypatch.setattr(
+        service,
+        "_goto_with_retries",
+        lambda page, url, **kwargs: (
+            visited.append(url),
+            setattr(page, "url", url),
+        )[-1],
+    )
+    monkeypatch.setattr(service, "_session_authenticated", lambda database, page: True)
+    monkeypatch.setattr(
+        service,
+        "_extract_mtbp_rows",
+        lambda page: [
+            {
+                "section": "Putative functionally relevant variants: 1",
+                "gene": "TP53",
+                "gene_info": "TS SF",
+                "alteration": "Mutation\nmissense\np.Arg175His\nexon 5/11",
+                "identity_text": "p.Arg175His ENST00000269305.4:c.524G>A",
+                "functional_evidence": "Evidence A: Pathogenic",
+                "biomarkers": "Not contemplated",
+                "source_links": [],
+            }
+        ],
+    )
+    screenshot = tmp_path / "mtbp" / "capture.png"
+    monkeypatch.setattr(
+        service,
+        "_capture_mtbp_variant_screenshot",
+        lambda page, variant, directory: screenshot,
+    )
+    timeout = DatabaseEvidence(
+        "MTBP",
+        "timeout",
+        "late",
+        accession=variant.hgvsc,
+        raw={"analysis_id": analysis_id, "query_attempts": [variant.hgvsc]},
+    )
+
+    recovered = service._recover_mtbp_timeouts(
+        [(variant, timeout)], tmp_path / "mtbp", progress=None
+    )
+
+    assert recovered[service.variant_key(variant)].status == "found"
+    assert recovered[service.variant_key(variant)].raw["late_report_recovered"] is True
+    assert visited[0] == service.login_url("MTBP")
 
 
 class _FakeMtbpDialog:

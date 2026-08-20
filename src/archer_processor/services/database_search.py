@@ -223,8 +223,14 @@ class DatabaseSearchService:
             return self._clinvar_cache[cache_key]
         try:
             candidate_ids: list[str] = []
+            identifier_candidate_ids: list[str] = []
             query_attempts: list[str] = []
-            for candidate in self._clinvar_queries(variant):
+            queries = self._clinvar_queries(variant)
+            coordinate_query = next(
+                (candidate for candidate in queries if "[chrpos37]" in candidate),
+                "",
+            )
+            for candidate in queries:
                 query_attempts.append(candidate)
                 params = {
                     "db": "clinvar",
@@ -243,6 +249,12 @@ class DatabaseSearchService:
                 for node in root.findall(".//Id"):
                     if node.text and node.text not in candidate_ids:
                         candidate_ids.append(node.text)
+                    if (
+                        node.text
+                        and candidate != coordinate_query
+                        and node.text not in identifier_candidate_ids
+                    ):
+                        identifier_candidate_ids.append(node.text)
             if not candidate_ids:
                 evidence = DatabaseEvidence(
                     database="ClinVar",
@@ -281,13 +293,22 @@ class DatabaseSearchService:
                 )
                 self._clinvar_cache[cache_key] = evidence
                 return evidence
+            status = "identity_mismatch" if identifier_candidate_ids else "not_found"
+            summary = (
+                "ClinVar identifier candidates were found, but none matched the exact "
+                "GRCh37 locus and alleles."
+                if identifier_candidate_ids
+                else "No ClinVar record matched the exact GRCh37 allele; coordinate-only "
+                "candidates were unrelated variants."
+            )
             evidence = DatabaseEvidence(
                 database="ClinVar",
-                status="identity_mismatch",
-                summary="ClinVar candidates were found, but none matched the exact GRCh37 locus and alleles.",
+                status=status,
+                summary=summary,
                 url=self._clinvar_search_url(query),
                 raw={
                     "candidate_ids": candidate_ids,
+                    "identifier_candidate_ids": identifier_candidate_ids,
                     "query_attempts": query_attempts,
                     "expected_location": {
                         "assembly": expected.assembly,
@@ -431,6 +452,12 @@ class DatabaseSearchService:
 
     def _clinvar_queries(self, variant: VariantRecord) -> list[str]:
         queries = [f"{variant.hgvsc}[VARNAME]"] if variant.hgvsc else []
+        queries.extend(
+            identifier
+            for identifier in re.findall(
+                r"\brs\d+\b", variant.dbsnp_id or "", flags=re.IGNORECASE
+            )
+        )
         identity = genomic_identity(variant)
         if identity is not None:
             queries.append(

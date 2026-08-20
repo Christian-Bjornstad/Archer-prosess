@@ -155,6 +155,7 @@ def test_clinvar_automatic_queries_are_exact_and_grch37_scoped():
 
     assert DatabaseSearchService()._clinvar_queries(variant) == [
         "NM_000546.6:c.524G>A[VARNAME]",
+        "rs28934578",
         "17[chr] AND 7578406[chrpos37]",
     ]
 
@@ -188,6 +189,50 @@ def test_clinvar_fails_closed_when_candidates_do_not_match_grch37(monkeypatch):
 
     assert evidence.status == "identity_mismatch"
     assert evidence.raw["candidate_ids"] == ["99"]
+
+
+def test_clinvar_treats_coordinate_only_candidates_as_not_found(monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    variant.dbsnp_id = ""
+    service = DatabaseSearchService(timeout=1)
+
+    def xml_response(text):
+        response = FakeResponse({})
+        response.content = text.encode()
+        return response
+
+    search_calls = 0
+
+    def fake_get(url, params):
+        nonlocal search_calls
+        if "esearch" in url:
+            search_calls += 1
+            ids = "" if search_calls == 1 else "<Id>99</Id>"
+            return xml_response(f"<eSearchResult><IdList>{ids}</IdList></eSearchResult>")
+        return xml_response(
+            '<VariationArchive Accession="VCV99" Version="1">'
+            '<SequenceLocation Assembly="GRCh37" Chr="17" positionVCF="7578406" '
+            'referenceAlleleVCF="G" alternateAlleleVCF="T"/></VariationArchive>'
+        )
+
+    monkeypatch.setattr(service, "_eutils_get", fake_get)
+
+    evidence = service._search_clinvar(variant)
+
+    assert evidence.status == "not_found"
+    assert "exact GRCh37 allele" in evidence.summary
+
+
+def test_clinvar_queries_include_archer_dbsnp_identifier():
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    variant.dbsnp_id = "rs28934578; rs123"
+
+    assert DatabaseSearchService()._clinvar_queries(variant) == [
+        "NM_000546.6:c.524G>A[VARNAME]",
+        "rs28934578",
+        "rs123",
+        "17[chr] AND 7578406[chrpos37]",
+    ]
 
 
 def test_gnomad_formatter_reports_population_frequency_context():
