@@ -58,5 +58,5 @@ Search and recovery behavior:
   evidence provider.
 - Completed source results are restored from one indexed audit-directory scan.
 - Errors, timeouts, identity mismatches, partial captures, and unverified legacy ClinVar results remain resumable.
-- Patient workbooks are written beside the processed workbook as each patient completes; an Excel file lock is nonfatal and is retried at reconciliation.
-- Priority colouring uses artifact precedence, strong green for `Tier I + Tier II > 5`, and strong/weak green for `Germ > 10` at AF `>=35%` / `<35%` respectively.
+- Patient workbooks are written beside the processed workbook during final reconciliation; an Excel file lock is nonfatal and can be retried.
+- Priority colouring uses artifact precedence and strong/weak green only for `Germ > 10` at AF `>=35%` / `<35%` respectively. Tier I and Tier II do not affect row colour.

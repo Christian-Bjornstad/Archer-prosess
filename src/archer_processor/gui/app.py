@@ -330,7 +330,6 @@ class DatabaseWorker(QObject):
                 _merge_evidence_results(all_evidence, patient_evidence)
                 if coordinator is not None:
                     coordinator.merge(patient_evidence)
-                    self.report_outcome.emit(coordinator.write_patient(patient_id))
                 self.status.emit(f"{prefix}: complete")
                 self.progress.emit(
                     patient_index,
@@ -538,7 +537,6 @@ class BrowserReviewWorker(QObject):
                 _merge_evidence_results(all_evidence, patient_evidence)
                 if coordinator is not None:
                     coordinator.merge(patient_evidence)
-                    self.report_outcome.emit(coordinator.write_patient(patient_id))
                 self.status.emit(f"{prefix}: browser sources complete")
                 self.progress.emit(patient_index, len(patients), f"Completed {patient_id}")
                 if patient_index < len(patients):
@@ -2298,7 +2296,7 @@ class MainWindow(QMainWindow):
                 highlight = variant_highlight(variant)
                 if highlight == "artifact":
                     item.setBackground(QColor(Palette.pale_orange))
-                elif highlight in {"tier", "germline"}:
+                elif highlight == "germline":
                     item.setBackground(QColor(Palette.strong_green))
                 elif highlight == "germline_low_af":
                     item.setBackground(QColor(Palette.pale_green))
