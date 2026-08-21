@@ -499,7 +499,6 @@ class ExcelReportWriter:
     def _style_variant_row(self, ws, row_index: int, variant: VariantRecord) -> None:
         fill = {
             "artifact": self.colors["orange"],
-            "tier": self.colors["strong_green"],
             "germline": self.colors["strong_green"],
             "germline_low_af": self.colors["weak_green"],
         }.get(variant_highlight(variant))

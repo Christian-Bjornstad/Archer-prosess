@@ -279,14 +279,14 @@ def test_filtered_empty_state_explains_how_to_restore_rows(qt_app, tmp_path):
     assert "Clear filters" in window.variant_empty_state.text()
 
 
-def test_variant_table_uses_distinct_strong_and_weak_green(qt_app, tmp_path):
+def test_variant_table_uses_distinct_strong_and_weak_germline_green(qt_app, tmp_path):
     window = MainWindow()
     fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
     window.result = VariantProcessor().process(
         fixture, "2026-08-11", tmp_path / "review.xlsx"
     )
-    window.result.variants[0].raw["Tier I"] = 6
-    window.result.variants[0].raw["Tier II"] = 0
+    window.result.variants[0].raw["Germ"] = 11
+    window.result.variants[0].af = 0.35
     window.result.variants[0].artifact_status = ""
     window.result.variants[0].matched_rules = []
     window.result.variants[1].raw["Germ"] = 11

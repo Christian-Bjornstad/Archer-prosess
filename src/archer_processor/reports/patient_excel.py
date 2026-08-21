@@ -284,7 +284,6 @@ class PatientExcelReportWriter:
                     )
             fill_color = {
                 "artifact": self.colors["orange"],
-                "tier": self.colors["strong_green"],
                 "germline": self.colors["strong_green"],
                 "germline_low_af": self.colors["weak_green"],
             }.get(variant_highlight(variant))

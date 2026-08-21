@@ -13,12 +13,12 @@ from archer_processor.services import DatabaseSearchService
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
 
 
-def test_patient_overview_uses_strong_and_weak_priority_green(tmp_path):
+def test_patient_overview_uses_strong_and_weak_germline_green(tmp_path):
     result = VariantProcessor().process(
         FIXTURE, "2026-08-11", tmp_path / "review.xlsx"
     )
     base = result.variants[3]
-    strong = replace(base, raw={"Tier I": 6, "Tier II": 0}, af=0.20)
+    strong = replace(base, raw={"Germ": 11}, af=0.35)
     weak = replace(
         base,
         source_row=base.source_row + 100,
@@ -46,7 +46,7 @@ def test_patient_data_sheet_includes_artifacts_without_skip_column(tmp_path):
         FIXTURE, "2026-08-11", tmp_path / "review.xlsx"
     )
     base = result.variants[3]
-    strong = replace(base, raw={**base.raw, "Tier I": 6, "Tier II": 0})
+    strong = replace(base, raw={**base.raw, "Germ": 11}, af=0.35)
     artifact_raw = {
         **base.raw,
         "HGVSc": "NM_000546.6:c.525dup",

@@ -8,8 +8,6 @@ from archer_processor.core.models import VariantRecord
 def variant_highlight(variant: VariantRecord) -> str:
     if _is_artifact(variant):
         return "artifact"
-    if _variant_sum(variant, "Tier I", "Tier II") > 5:
-        return "tier"
     if _variant_sum(variant, "Germ") > 10 and variant.af is not None:
         return "germline" if variant.af >= 0.35 else "germline_low_af"
     return ""

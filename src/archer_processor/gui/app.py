@@ -2296,7 +2296,7 @@ class MainWindow(QMainWindow):
                 highlight = variant_highlight(variant)
                 if highlight == "artifact":
                     item.setBackground(QColor(Palette.pale_orange))
-                elif highlight in {"tier", "germline"}:
+                elif highlight == "germline":
                     item.setBackground(QColor(Palette.strong_green))
                 elif highlight == "germline_low_af":
                     item.setBackground(QColor(Palette.pale_green))

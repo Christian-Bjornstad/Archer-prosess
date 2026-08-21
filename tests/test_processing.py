@@ -243,7 +243,7 @@ def test_excel_export_keeps_row_coloring_on_raw_sheets(tmp_path):
     assert by_sample["26OUM00001_VPM_S1_R1_001"] == "00FFC000"
     assert by_sample["26OUM00002_VPM_S2_R1_001"] == "00FFC000"
     assert by_sample["26OUM00005_VPM_S5_R1_001"] == "00FFC000"
-    assert removed_by_sample["26OUM00004_VPM_S4_R1_001"] == "00C6EFCE"
+    assert removed_by_sample["26OUM00004_VPM_S4_R1_001"] != "00C6EFCE"
     assert "26OUM00005_VPM_S5_R1_001" not in removed_by_sample
 
 
