@@ -191,10 +191,11 @@ captures remain pending when **Resume Incomplete Search** is used.
 
 Artifact colouring always takes precedence. Non-artifact rows are highlighted:
 
-- strong green when `Tier I + Tier II > 5`;
 - strong green when `Germ > 10` and AF is at least 35%;
 - weak green when `Germ > 10` and AF is below 35%;
 - uncoloured with a warning when `Germ > 10` but AF is missing.
+
+Tier I and Tier II counts do not affect row colouring.
 
 ## Requirements
 

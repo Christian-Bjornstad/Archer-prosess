@@ -279,14 +279,14 @@ def test_filtered_empty_state_explains_how_to_restore_rows(qt_app, tmp_path):
     assert "Clear filters" in window.variant_empty_state.text()
 
 
-def test_variant_table_uses_distinct_strong_and_weak_green(qt_app, tmp_path):
+def test_variant_table_uses_distinct_strong_and_weak_germline_green(qt_app, tmp_path):
     window = MainWindow()
     fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
     window.result = VariantProcessor().process(
         fixture, "2026-08-11", tmp_path / "review.xlsx"
     )
-    window.result.variants[0].raw["Tier I"] = 6
-    window.result.variants[0].raw["Tier II"] = 0
+    window.result.variants[0].raw["Germ"] = 11
+    window.result.variants[0].af = 0.35
     window.result.variants[0].artifact_status = ""
     window.result.variants[0].matched_rules = []
     window.result.variants[1].raw["Germ"] = 11
@@ -605,10 +605,27 @@ def test_database_worker_completes_all_sources_before_next_patient(
     qt_app, tmp_path, monkeypatch
 ):
     fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
-    variants = VariantProcessor().process(
+    result = VariantProcessor().process(
         fixture, "2026-08-01", tmp_path / "review.xlsx"
-    ).variants[:2]
+    )
+    variants = result.variants[:2]
     events = []
+    report_events = []
+
+    class FakeReportCoordinator:
+        def __init__(self, result, variants, evidence):
+            pass
+
+        def merge(self, incoming):
+            report_events.append("merge")
+
+        def write_patient(self, patient_id):
+            report_events.append(f"write:{patient_id}")
+            raise AssertionError("patient reports must not be written mid-search")
+
+        def reconcile(self):
+            report_events.append("reconcile")
+            return []
 
     class FakeApiService:
         def __init__(self, settings):
@@ -665,6 +682,9 @@ def test_database_worker_completes_all_sources_before_next_patient(
     monkeypatch.setattr(
         "archer_processor.gui.app.BrowserReviewService", FakeBrowserService
     )
+    monkeypatch.setattr(
+        "archer_processor.gui.app.PatientReportCoordinator", FakeReportCoordinator
+    )
     settings = MainWindow().settings
     settings.browser_delay_seconds = 10
     settings.browser_delay_max_seconds = 20
@@ -676,6 +696,8 @@ def test_database_worker_completes_all_sources_before_next_patient(
         ["COSMIC", "Franklin", "ClinVar", "MTBP"],
         tmp_path / "evidence",
         settings,
+        result=result,
+        report_variants=variants,
     )
 
     finished = []
@@ -703,6 +725,7 @@ def test_database_worker_completes_all_sources_before_next_patient(
     # No API query is delayed; the only pause is before patient 2's website phase.
     assert 10 <= sum(slept) <= 20
     assert all(delay <= 0.25 for delay in slept)
+    assert report_events == ["merge", "merge", "reconcile"]
 
 
 def test_stop_search_requests_safe_interruption_and_keeps_status(

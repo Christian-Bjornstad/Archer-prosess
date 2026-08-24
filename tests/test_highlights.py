@@ -23,9 +23,9 @@ def test_artifact_highlight_is_orange_category():
     assert variant_highlight(variant(history_matches=[{"Artf": 1}])) == ""
 
 
-def test_tier_highlight_requires_sum_above_five():
+def test_tier_counts_never_color_rows():
     assert variant_highlight(variant(raw={"Tier I": 2, "Tier II": 3})) == ""
-    assert variant_highlight(variant(raw={"Tier I": 3, "Tier II": 3})) == "tier"
+    assert variant_highlight(variant(raw={"Tier I": 3, "Tier II": 3})) == ""
 
 
 def test_history_workbook_values_do_not_color_rows():
