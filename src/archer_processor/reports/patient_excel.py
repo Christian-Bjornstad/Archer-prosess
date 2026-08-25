@@ -282,11 +282,20 @@ class PatientExcelReportWriter:
                     ws.cell(row, offset).alignment = Alignment(
                         vertical="top", wrap_text=True
                     )
+            # Light blue / white theme for the overview table; artifact rows
+            # keep their orange attention color.
             fill_color = {
                 "artifact": self.colors["orange"],
-                "germline": self.colors["strong_green"],
-                "germline_low_af": self.colors["weak_green"],
+                "tier": self.colors["pale_blue"],
+                "germline": self.colors["pale_blue"],
+                "germline_low_af": self.colors["white"],
             }.get(variant_highlight(variant))
+            if not fill_color:
+                fill_color = (
+                    self.colors["white"]
+                    if (row - 11) % 2
+                    else self.colors["pale_blue"]
+                )
             if fill_color:
                 for column in range(1, 10):
                     ws.cell(row, column).fill = PatternFill(
@@ -658,25 +667,55 @@ class PatientExcelReportWriter:
             return "Ikke søkt"
         item = next((candidate for candidate in items if candidate.status == "found"), items[0])
         if item.clinical_significance:
-            return item.clinical_significance.strip()
-        for pattern in (
-            r"classification=([^;|]+)",
-            r"oncogenic(?:ity)?=([^;|]+)",
-            r"functional_relevance=([^;|]+)",
-        ):
-            match = re.search(pattern, item.summary, flags=re.IGNORECASE)
+            label = item.clinical_significance.strip()
+        else:
+            for pattern in (
+                r"classification=([^;|]+)",
+                r"oncogenic(?:ity)?=([^;|]+)",
+                r"evidence=(Evidence\s+[A-Z](?:\s*\([^)]+\))?(?:,\s*Evidence\s+[A-Z](?:\s*\([^)]+\))?)*)",
+                r"functional_relevance=([^;|]+)",
+            ):
+                match = re.search(pattern, item.summary, flags=re.IGNORECASE)
+                if match:
+                    label = match.group(1).strip()
+                    break
+            else:
+                status_labels = {
+                    "found": "Funnet",
+                    "not_found": "Ikke funnet",
+                    "invalid_query": "Mangler søkegrunnlag",
+                    "login_required": "Innlogging kreves",
+                    "rate_limited": "Ratebegrenset",
+                    "error": "Feil",
+                    "ambiguous_result": "Tvetydig resultat",
+                }
+                label = status_labels.get(item.status, item.status.replace("_", " ").title())
+        return self._append_mtbp_functional_evidence(item, label)
+
+    @staticmethod
+    def _mtbp_functional_evidence_label(item: DatabaseEvidence) -> str:
+        """Normalized 'Evidence A (Curated)'-style label from an MTBP capture."""
+        sources = [item.summary or "", str(item.raw.get("functional_evidence") or "")]
+        for source in sources:
+            match = re.search(
+                r"Evidence\s+[A-Z](?:\s*\([^)]*\))?",
+                source,
+                flags=re.IGNORECASE,
+            )
             if match:
-                return match.group(1).strip()
-        status_labels = {
-            "found": "Funnet",
-            "not_found": "Ikke funnet",
-            "invalid_query": "Mangler søkegrunnlag",
-            "login_required": "Innlogging kreves",
-            "rate_limited": "Ratebegrenset",
-            "error": "Feil",
-            "ambiguous_result": "Tvetydig resultat",
-        }
-        return status_labels.get(item.status, item.status.replace("_", " ").title())
+                return " ".join(match.group(0).split())
+        return ""
+
+    def _append_mtbp_functional_evidence(
+        self, item: DatabaseEvidence, label: str
+    ) -> str:
+        """Surface 'Evidence A (Curated)' next to the MTBP classification."""
+        if item.database != "MTBP":
+            return label
+        evidence_label = self._mtbp_functional_evidence_label(item)
+        if not evidence_label or evidence_label.casefold() in label.casefold():
+            return label
+        return f"{label} – {evidence_label}"
 
     def _text_evidence(self, items: list[DatabaseEvidence]) -> str:
         if not items:
