@@ -110,9 +110,8 @@ provider changes (10-20 seconds by default). Completed patient evidence is
 checkpointed into the workbook during long runs. MTBP allows five reports in the
 portal. After a report is validated and its evidence is persisted locally, the
 application deletes that exact `ARCHER-` report before submitting the next variant.
-Timeout and incomplete-capture reports remain available for recovery. If all five
-slots are occupied, the MTBP step fails safely instead of deleting an unresolved or
-manually named report.
+Before a new submission, any remaining app-generated `ARCHER-` reports are removed
+so they cannot exhaust the portal limit. Manually named reports are never deleted.
 
 OncoKB browser credentials can also be saved in Windows Credential Manager.
 Database and browser searches expose an **Included variants only** option,

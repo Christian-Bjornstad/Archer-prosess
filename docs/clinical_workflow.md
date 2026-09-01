@@ -36,7 +36,7 @@ Database evidence sources:
 - OncoKB is reviewed in the signed-in web interface; cookie overlays are rejected before capture.
 - Franklin uses the signed-in web interface with explicit hg19 and Somatic selection. It tries transcript HGVSc first, then the exact `chr-position REF>ALT` genomic form only when needed and verifies the returned variant identity.
 - Franklin captures Computed Classification (ACMG and Oncology cards), Predictions, and Population Frequencies. Dynamic panels are validated and receive a one-time five-second incident retry when incomplete.
-- MTBP submits one pseudonymous variant per report, records no personal report link, and retries a detached/hidden screenshot target once after rediscovering the exact report row. After verified local evidence is saved, the exact `ARCHER-` report is deleted from the portal. Timeout and incomplete-capture reports remain available for recovery.
+- MTBP submits one pseudonymous variant per report, records no personal report link, and retries a detached/hidden screenshot target once after rediscovering the exact report row. After verified local evidence is saved, the exact `ARCHER-` report is deleted from the portal. Before a new submission, remaining app-generated `ARCHER-` reports are cleared so they cannot fill the five-report limit; manually named reports are left untouched.
 - Evidence must be presented as support for human interpretation, not as automatic final classification.
 
 The processed workbook includes a **Database Selection** sheet containing every
