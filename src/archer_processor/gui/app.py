@@ -164,6 +164,55 @@ def _completed_evidence_sources(
     return completed
 
 
+def _protected_remote_evidence_sources(
+    evidence: dict[str, list[DatabaseEvidence]],
+) -> set[tuple[str, str]]:
+    """Remote reports whose IDs must survive a generic worker failure."""
+    protected: set[tuple[str, str]] = set()
+    for key, items in evidence.items():
+        for item in items:
+            analysis_id = str(item.raw.get("analysis_id") or "")
+            if (
+                item.database == "MTBP"
+                and analysis_id.startswith("ARCHER-")
+                and not is_completed_evidence(item)
+            ):
+                protected.add((key, item.database))
+    return protected
+
+
+def _failed_search_variants(
+    variants,
+    evidence: dict[str, list[DatabaseEvidence]],
+    databases: list[str],
+) -> list:
+    """Variants with at least one requested source stuck in a retryable state.
+
+    A variant counts as failed only when an actual lookup attempt produced an
+    evidence record with a retryable status (error, timeout, session_lost, ...).
+    Variants that were never attempted are left alone.
+    """
+    failed: list = []
+    for variant in variants:
+        key = BrowserReviewService.variant_key(variant)
+        by_database = {item.database: item for item in evidence.get(key, [])}
+        if any(
+            database in by_database
+            and not is_completed_evidence(by_database[database])
+            for database in databases
+        ):
+            failed.append(variant)
+    return failed
+
+
+def _has_failed_lookups(
+    variants,
+    evidence: dict[str, list[DatabaseEvidence]],
+    databases: list[str],
+) -> bool:
+    return bool(_failed_search_variants(variants, evidence, databases))
+
+
 class SearchPauseControl:
     """Thread-safe cooperative pause gate shared with a search worker."""
 
@@ -324,6 +373,7 @@ class DatabaseWorker(QObject):
                         progress=lambda message, p=prefix: self.status.emit(f"{p}: {message}"),
                         completed_sources=self.completed_sources,
                         checkpoint=self.patient_finished.emit,
+                        prior_evidence=self.existing_evidence,
                     )
                     _merge_evidence_results(patient_evidence, browser_evidence)
 
@@ -467,6 +517,9 @@ class BrowserReviewWorker(QObject):
         self.result = result
         self.existing_evidence = existing_evidence or {}
         self.report_variants = list(report_variants or variants)
+        # Evidence collected across all retry passes within this worker's run;
+        # used so retry passes never repeat lookups that already succeeded.
+        self._pass_evidence: dict[str, list[DatabaseEvidence]] = {}
 
     def run(self) -> None:
         try:
@@ -515,24 +568,12 @@ class BrowserReviewWorker(QObject):
                     len(patients),
                     f"{patient_id} · {len(patient_variants)} variant(s) · {len(self.databases)} source(s)",
                 )
-                patient_evidence = service.search_variants(
+                patient_evidence = self._search_patient_with_retries(
+                    service,
+                    patient_id,
                     patient_variants,
-                    self.databases,
-                    self.artifact_root
-                    / f"patient-{original_patient_index:03d}",
-                    progress=lambda message, p=prefix: self.status.emit(f"{p}: {message}"),
-                    activity=lambda database, message, patient=patient_id, variants=patient_variants: self.activity.emit(
-                        RunActivity(
-                            occurred_at=datetime.now(),
-                            patient_id=patient,
-                            database=database,
-                            variant_label=(variants[0].display_name if len(variants) == 1 else f"{len(variants)} variants"),
-                            action=message,
-                            message=message,
-                        )
-                    ),
-                    completed_sources=self.completed_sources,
-                    checkpoint=self.patient_finished.emit,
+                    original_patient_index,
+                    prefix,
                 )
                 _merge_evidence_results(all_evidence, patient_evidence)
                 if coordinator is not None:
@@ -560,11 +601,166 @@ class BrowserReviewWorker(QObject):
             if coordinator is not None:
                 for outcome in coordinator.reconcile():
                     self.report_outcome.emit(outcome)
+            final_retry_evidence = self._final_failed_pass(all_evidence, patients)
+            if final_retry_evidence:
+                _merge_evidence_results(all_evidence, final_retry_evidence)
+                _merge_evidence_results(self._pass_evidence, final_retry_evidence)
+                self.patient_finished.emit(final_retry_evidence)
+            if coordinator is not None:
+                for outcome in coordinator.reconcile():
+                    self.report_outcome.emit(outcome)
             self.finished.emit(all_evidence)
         except BrowserReviewCancelled:
             self.cancelled.emit()
         except Exception as exc:
             self.failed.emit(str(exc))
+
+    def _search_patient_with_retries(
+        self,
+        service: BrowserReviewService,
+        patient_id: str,
+        patient_variants: list,
+        original_patient_index: int,
+        prefix: str,
+    ) -> dict[str, list[DatabaseEvidence]]:
+        """Search one patient, then retry failed lookups once before moving on.
+
+        The first pass collects everything; if any variant/source pair ends in a
+        retryable state (site down, timeout, lost session), a single immediate
+        retry pass runs for just those lookups. Anything still failing afterwards
+        is left for the batch-end pass or the manual rerun button.
+        """
+        patient_evidence = self._run_search_pass(
+            service, patient_id, patient_variants, original_patient_index, prefix
+        )
+        _merge_evidence_results(self._pass_evidence, patient_evidence)
+        failed = _failed_search_variants(
+            patient_variants, patient_evidence, self.databases
+        )
+        if not failed:
+            return patient_evidence
+        self.status.emit(
+            f"{prefix}: {len(failed)} lookup(s) failed; retrying once"
+        )
+        retry_evidence = self._run_search_pass(
+            service,
+            patient_id,
+            failed,
+            original_patient_index,
+            f"{prefix} (retry)",
+        )
+        _merge_evidence_results(patient_evidence, retry_evidence)
+        _merge_evidence_results(self._pass_evidence, retry_evidence)
+        still_failed = _failed_search_variants(
+            failed, patient_evidence, self.databases
+        )
+        if still_failed:
+            self.status.emit(
+                f"{prefix}: {len(still_failed)} lookup(s) still failing after "
+                "retry; a final pass runs after the last patient"
+            )
+        return patient_evidence
+
+    def _run_search_pass(
+        self,
+        service: BrowserReviewService,
+        patient_id: str,
+        variants: list,
+        original_patient_index: int,
+        prefix: str,
+    ) -> dict[str, list[DatabaseEvidence]]:
+        completed_sources = self.completed_sources | _completed_evidence_sources(
+            self._pass_evidence
+        )
+        prior_evidence = {
+            key: list(items) for key, items in self.existing_evidence.items()
+        }
+        _merge_evidence_results(prior_evidence, self._pass_evidence)
+        return service.search_variants(
+            variants,
+            self.databases,
+            self.artifact_root / f"patient-{original_patient_index:03d}",
+            progress=lambda message, p=prefix: self.status.emit(f"{p}: {message}"),
+            activity=lambda database, message, patient=patient_id, pass_variants=variants: self.activity.emit(
+                RunActivity(
+                    occurred_at=datetime.now(),
+                    patient_id=patient,
+                    database=database,
+                    variant_label=(pass_variants[0].display_name if len(pass_variants) == 1 else f"{len(pass_variants)} variants"),
+                    action=message,
+                    message=message,
+                )
+            ),
+            completed_sources=completed_sources,
+            checkpoint=self.patient_finished.emit,
+            prior_evidence=prior_evidence,
+        )
+
+    def _final_failed_pass(
+        self,
+        all_evidence: dict[str, list[DatabaseEvidence]],
+        patients: list[tuple[str, list]],
+    ) -> dict[str, list[DatabaseEvidence]]:
+        """One last pass over every still-failed lookup once the batch completes."""
+        all_variants = [
+            variant for _, patient_variants in patients for variant in patient_variants
+        ]
+        evidence_snapshot: dict[str, list[DatabaseEvidence]] = {
+            key: list(items) for key, items in all_evidence.items()
+        }
+        for key, items in self._pass_evidence.items():
+            _merge_evidence_results(evidence_snapshot, {key: list(items)})
+        failed = _failed_search_variants(
+            all_variants, evidence_snapshot, self.databases
+        )
+        if not failed:
+            return {}
+        self.status.emit(
+            f"Batch complete: running one final pass for {len(failed)} "
+            "still-failed lookup(s)"
+        )
+        service = self._build_service()
+        final_evidence: dict[str, list[DatabaseEvidence]] = {
+            BrowserReviewService.variant_key(variant): [] for variant in failed
+        }
+        for patient_id, patient_variants in _variants_grouped_by_patient(failed):
+            original_index = self.patient_indexes.get(patient_id, 1)
+            pass_prefix = f"Patient {original_index} ({patient_id}) (final pass)"
+            _merge_evidence_results(
+                final_evidence,
+                self._run_search_pass(
+                    service, patient_id, patient_variants, original_index, pass_prefix
+                ),
+            )
+        still_failed = _failed_search_variants(
+            failed, final_evidence, self.databases
+        )
+        if still_failed:
+            self.status.emit(
+                f"{len(still_failed)} lookup(s) remain unresolved; use 'Rerun "
+                "Failed Sources' to try again later."
+            )
+        return final_evidence
+
+    def _build_service(self) -> BrowserReviewService:
+        return BrowserReviewService(
+            mtbp_cancer_type=self.settings.mtbp_cancer_type,
+            clinvar_api_key=self.settings.clinvar_api_key,
+            analysis_timeout_ms=self.settings.mtbp_timeout_minutes * 60_000,
+            request_delay_ms=self.settings.browser_delay_seconds * 1_000,
+            request_delay_max_ms=self.settings.browser_delay_max_seconds * 1_000,
+            cosmic_email=self.settings.cosmic_email,
+            cosmic_password=self.settings.cosmic_password,
+            oncokb_email=self.settings.oncokb_email,
+            oncokb_password=self.settings.oncokb_password,
+            franklin_email=self.settings.franklin_email,
+            franklin_password=self.settings.franklin_password,
+            mtbp_email=self.settings.mtbp_email,
+            mtbp_password=self.settings.mtbp_password,
+            stop_requested=lambda: QThread.currentThread().isInterruptionRequested(),
+            pause_wait=self._wait_if_paused,
+            browser_background=self.settings.browser_background,
+        )
 
     def request_pause(self) -> None:
         self.pause_control.request_pause()
@@ -1107,16 +1303,26 @@ class MainWindow(QMainWindow):
             "Runs selected ClinVar, COSMIC, OncoKB, Franklin, and MTBP sources patient-by-patient in visible Edge."
         )
         self.browser_review_btn.clicked.connect(self._start_browser_review)
+        self.rerun_failed_btn = QPushButton("Rerun Failed Sources")
+        self.rerun_failed_btn.setFixedWidth(170)
+        self.rerun_failed_btn.setObjectName("OutlineButton")
+        self.rerun_failed_btn.setEnabled(False)
+        self.rerun_failed_btn.setToolTip(
+            "Re-runs only the variant/source lookups that ended in a retryable state "
+            "(website down, timeout, lost session). Safe to press repeatedly."
+        )
+        self.rerun_failed_btn.clicked.connect(self._rerun_failed_sources)
         options_grid.addWidget(browser_label, 3, 0)
         options_grid.addWidget(self.browser_database_combo, 3, 1)
         options_grid.addWidget(self.browser_signin_btn, 3, 2)
         options_grid.addWidget(self.browser_review_btn, 3, 3)
+        options_grid.addWidget(self.rerun_failed_btn, 4, 0)
         self.browser_security_label = QLabel(
             "Local privacy guard: only variant coordinates are sent; patient and sample identifiers remain on this computer."
         )
         self.browser_security_label.setObjectName("SecurityNote")
         self.browser_security_label.setWordWrap(True)
-        options_grid.addWidget(self.browser_security_label, 4, 1, 1, 3)
+        options_grid.addWidget(self.browser_security_label, 5, 1, 1, 3)
         layout.addWidget(options)
 
         exports = QGroupBox("Reports")
@@ -1605,6 +1811,53 @@ class MainWindow(QMainWindow):
             return
         self._launch_browser_review(databases)
 
+    def _rerun_failed_sources(self) -> None:
+        """Re-run only lookups that ended in a retryable state (e.g. site was down).
+
+        Completed evidence is never repeated; only variant/source pairs whose last
+        attempt produced a retryable status (error, timeout, session_lost, ...)
+        are re-queued.
+        """
+        if not self.result:
+            return
+        if (
+            self.browser_thread is not None
+            and self.browser_thread.isRunning()
+        ) or (
+            self.database_thread is not None
+            and self.database_thread.isRunning()
+        ):
+            QMessageBox.information(
+                self,
+                "Search in progress",
+                "An evidence search is already running. Wait for it to finish "
+                "before rerunning failed lookups.",
+            )
+            return
+        databases = [
+            database
+            for database in BROWSER_DATABASES
+            if _has_failed_lookups(
+                self._variants_for_search(), self.evidence, [database]
+            )
+        ]
+        if not databases:
+            QMessageBox.information(
+                self,
+                "No failed lookups",
+                "There are no failed source lookups to rerun. Everything "
+                "searched so far is complete.",
+            )
+            return
+        failed_variants = _failed_search_variants(
+            self._variants_for_search(), self.evidence, databases
+        )
+        self._log(
+            f"Manual rerun: {len(failed_variants)} failed variant lookup(s) across "
+            f"{', '.join(databases)}"
+        )
+        self._launch_browser_review(databases, variants=failed_variants)
+
     def _selected_browser_databases(self, *, api_fallback_only: bool = False) -> list[str]:
         return [
             database
@@ -1612,14 +1865,17 @@ class MainWindow(QMainWindow):
             if self.db_checks[database].isChecked()
         ]
 
-    def _launch_browser_review(self, databases: list[str]) -> None:
+    def _launch_browser_review(
+        self, databases: list[str], *, variants: list | None = None
+    ) -> None:
         if not self.result:
             return
         completed_sources = _completed_evidence_sources(self.evidence)
-        variants = self._pending_variants_for_search(databases)
-        if not variants:
-            self._show_search_already_complete(databases)
-            return
+        if variants is None:
+            variants = self._pending_variants_for_search(databases)
+            if not variants:
+                self._show_search_already_complete(databases)
+                return
         self._search_started_at = time.monotonic()
         self._set_busy("Browser lookups")
         worker = BrowserReviewWorker(
@@ -1883,12 +2139,14 @@ class MainWindow(QMainWindow):
         if isinstance(worker, BrowserReviewWorker):
             failed_evidence = {}
             completed_sources = _completed_evidence_sources(self.evidence)
+            protected_sources = _protected_remote_evidence_sources(self.evidence)
             for variant in worker.variants:
                 key = BrowserReviewService.variant_key(variant)
                 pending_databases = [
                     database
                     for database in worker.databases
                     if (key, database) not in completed_sources
+                    and (key, database) not in protected_sources
                 ]
                 failed_evidence[key] = [
                     DatabaseEvidence(
@@ -2483,6 +2741,7 @@ class MainWindow(QMainWindow):
         self.stop_search_btn.setEnabled(is_search)
         self.browser_signin_btn.setEnabled(False)
         self.browser_review_btn.setEnabled(False)
+        self.rerun_failed_btn.setEnabled(False)
         self.rewrite_btn.setEnabled(False)
         self.patient_excel_btn.setEnabled(False)
         self.resume_btn.setEnabled(False)
@@ -2503,6 +2762,12 @@ class MainWindow(QMainWindow):
         self.stop_search_btn.setEnabled(False)
         self.browser_signin_btn.setEnabled(True)
         self.browser_review_btn.setEnabled(self.result is not None)
+        self.rerun_failed_btn.setEnabled(
+            self.result is not None
+            and _has_failed_lookups(
+                self._variants_for_search(), self.evidence, list(BROWSER_DATABASES)
+            )
+        )
         self.rewrite_btn.setEnabled(self.result is not None)
         self.patient_excel_btn.setEnabled(self.result is not None)
         self.resume_btn.setEnabled(True)

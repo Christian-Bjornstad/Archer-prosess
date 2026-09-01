@@ -89,7 +89,7 @@ the provider exposes that choice.
 
 | Source | Capture strategy | Key safeguards |
 | --- | --- | --- |
-| **MTBP** | One pseudonymous report per variant and one alteration-centric screenshot | Transcript HGVS first, then a validated GRCh37 genomic fallback; returned variant identity is checked; personal report URLs are not exported |
+| **MTBP** | One pseudonymous report per variant and one alteration-centric screenshot | Transcript HGVS first, then a validated GRCh37 genomic fallback; returned variant identity is checked; successfully captured reports are deleted from the portal and personal report URLs are not exported |
 | **Franklin** | Classification-only ACMG/Oncology overviews, each named evidence card, Predictions, and Population Frequencies | Explicit **hg19** + **Somatic** search; clipped evidence cards are expanded for full capture; ACMG stops after De Novo Data; Somatic Clinical Evidence and Add More Evidence are excluded |
 | **ClinVar** | Variant title and focused germline/somatic classification summary | Opens a candidate only after chromosome, VCF position, reference, alternate, and **GRCh37** assembly all match exactly; older unverified results are queued for verification |
 | **OncoKB** | Variant Overview and Mutation Effect | Rejects the cookie overlay before taking the screenshot |

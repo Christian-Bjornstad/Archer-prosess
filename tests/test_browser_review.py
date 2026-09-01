@@ -61,7 +61,9 @@ def test_browser_sources_use_canonical_order_with_mtbp_last(tmp_path, monkeypatc
     )
     visited = []
 
-    def record(database, variants, artifact_directory, *, progress):
+    def record(
+        database, variants, artifact_directory, *, progress, prior_evidence=None
+    ):
         visited.append(database)
         return {}
 
@@ -83,7 +85,9 @@ def test_browser_review_reports_provider_with_progress(tmp_path, monkeypatch):
     )
     seen = []
 
-    def record(database, variants, artifact_directory, *, progress):
+    def record(
+        database, variants, artifact_directory, *, progress, prior_evidence=None
+    ):
         return {
             service.variant_key(variant): DatabaseEvidence(
                 database, "not_found", "synthetic"
@@ -115,7 +119,9 @@ def test_browser_resume_skips_completed_sources_and_checkpoints_each_provider(
     first_key = service.variant_key(variants[0])
     calls = []
 
-    def record(database, pending, artifact_directory, *, progress):
+    def record(
+        database, pending, artifact_directory, *, progress, prior_evidence=None
+    ):
         calls.append((database, [service.variant_key(variant) for variant in pending]))
         return {
             service.variant_key(variant): DatabaseEvidence(
@@ -1757,6 +1763,144 @@ def test_mtbp_rechecks_late_reports_without_resubmitting(tmp_path, monkeypatch):
     assert results[service.variant_key(variants[0])].status == "found"
 
 
+def test_mtbp_resume_recovers_retained_reports_before_new_submission(
+    tmp_path, monkeypatch
+):
+    variants = ArcherTsvReader().read(FIXTURE)[2:5]
+    service = BrowserReviewService(
+        profile_root=tmp_path,
+        request_delay_ms=0,
+        request_delay_max_ms=0,
+    )
+    prior_items = [
+        DatabaseEvidence(
+            "MTBP", "timeout", "pending", raw={"analysis_id": "ARCHER-timeout"}
+        ),
+        DatabaseEvidence(
+            "MTBP",
+            "partial_capture",
+            "recapture",
+            raw={"analysis_id": "ARCHER-partial"},
+        ),
+        DatabaseEvidence(
+            "MTBP",
+            "found",
+            "captured",
+            raw={
+                "analysis_id": "ARCHER-cleanup",
+                "remote_report_cleanup": {"status": "failed"},
+            },
+        ),
+    ]
+    prior_evidence = {
+        service.variant_key(variant): [evidence]
+        for variant, evidence in zip(variants, prior_items, strict=True)
+    }
+    recovered_calls = []
+
+    def recover(pending, artifact_directory, *, progress):
+        recovered_calls.extend(pending)
+        return {
+            service.variant_key(variant): DatabaseEvidence(
+                "MTBP",
+                "found",
+                "recovered",
+                raw={"remote_report_cleanup": {"status": "deleted"}},
+            )
+            for variant, _ in pending
+        }
+
+    monkeypatch.setattr(service, "_recover_mtbp_timeouts", recover)
+    monkeypatch.setattr(
+        service,
+        "_search_mtbp_batch",
+        lambda *args, **kwargs: pytest.fail(
+            "retained MTBP reports must be recovered before resubmission"
+        ),
+    )
+
+    try:
+        results = service._search_mtbp(
+            variants,
+            tmp_path / "mtbp",
+            progress=None,
+            prior_evidence=prior_evidence,
+        )
+    except TypeError as exc:
+        pytest.fail(f"MTBP resume must accept restored evidence: {exc}")
+
+    assert [evidence for _, evidence in recovered_calls] == prior_items
+    assert all(item.status == "found" for item in results.values())
+
+
+def test_mtbp_resume_does_not_duplicate_report_when_recovery_is_unavailable(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+    key = service.variant_key(variant)
+    prior = DatabaseEvidence(
+        "MTBP", "timeout", "pending", raw={"analysis_id": "ARCHER-pending"}
+    )
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("Edge profile could not start")
+
+    monkeypatch.setattr(service, "_recover_mtbp_timeouts", unavailable)
+    monkeypatch.setattr(
+        service,
+        "_search_mtbp_batch",
+        lambda *args, **kwargs: pytest.fail(
+            "an unavailable recovery must not create a duplicate report"
+        ),
+    )
+
+    results = service._search_mtbp(
+        [variant],
+        tmp_path / "mtbp",
+        progress=None,
+        prior_evidence={key: [prior]},
+    )
+
+    assert results[key] is prior
+    assert results[key].raw["analysis_id"] == "ARCHER-pending"
+
+
+def test_mtbp_resume_resubmits_partial_capture_only_after_confirmed_absence(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+    key = service.variant_key(variant)
+    prior = DatabaseEvidence(
+        "MTBP",
+        "partial_capture",
+        "recapture",
+        raw={"analysis_id": "ARCHER-gone"},
+    )
+    submitted = []
+
+    def recover(*args, **kwargs):
+        prior.raw["remote_report_recovery"] = {"status": "confirmed_absent"}
+        return {key: prior}
+
+    def submit(batch, artifact_directory, *, progress):
+        submitted.extend(batch)
+        return {key: DatabaseEvidence("MTBP", "found", "new report")}
+
+    monkeypatch.setattr(service, "_recover_mtbp_timeouts", recover)
+    monkeypatch.setattr(service, "_search_mtbp_batch", submit)
+
+    results = service._search_mtbp(
+        [variant],
+        tmp_path / "mtbp",
+        progress=None,
+        prior_evidence={key: [prior]},
+    )
+
+    assert submitted == [variant]
+    assert results[key].status == "found"
+
+
 def test_mtbp_late_recovery_failure_keeps_original_timeout(tmp_path, monkeypatch):
     variant = ArcherTsvReader().read(FIXTURE)[3]
     service = BrowserReviewService(
@@ -1891,6 +2035,19 @@ def test_mtbp_late_recovery_opens_existing_report_without_form_submission(
         "_capture_mtbp_variant_screenshot",
         lambda page, variant, directory: screenshot,
     )
+    deleted = []
+
+    def delete_after_local_persistence(page, candidate_analysis_id):
+        audit_path = service._screenshot_path(
+            tmp_path / "mtbp", "MTBP", variant
+        ).with_suffix(".audit.json")
+        assert audit_path.exists()
+        deleted.append(candidate_analysis_id)
+        return {"status": "deleted", "message": "removed"}
+
+    monkeypatch.setattr(
+        service, "_delete_mtbp_report", delete_after_local_persistence
+    )
     timeout = DatabaseEvidence(
         "MTBP",
         "timeout",
@@ -1905,6 +2062,8 @@ def test_mtbp_late_recovery_opens_existing_report_without_form_submission(
 
     assert recovered[service.variant_key(variant)].status == "found"
     assert recovered[service.variant_key(variant)].raw["late_report_recovered"] is True
+    assert recovered[service.variant_key(variant)].raw["remote_report_cleanup"]["status"] == "deleted"
+    assert deleted == [analysis_id]
     assert visited[0] == service.login_url("MTBP")
 
 
@@ -2031,67 +2190,130 @@ def test_mtbp_deletes_exact_generated_report_after_confirming(tmp_path):
     assert page.dialogs[0].accepted
 
 
-def test_mtbp_capacity_cleanup_removes_all_archer_reports_when_full(tmp_path):
+def test_mtbp_delete_is_idempotent_when_exact_report_is_already_absent(tmp_path):
     service = BrowserReviewService(profile_root=tmp_path)
-    page = _FakeMtbpReportsPage(
-        [
-            "new-manual",
-            "ARCHER-newer",
-            "manual-1",
-            "manual-2",
-            "manual-3",
-            "manual-4",
-            "manual-5",
-            "manual-6",
-            "manual-7",
-            "ARCHER-oldest",
-        ]
+    page = _FakeMtbpReportsPage(["manual-report"])
+
+    outcome = service._delete_mtbp_report(page, "ARCHER-already-gone")
+
+    assert outcome["status"] == "already_absent"
+    assert page.reports == ["manual-report"]
+
+
+def test_mtbp_resume_retries_failed_cleanup_without_resubmitting(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    analysis_id = "ARCHER-cleanup-retry"
+    page = _FakeMtbpReportsPage(["manual-report", analysis_id])
+    service = BrowserReviewService(profile_root=tmp_path)
+
+    class Context:
+        pages = [page]
+
+        def close(self):
+            pass
+
+    class Runtime:
+        chromium = None
+
+        def __init__(self):
+            self.chromium = self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def launch_persistent_context(self, *args, **kwargs):
+            return Context()
+
+    monkeypatch.setattr(
+        service, "_browser_api", lambda: (lambda: Runtime(), Exception, TimeoutError)
     )
-    progress = []
+    monkeypatch.setattr(
+        service,
+        "_goto_with_retries",
+        lambda candidate_page, url, **kwargs: candidate_page.goto(url),
+    )
+    monkeypatch.setattr(service, "_session_authenticated", lambda *args: True)
+    prior = DatabaseEvidence(
+        "MTBP",
+        "found",
+        "captured",
+        raw={
+            "analysis_id": analysis_id,
+            "screenshots": [{"path": "saved.png", "url": ""}],
+            "remote_report_cleanup": {"status": "failed"},
+        },
+    )
 
-    outcome = service._cleanup_stale_mtbp_reports(page, progress=progress.append)
+    recovered = service._recover_mtbp_timeouts(
+        [(variant, prior)], tmp_path / "mtbp", progress=None
+    )
 
-    assert not any(name.startswith("ARCHER-") for name in page.reports)
-    assert all(name.startswith("manual-") or name == "new-manual" for name in page.reports)
-    assert outcome["status"] == "deleted_batch"
-    assert outcome["trigger"] == "report_capacity"
-    assert outcome["deleted_stale_reports"] == [
-        "ARCHER-newer",
-        "ARCHER-oldest",
-    ]
-    assert outcome["remaining_reports"] == 8
-    assert outcome["remaining_archer_reports"] == 0
-    assert len(progress) == 2
+    evidence = recovered[service.variant_key(variant)]
+    assert evidence is prior
+    assert evidence.raw["remote_report_cleanup"]["status"] == "deleted"
+    assert page.reports == ["manual-report"]
 
 
-def test_mtbp_cleanup_deletes_all_six_archer_reports_as_one_batch(tmp_path):
+def test_mtbp_finalization_retains_incomplete_report_for_recovery(
+    tmp_path, monkeypatch
+):
     service = BrowserReviewService(profile_root=tmp_path)
-    archer_reports = [f"ARCHER-run-{index}" for index in range(6)]
-    page = _FakeMtbpReportsPage(["manual-1", *archer_reports, "manual-2"])
+    evidence = DatabaseEvidence(
+        "MTBP",
+        "partial_capture",
+        "Screenshot requires retry.",
+        raw={"analysis_id": "ARCHER-incomplete", "screenshots": []},
+    )
+    audit_path = tmp_path / "mtbp" / "incomplete.audit.json"
+    audit_path.parent.mkdir()
 
-    outcome = service._cleanup_stale_mtbp_reports(page, progress=None)
+    monkeypatch.setattr(
+        service,
+        "_delete_mtbp_report",
+        lambda *args: pytest.fail("incomplete MTBP reports must not be deleted"),
+    )
 
-    assert page.reports == ["manual-1", "manual-2"]
-    assert outcome["status"] == "deleted_batch"
-    assert outcome["trigger"] == "archer_threshold"
-    assert outcome["deleted_stale_reports"] == archer_reports
+    outcome = service._finalize_mtbp_report(
+        object(), "ARCHER-incomplete", [(audit_path, evidence)]
+    )
+
+    assert outcome["status"] == "retained_incomplete"
+    assert audit_path.exists()
+    assert evidence.raw["remote_report_cleanup"] == outcome
 
 
-def test_mtbp_cleanup_retains_fewer_than_six_archer_reports(tmp_path):
+def test_mtbp_preflight_refuses_five_reports_without_deleting_archer_reports(tmp_path):
     service = BrowserReviewService(profile_root=tmp_path)
-    reports = ["manual", *[f"ARCHER-run-{index}" for index in range(5)]]
+    reports = ["manual-1", "ARCHER-pending", "manual-2", "manual-3", "manual-4"]
+    page = _FakeMtbpReportsPage(reports)
+
+    with pytest.raises(RuntimeError, match="allows only 5"):
+        service._cleanup_stale_mtbp_reports(page, progress=None)
+
+    assert page.reports == reports
+
+
+def test_mtbp_preflight_retains_four_reports(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path)
+    reports = ["manual-1", "ARCHER-pending", "manual-2", "manual-3"]
     page = _FakeMtbpReportsPage(reports)
 
     outcome = service._cleanup_stale_mtbp_reports(page, progress=None)
 
     assert page.reports == reports
     assert outcome["status"] == "retained"
-    assert outcome["remaining_archer_reports"] == 5
+    assert outcome["remaining_reports"] == 4
+    assert outcome["remaining_archer_reports"] == 1
 
 
-def test_mtbp_preflight_refuses_to_delete_ten_manual_reports(tmp_path):
+def test_mtbp_preflight_refuses_to_delete_five_manual_reports(tmp_path):
     service = BrowserReviewService(profile_root=tmp_path)
-    page = _FakeMtbpReportsPage([f"manual-{index}" for index in range(10)])
+    page = _FakeMtbpReportsPage([f"manual-{index}" for index in range(5)])
 
     with pytest.raises(RuntimeError, match="delete an older report manually"):
         service._cleanup_stale_mtbp_reports(page, progress=None)

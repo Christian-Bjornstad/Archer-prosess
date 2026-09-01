@@ -7,9 +7,11 @@ from PIL import Image
 
 from archer_processor.core import DatabaseEvidence, VariantProcessor, default_artifact_rules
 from archer_processor.gui.app import (
+    BrowserReviewWorker,
     DatabaseWorker,
     MainWindow,
     _completed_evidence_sources,
+    _protected_remote_evidence_sources,
 )
 from archer_processor.gui.status_model import (
     CellState,
@@ -440,6 +442,37 @@ def test_new_search_results_merge_with_restored_evidence(qt_app, tmp_path, monke
     assert {item.database for item in window.evidence[key]} == {"ClinVar", "OncoKB"}
 
 
+def test_browser_worker_passes_restored_evidence_to_provider_resume(
+    qt_app, tmp_path
+):
+    variant = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-08-05",
+        tmp_path / "resume.xlsx",
+    ).variants[0]
+    key = f"{variant.sample}|{variant.hgvsc}"
+    prior = DatabaseEvidence(
+        "MTBP", "timeout", "pending", raw={"analysis_id": "ARCHER-pending"}
+    )
+    worker = BrowserReviewWorker(
+        [variant],
+        ["MTBP"],
+        tmp_path / "evidence",
+        AppSettings(),
+        existing_evidence={key: [prior]},
+    )
+    received = []
+
+    class Service:
+        def search_variants(self, *args, prior_evidence=None, **kwargs):
+            received.append(prior_evidence)
+            return {key: [prior]}
+
+    worker._run_search_pass(Service(), variant.patient_id, [variant], 1, "Patient 1")
+
+    assert received == [{key: [prior]}]
+
+
 def test_resume_keeps_unverified_and_partial_evidence_pending():
     key = "SYNTHETIC_VPM_1|NM_000546.6:c.524G>A"
     for status in (
@@ -453,6 +486,22 @@ def test_resume_keeps_unverified_and_partial_evidence_pending():
             {key: [DatabaseEvidence("Franklin", status, "retry")]}
         )
         assert (key, "Franklin") not in completed
+
+
+def test_worker_failure_preserves_retryable_mtbp_report_id():
+    key = "SYNTHETIC_VPM_1|NM_000546.6:c.524G>A"
+    evidence = {
+        key: [
+            DatabaseEvidence(
+                "MTBP",
+                "timeout",
+                "pending",
+                raw={"analysis_id": "ARCHER-pending"},
+            )
+        ]
+    }
+
+    assert (key, "MTBP") in _protected_remote_evidence_sources(evidence)
 
 
 def test_application_icon_is_packaged_and_loaded(qt_app):
@@ -611,6 +660,18 @@ def test_database_worker_completes_all_sources_before_next_patient(
     variants = result.variants[:2]
     events = []
     report_events = []
+    restored_key = f"{variants[0].sample}|{variants[0].hgvsc}"
+    restored_evidence = {
+        restored_key: [
+            DatabaseEvidence(
+                "MTBP",
+                "timeout",
+                "pending",
+                raw={"analysis_id": "ARCHER-restored"},
+            )
+        ]
+    }
+    prior_snapshots = []
 
     class FakeReportCoordinator:
         def __init__(self, result, variants, evidence):
@@ -656,7 +717,9 @@ def test_database_worker_completes_all_sources_before_next_patient(
             progress,
             completed_sources,
             checkpoint,
+            prior_evidence=None,
         ):
+            prior_snapshots.append(prior_evidence)
             patient_id = patient_variants[0].patient_id
             results = {}
             for database in databases:
@@ -697,6 +760,7 @@ def test_database_worker_completes_all_sources_before_next_patient(
         tmp_path / "evidence",
         settings,
         result=result,
+        existing_evidence=restored_evidence,
         report_variants=variants,
     )
 
@@ -726,6 +790,7 @@ def test_database_worker_completes_all_sources_before_next_patient(
     assert 10 <= sum(slept) <= 20
     assert all(delay <= 0.25 for delay in slept)
     assert report_events == ["merge", "merge", "reconcile"]
+    assert prior_snapshots == [restored_evidence, restored_evidence]
 
 
 def test_stop_search_requests_safe_interruption_and_keeps_status(

@@ -8,7 +8,7 @@ Verified 2026-07-31 using public, non-patient test data only.
 | --- | --- | --- | --- |
 | OncoKB | REST API and public API metadata; demo annotation works for BRAF, TP53 and ROS1 | Keep the existing REST adapter and obtain a hospital/patient-services licence plus bearer token | No token is configured locally; clinical use requires the appropriate OncoKB licence |
 | Franklin | Public SNP result pages work without login; supported API authentication exists | Use the existing API adapter when Franklin Premium is enabled; otherwise open the exact public page and retain manual review | API access is a Premium feature; the public page uses undocumented internal endpoints and must not be treated as a stable API |
-| MTBP | Current site uses Keycloak login; accepts variant lists/VCF and produces HTML reports | Login-assisted visible-browser batch workflow with pseudonymized variants and fail-closed report parsing | Public instance is explicitly research-only and cannot support routine clinical reporting |
+| MTBP | Current site uses Keycloak login; accepts variant lists/VCF and produces HTML reports | Login-assisted visible-browser serial one-variant report workflow with pseudonymized variants and fail-closed report parsing | Public instance is explicitly research-only and cannot support routine clinical reporting |
 | HSMD | Licensed web application with limited named users | Request an API-enabled QIAGEN licence or written approval for browser automation | No public supported API was identified; licence terms control automation and reuse |
 
 ## Live checks
@@ -55,10 +55,10 @@ Validated login-assisted workflow:
 
 1. Export only gene/variant data; exclude sample and patient identifiers.
 2. Store the login password in Windows Credential Manager or log in interactively; never store it in application JSON.
-3. Submit one pseudonymized batch using transcript-qualified HGVS first.
-4. When MTBP rejects transcript mapping, retry only those entries as GRCh37 genomic HGVS derived from the Archer position/ref/alt; remove only entries rejected in both forms.
+3. Submit one pseudonymized variant per report using transcript-qualified HGVS first.
+4. When MTBP rejects transcript mapping, retry that variant as GRCh37 genomic HGVS derived from the Archer position/ref/alt.
 5. Run MTBP after all other browser databases and wait up to the configurable report timeout (20 minutes by default).
-6. Capture the report URL, screenshot and structured audit JSON.
+6. Persist the screenshot and structured audit JSON locally without exporting the private report URL, then delete the exact completed `ARCHER-` report.
 7. Verify every returned alteration against the submitted normalized variants.
 8. Import functional class, evidence category, actionability tier, source links and pipeline/database versions.
 
@@ -107,11 +107,12 @@ sources, COSMIC, OncoKB, Franklin, and finally MTBP for one patient before resta
 the first source for the next patient. Public/API sources have no added delay. A
 fresh randomized safety delay is used only for signed-in website variants and
 provider changes (10-20 seconds by default). Completed patient evidence is
-checkpointed into the workbook during long runs. MTBP reports created with the
-application’s `ARCHER-` prefix are retained until six accumulate, at which point
-all six are deleted together. The same cleanup is triggered early if the report
-list reaches its ten-report limit. Local captures are written before post-analysis
-cleanup, and manually named reports are never automatically deleted.
+checkpointed into the workbook during long runs. MTBP allows five reports in the
+portal. After a report is validated and its evidence is persisted locally, the
+application deletes that exact `ARCHER-` report before submitting the next variant.
+Timeout and incomplete-capture reports remain available for recovery. If all five
+slots are occupied, the MTBP step fails safely instead of deleting an unresolved or
+manually named report.
 
 OncoKB browser credentials can also be saved in Windows Credential Manager.
 Database and browser searches expose an **Included variants only** option,

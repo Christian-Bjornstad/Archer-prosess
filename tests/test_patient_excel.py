@@ -13,7 +13,7 @@ from archer_processor.services import DatabaseSearchService
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
 
 
-def test_patient_overview_uses_strong_and_weak_germline_green(tmp_path):
+def test_patient_overview_uses_light_blue_and_white_banding(tmp_path):
     result = VariantProcessor().process(
         FIXTURE, "2026-08-11", tmp_path / "review.xlsx"
     )
@@ -35,8 +35,9 @@ def test_patient_overview_uses_strong_and_weak_germline_green(tmp_path):
     workbook = openpyxl.load_workbook(output)
     try:
         overview = workbook["Oversikt"]
-        assert overview["A11"].fill.fgColor.rgb == "00C6EFCE"
-        assert overview["A12"].fill.fgColor.rgb == "00E9F6EF"
+        # Light blue / white banding replaces the old green template.
+        assert overview["A11"].fill.fgColor.rgb == "00EAF3FA"
+        assert overview["A12"].fill.fgColor.rgb == "00FFFFFF"
     finally:
         workbook.close()
 
