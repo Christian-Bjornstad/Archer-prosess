@@ -1834,25 +1834,40 @@ class BrowserReviewService:
         *,
         progress: Callable[[str], None] | None,
     ) -> dict[str, Any]:
-        """Refuse new submissions when MTBP has no free report slot."""
+        """Free one slot from app-generated reports or refuse safely."""
         self._goto_with_retries(page, MTBP_REPORTS_URL)
         remaining = page.locator("button.delete-patient").count()
         generated = page.locator(
             "button.delete-patient[data-patient-name^='ARCHER-']"
         )
         generated_count = generated.count()
+        deleted: list[str] = []
+        failed: list[str] = []
+        generated_ids = [
+            str(generated.nth(index).get_attribute("data-patient-name") or "")
+            for index in range(generated_count)
+        ]
+        for analysis_id in generated_ids:
+            outcome = self._delete_mtbp_report(page, analysis_id)
+            if outcome.get("status") not in {"deleted", "already_absent"}:
+                failed.append(analysis_id)
+                continue
+            deleted.append(analysis_id)
+            if progress:
+                progress(f"MTBP: removed old app report {analysis_id}")
+        remaining = page.locator("button.delete-patient").count()
+        generated_count = generated.count()
         if remaining >= MTBP_REPORT_LIMIT:
             raise RuntimeError(
                 f"MTBP has {remaining} reports and allows only {MTBP_REPORT_LIMIT}. "
-                "The app will not delete an unresolved report automatically; "
-                "delete an older report manually in the MTBP Reports List or resume "
-                "after a pending report has been recovered."
+                "No app-generated ARCHER report could be removed; delete an older "
+                "report manually in the MTBP Reports List."
             )
         return {
-            "status": "retained",
-            "trigger": "none",
-            "deleted_stale_reports": [],
-            "failed_deletions": [],
+            "status": "deleted_stale" if deleted else "retained",
+            "trigger": "capacity" if deleted else "none",
+            "deleted_stale_reports": deleted,
+            "failed_deletions": failed,
             "remaining_reports": remaining,
             "remaining_archer_reports": generated_count,
         }

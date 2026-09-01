@@ -2287,28 +2287,40 @@ def test_mtbp_finalization_retains_incomplete_report_for_recovery(
     assert evidence.raw["remote_report_cleanup"] == outcome
 
 
-def test_mtbp_preflight_refuses_five_reports_without_deleting_archer_reports(tmp_path):
+def test_mtbp_preflight_removes_all_old_archer_reports(tmp_path):
     service = BrowserReviewService(profile_root=tmp_path)
-    reports = ["manual-1", "ARCHER-pending", "manual-2", "manual-3", "manual-4"]
+    reports = [
+        "manual-1",
+        "ARCHER-old-1",
+        "ARCHER-old-2",
+        "manual-2",
+        "ARCHER-old-3",
+    ]
     page = _FakeMtbpReportsPage(reports)
 
-    with pytest.raises(RuntimeError, match="allows only 5"):
-        service._cleanup_stale_mtbp_reports(page, progress=None)
+    outcome = service._cleanup_stale_mtbp_reports(page, progress=None)
 
-    assert page.reports == reports
+    assert page.reports == ["manual-1", "manual-2"]
+    assert outcome["status"] == "deleted_stale"
+    assert outcome["deleted_stale_reports"] == [
+        "ARCHER-old-1",
+        "ARCHER-old-2",
+        "ARCHER-old-3",
+    ]
+    assert outcome["remaining_reports"] == 2
 
 
-def test_mtbp_preflight_retains_four_reports(tmp_path):
+def test_mtbp_preflight_removes_archer_reports_even_below_capacity(tmp_path):
     service = BrowserReviewService(profile_root=tmp_path)
     reports = ["manual-1", "ARCHER-pending", "manual-2", "manual-3"]
     page = _FakeMtbpReportsPage(reports)
 
     outcome = service._cleanup_stale_mtbp_reports(page, progress=None)
 
-    assert page.reports == reports
-    assert outcome["status"] == "retained"
-    assert outcome["remaining_reports"] == 4
-    assert outcome["remaining_archer_reports"] == 1
+    assert page.reports == ["manual-1", "manual-2", "manual-3"]
+    assert outcome["status"] == "deleted_stale"
+    assert outcome["remaining_reports"] == 3
+    assert outcome["remaining_archer_reports"] == 0
 
 
 def test_mtbp_preflight_refuses_to_delete_five_manual_reports(tmp_path):
