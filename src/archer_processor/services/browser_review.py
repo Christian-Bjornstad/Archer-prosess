@@ -1208,11 +1208,19 @@ class BrowserReviewService:
                     f"MTBP: recovering {len(retained)} retained report(s) "
                     "before submission"
                 )
-            recovered = self._recover_mtbp_timeouts(
-                retained,
-                artifact_directory,
-                progress=progress,
-            )
+            try:
+                recovered = self._recover_mtbp_timeouts(
+                    retained,
+                    artifact_directory,
+                    progress=progress,
+                )
+            except Exception as exc:
+                recovered = {}
+                if progress:
+                    progress(
+                        "MTBP: retained-report recovery could not start; keeping "
+                        f"the saved report IDs for retry ({exc})"
+                    )
             confirmed_absent = {
                 key
                 for key, evidence in recovered.items()

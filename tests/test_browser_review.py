@@ -1842,7 +1842,10 @@ def test_mtbp_resume_does_not_duplicate_report_when_recovery_is_unavailable(
     prior = DatabaseEvidence(
         "MTBP", "timeout", "pending", raw={"analysis_id": "ARCHER-pending"}
     )
-    monkeypatch.setattr(service, "_recover_mtbp_timeouts", lambda *args, **kwargs: {})
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("Edge profile could not start")
+
+    monkeypatch.setattr(service, "_recover_mtbp_timeouts", unavailable)
     monkeypatch.setattr(
         service,
         "_search_mtbp_batch",
@@ -1859,6 +1862,7 @@ def test_mtbp_resume_does_not_duplicate_report_when_recovery_is_unavailable(
     )
 
     assert results[key] is prior
+    assert results[key].raw["analysis_id"] == "ARCHER-pending"
 
 
 def test_mtbp_resume_resubmits_partial_capture_only_after_confirmed_absence(

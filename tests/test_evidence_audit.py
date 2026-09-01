@@ -56,22 +56,38 @@ def test_mtbp_cleanup_failure_remains_retryable_without_losing_found_result():
         "MTBP",
         "found",
         "Validated evidence",
-        raw={"remote_report_cleanup": {"status": "failed"}},
+        raw={
+            "analysis_id": "ARCHER-failed",
+            "remote_report_cleanup": {"status": "failed"},
+        },
+    )
+    persisted_before_cleanup = DatabaseEvidence(
+        "MTBP",
+        "found",
+        "Validated evidence",
+        raw={"analysis_id": "ARCHER-persisted"},
     )
     deleted = DatabaseEvidence(
         "MTBP",
         "found",
         "Validated evidence",
-        raw={"remote_report_cleanup": {"status": "deleted"}},
+        raw={
+            "analysis_id": "ARCHER-deleted",
+            "remote_report_cleanup": {"status": "deleted"},
+        },
     )
     absent = DatabaseEvidence(
         "MTBP",
         "found",
         "Validated evidence",
-        raw={"remote_report_cleanup": {"status": "already_absent"}},
+        raw={
+            "analysis_id": "ARCHER-absent",
+            "remote_report_cleanup": {"status": "already_absent"},
+        },
     )
 
     assert not is_completed_evidence(failed)
+    assert not is_completed_evidence(persisted_before_cleanup)
     assert is_completed_evidence(deleted)
     assert is_completed_evidence(absent)
 

@@ -8,7 +8,7 @@ Verified 2026-07-31 using public, non-patient test data only.
 | --- | --- | --- | --- |
 | OncoKB | REST API and public API metadata; demo annotation works for BRAF, TP53 and ROS1 | Keep the existing REST adapter and obtain a hospital/patient-services licence plus bearer token | No token is configured locally; clinical use requires the appropriate OncoKB licence |
 | Franklin | Public SNP result pages work without login; supported API authentication exists | Use the existing API adapter when Franklin Premium is enabled; otherwise open the exact public page and retain manual review | API access is a Premium feature; the public page uses undocumented internal endpoints and must not be treated as a stable API |
-| MTBP | Current site uses Keycloak login; accepts variant lists/VCF and produces HTML reports | Login-assisted visible-browser batch workflow with pseudonymized variants and fail-closed report parsing | Public instance is explicitly research-only and cannot support routine clinical reporting |
+| MTBP | Current site uses Keycloak login; accepts variant lists/VCF and produces HTML reports | Login-assisted visible-browser serial one-variant report workflow with pseudonymized variants and fail-closed report parsing | Public instance is explicitly research-only and cannot support routine clinical reporting |
 | HSMD | Licensed web application with limited named users | Request an API-enabled QIAGEN licence or written approval for browser automation | No public supported API was identified; licence terms control automation and reuse |
 
 ## Live checks

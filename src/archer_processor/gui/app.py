@@ -164,6 +164,23 @@ def _completed_evidence_sources(
     return completed
 
 
+def _protected_remote_evidence_sources(
+    evidence: dict[str, list[DatabaseEvidence]],
+) -> set[tuple[str, str]]:
+    """Remote reports whose IDs must survive a generic worker failure."""
+    protected: set[tuple[str, str]] = set()
+    for key, items in evidence.items():
+        for item in items:
+            analysis_id = str(item.raw.get("analysis_id") or "")
+            if (
+                item.database == "MTBP"
+                and analysis_id.startswith("ARCHER-")
+                and not is_completed_evidence(item)
+            ):
+                protected.add((key, item.database))
+    return protected
+
+
 def _failed_search_variants(
     variants,
     evidence: dict[str, list[DatabaseEvidence]],
@@ -2122,12 +2139,14 @@ class MainWindow(QMainWindow):
         if isinstance(worker, BrowserReviewWorker):
             failed_evidence = {}
             completed_sources = _completed_evidence_sources(self.evidence)
+            protected_sources = _protected_remote_evidence_sources(self.evidence)
             for variant in worker.variants:
                 key = BrowserReviewService.variant_key(variant)
                 pending_databases = [
                     database
                     for database in worker.databases
                     if (key, database) not in completed_sources
+                    and (key, database) not in protected_sources
                 ]
                 failed_evidence[key] = [
                     DatabaseEvidence(

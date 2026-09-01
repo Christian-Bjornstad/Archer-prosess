@@ -11,6 +11,7 @@ from archer_processor.gui.app import (
     DatabaseWorker,
     MainWindow,
     _completed_evidence_sources,
+    _protected_remote_evidence_sources,
 )
 from archer_processor.gui.status_model import (
     CellState,
@@ -485,6 +486,22 @@ def test_resume_keeps_unverified_and_partial_evidence_pending():
             {key: [DatabaseEvidence("Franklin", status, "retry")]}
         )
         assert (key, "Franklin") not in completed
+
+
+def test_worker_failure_preserves_retryable_mtbp_report_id():
+    key = "SYNTHETIC_VPM_1|NM_000546.6:c.524G>A"
+    evidence = {
+        key: [
+            DatabaseEvidence(
+                "MTBP",
+                "timeout",
+                "pending",
+                raw={"analysis_id": "ARCHER-pending"},
+            )
+        ]
+    }
+
+    assert (key, "MTBP") in _protected_remote_evidence_sources(evidence)
 
 
 def test_application_icon_is_packaged_and_loaded(qt_app):
