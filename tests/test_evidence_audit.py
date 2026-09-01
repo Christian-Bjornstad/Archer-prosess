@@ -51,6 +51,31 @@ def test_retryable_evidence_is_not_treated_as_completed():
     assert is_completed_evidence(DatabaseEvidence("Franklin", "not_found"))
 
 
+def test_mtbp_cleanup_failure_remains_retryable_without_losing_found_result():
+    failed = DatabaseEvidence(
+        "MTBP",
+        "found",
+        "Validated evidence",
+        raw={"remote_report_cleanup": {"status": "failed"}},
+    )
+    deleted = DatabaseEvidence(
+        "MTBP",
+        "found",
+        "Validated evidence",
+        raw={"remote_report_cleanup": {"status": "deleted"}},
+    )
+    absent = DatabaseEvidence(
+        "MTBP",
+        "found",
+        "Validated evidence",
+        raw={"remote_report_cleanup": {"status": "already_absent"}},
+    )
+
+    assert not is_completed_evidence(failed)
+    assert is_completed_evidence(deleted)
+    assert is_completed_evidence(absent)
+
+
 def test_canonical_audit_contains_resume_metadata(tmp_path):
     evidence = DatabaseEvidence("Franklin", "identity_mismatch", "wrong candidate")
     path = write_evidence_audit(

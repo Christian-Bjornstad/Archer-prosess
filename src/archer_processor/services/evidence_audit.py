@@ -108,6 +108,10 @@ class EvidenceAuditIndex:
 
 
 def is_completed_evidence(evidence: DatabaseEvidence) -> bool:
+    if evidence.database == "MTBP" and evidence.status == "found":
+        cleanup = evidence.raw.get("remote_report_cleanup")
+        if isinstance(cleanup, dict) and cleanup.get("status"):
+            return cleanup["status"] in {"deleted", "already_absent"}
     return evidence.status.strip().casefold() not in RETRYABLE_EVIDENCE_STATUSES
 
 

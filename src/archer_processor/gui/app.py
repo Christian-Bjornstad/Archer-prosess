@@ -356,6 +356,7 @@ class DatabaseWorker(QObject):
                         progress=lambda message, p=prefix: self.status.emit(f"{p}: {message}"),
                         completed_sources=self.completed_sources,
                         checkpoint=self.patient_finished.emit,
+                        prior_evidence=self.existing_evidence,
                     )
                     _merge_evidence_results(patient_evidence, browser_evidence)
 
@@ -654,6 +655,10 @@ class BrowserReviewWorker(QObject):
         completed_sources = self.completed_sources | _completed_evidence_sources(
             self._pass_evidence
         )
+        prior_evidence = {
+            key: list(items) for key, items in self.existing_evidence.items()
+        }
+        _merge_evidence_results(prior_evidence, self._pass_evidence)
         return service.search_variants(
             variants,
             self.databases,
@@ -671,6 +676,7 @@ class BrowserReviewWorker(QObject):
             ),
             completed_sources=completed_sources,
             checkpoint=self.patient_finished.emit,
+            prior_evidence=prior_evidence,
         )
 
     def _final_failed_pass(

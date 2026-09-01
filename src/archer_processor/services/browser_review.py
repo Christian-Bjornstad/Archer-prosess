@@ -228,6 +228,7 @@ class BrowserReviewService:
         activity: Callable[[str, str], None] | None = None,
         completed_sources: set[tuple[str, str]] | None = None,
         checkpoint: Callable[[dict[str, list[DatabaseEvidence]]], None] | None = None,
+        prior_evidence: dict[str, list[DatabaseEvidence]] | None = None,
     ) -> dict[str, list[DatabaseEvidence]]:
         variant_list = list(variants)
         requested = set(databases)
@@ -270,6 +271,7 @@ class BrowserReviewService:
                 pending_variants,
                 artifact_root / database.lower().replace(" ", "-"),
                 progress=provider_progress,
+                prior_evidence=prior_evidence,
             )
             for key, evidence in database_results.items():
                 results[key].append(evidence)
@@ -296,6 +298,7 @@ class BrowserReviewService:
         artifact_directory: Path,
         *,
         progress: Callable[[str], None] | None,
+        prior_evidence: dict[str, list[DatabaseEvidence]] | None = None,
     ) -> dict[str, DatabaseEvidence]:
         self._validate_database(database)
         if database == "MTBP":
@@ -303,6 +306,7 @@ class BrowserReviewService:
                 variants,
                 artifact_directory,
                 progress=progress,
+                prior_evidence=prior_evidence,
             )
         if database == "Franklin":
             return self._search_franklin(
@@ -1170,11 +1174,67 @@ class BrowserReviewService:
         artifact_directory: Path,
         *,
         progress: Callable[[str], None] | None,
+        prior_evidence: dict[str, list[DatabaseEvidence]] | None = None,
     ) -> dict[str, DatabaseEvidence]:
         """Run independent MTBP reports so each screenshot belongs to one variant."""
         results: dict[str, DatabaseEvidence] = {}
+        retained: list[tuple[VariantRecord, DatabaseEvidence]] = []
+        for variant in variants:
+            key = self.variant_key(variant)
+            prior = next(
+                (
+                    item
+                    for item in (prior_evidence or {}).get(key, [])
+                    if item.database == "MTBP"
+                ),
+                None,
+            )
+            if prior is None:
+                continue
+            cleanup = prior.raw.get("remote_report_cleanup")
+            cleanup_status = cleanup.get("status") if isinstance(cleanup, dict) else ""
+            analysis_id = str(prior.raw.get("analysis_id") or "")
+            if analysis_id.startswith("ARCHER-") and (
+                prior.status in {"timeout", "partial_capture"}
+                or (
+                    prior.status == "found"
+                    and cleanup_status not in {"deleted", "already_absent"}
+                )
+            ):
+                retained.append((variant, prior))
+        if retained:
+            if progress:
+                progress(
+                    f"MTBP: recovering {len(retained)} retained report(s) "
+                    "before submission"
+                )
+            recovered = self._recover_mtbp_timeouts(
+                retained,
+                artifact_directory,
+                progress=progress,
+            )
+            confirmed_absent = {
+                key
+                for key, evidence in recovered.items()
+                if isinstance(evidence.raw.get("remote_report_recovery"), dict)
+                and evidence.raw["remote_report_recovery"].get("status")
+                == "confirmed_absent"
+            }
+            results.update(
+                {
+                    key: evidence
+                    for key, evidence in recovered.items()
+                    if key not in confirmed_absent
+                }
+            )
+            for variant, prior in retained:
+                key = self.variant_key(variant)
+                if key not in confirmed_absent:
+                    results.setdefault(key, prior)
         for index, variant in enumerate(variants, start=1):
             self._check_cancelled()
+            if self.variant_key(variant) in results:
+                continue
             if progress:
                 progress(
                     f"MTBP variant {index}/{len(variants)}: "
@@ -1263,9 +1323,46 @@ class BrowserReviewService:
                     report_link = page.get_by_role(
                         "link", name=analysis_id, exact=True
                     )
-                    if report_link.count() != 1:
+                    report_count = report_link.count()
+                    if timed_out.status == "found":
+                        if report_count == 0:
+                            cleanup = {
+                                "status": "already_absent",
+                                "message": (
+                                    "The exact MTBP report was already absent from "
+                                    "the portal."
+                                ),
+                            }
+                        elif report_count == 1:
+                            cleanup = self._delete_mtbp_report(page, analysis_id)
+                        else:
+                            cleanup = {
+                                "status": "failed",
+                                "message": (
+                                    "The exact MTBP analysis ID was not unique in "
+                                    "the report list."
+                                ),
+                            }
+                        timed_out.raw["remote_report_cleanup"] = cleanup
+                        self._write_audit(
+                            timed_out,
+                            self._screenshot_path(
+                                artifact_directory, "MTBP", variant
+                            ).with_suffix(".audit.json"),
+                        )
+                        recovered[self.variant_key(variant)] = timed_out
+                        continue
+                    if report_count != 1:
                         if progress:
                             progress(f"MTBP: late report is still pending ({analysis_id})")
+                        if timed_out.status == "timeout":
+                            recovered[self.variant_key(variant)] = timed_out
+                        elif timed_out.status == "partial_capture":
+                            if report_count == 0:
+                                timed_out.raw["remote_report_recovery"] = {
+                                    "status": "confirmed_absent"
+                                }
+                            recovered[self.variant_key(variant)] = timed_out
                         continue
                     report_link.click()
                     page.wait_for_url(
@@ -1791,10 +1888,18 @@ class BrowserReviewService:
             if not page.url.startswith(MTBP_REPORTS_URL):
                 self._goto_with_retries(page, MTBP_REPORTS_URL)
             report_link = page.get_by_role("link", name=analysis_id, exact=True)
-            if report_link.count() != 1:
+            report_count = report_link.count()
+            if report_count == 0:
                 return {
-                    "status": "not_found",
-                    "message": "The exact generated report was not present in the report list.",
+                    "status": "already_absent",
+                    "message": "The exact generated report was already absent.",
+                }
+            if report_count != 1:
+                return {
+                    "status": "failed",
+                    "message": (
+                        "The exact generated report was not unique in the report list."
+                    ),
                 }
             row = report_link.locator("xpath=ancestor::tr[1]")
             delete_button = row.locator("button.delete-patient")

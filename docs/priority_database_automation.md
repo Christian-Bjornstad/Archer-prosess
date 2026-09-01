@@ -55,10 +55,10 @@ Validated login-assisted workflow:
 
 1. Export only gene/variant data; exclude sample and patient identifiers.
 2. Store the login password in Windows Credential Manager or log in interactively; never store it in application JSON.
-3. Submit one pseudonymized batch using transcript-qualified HGVS first.
-4. When MTBP rejects transcript mapping, retry only those entries as GRCh37 genomic HGVS derived from the Archer position/ref/alt; remove only entries rejected in both forms.
+3. Submit one pseudonymized variant per report using transcript-qualified HGVS first.
+4. When MTBP rejects transcript mapping, retry that variant as GRCh37 genomic HGVS derived from the Archer position/ref/alt.
 5. Run MTBP after all other browser databases and wait up to the configurable report timeout (20 minutes by default).
-6. Capture the report URL, screenshot and structured audit JSON.
+6. Persist the screenshot and structured audit JSON locally without exporting the private report URL, then delete the exact completed `ARCHER-` report.
 7. Verify every returned alteration against the submitted normalized variants.
 8. Import functional class, evidence category, actionability tier, source links and pipeline/database versions.
 
