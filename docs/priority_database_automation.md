@@ -107,11 +107,12 @@ sources, COSMIC, OncoKB, Franklin, and finally MTBP for one patient before resta
 the first source for the next patient. Public/API sources have no added delay. A
 fresh randomized safety delay is used only for signed-in website variants and
 provider changes (10-20 seconds by default). Completed patient evidence is
-checkpointed into the workbook during long runs. MTBP reports created with the
-application’s `ARCHER-` prefix are retained until six accumulate, at which point
-all six are deleted together. The same cleanup is triggered early if the report
-list reaches its ten-report limit. Local captures are written before post-analysis
-cleanup, and manually named reports are never automatically deleted.
+checkpointed into the workbook during long runs. MTBP allows five reports in the
+portal. After a report is validated and its evidence is persisted locally, the
+application deletes that exact `ARCHER-` report before submitting the next variant.
+Timeout and incomplete-capture reports remain available for recovery. If all five
+slots are occupied, the MTBP step fails safely instead of deleting an unresolved or
+manually named report.
 
 OncoKB browser credentials can also be saved in Windows Credential Manager.
 Database and browser searches expose an **Included variants only** option,

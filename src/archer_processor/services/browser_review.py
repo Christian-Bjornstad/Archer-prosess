@@ -29,8 +29,7 @@ from archer_processor.services.variant_identity import (
 
 BROWSER_DATABASES = ("COSMIC", "OncoKB", "Franklin", "ClinVar", "MTBP")
 MTBP_REPORTS_URL = "https://mtbp.org/patients/"
-MTBP_REPORT_LIMIT = 10
-MTBP_ARCHER_CLEANUP_THRESHOLD = 6
+MTBP_REPORT_LIMIT = 5
 
 LOGIN_URLS = {
     "ClinVar": "https://www.ncbi.nlm.nih.gov/clinvar/",
@@ -1333,11 +1332,17 @@ class BrowserReviewService:
                             "late_report_recovered": True,
                         }
                     )
-                    self._write_audit(
-                        evidence,
-                        self._screenshot_path(
-                            artifact_directory, "MTBP", variant
-                        ).with_suffix(".audit.json"),
+                    self._finalize_mtbp_report(
+                        page,
+                        analysis_id,
+                        [
+                            (
+                                self._screenshot_path(
+                                    artifact_directory, "MTBP", variant
+                                ).with_suffix(".audit.json"),
+                                evidence,
+                            )
+                        ],
                     )
                     recovered[self.variant_key(variant)] = evidence
                     if progress:
@@ -1615,25 +1620,25 @@ class BrowserReviewService:
                     ).with_suffix(".audit.json")
                     audit_records.append((audit_path, evidence))
                     results[key] = evidence
-                try:
-                    remote_cleanup = self._cleanup_stale_mtbp_reports(
-                        page,
-                        progress=progress,
-                    )
-                except Exception as exc:
-                    remote_cleanup = {
-                        "status": "failed",
-                        "message": f"Post-capture MTBP cleanup failed: {exc}",
-                    }
+                remote_cleanup = self._finalize_mtbp_report(
+                    page,
+                    analysis_id,
+                    audit_records,
+                )
                 if progress:
-                    if remote_cleanup["status"] == "retained":
+                    if remote_cleanup["status"] == "deleted":
                         progress(
-                            "MTBP: remote report kept; cleanup threshold not reached "
+                            "MTBP: locally captured report deleted from portal "
+                            f"({analysis_id})"
+                        )
+                    elif remote_cleanup["status"] == "retained_incomplete":
+                        progress(
+                            "MTBP: incomplete report retained for recovery "
                             f"({analysis_id})"
                         )
                     else:
                         progress(
-                            "MTBP: remote report housekeeping "
+                            "MTBP: remote report cleanup "
                             f"{remote_cleanup['status']} ({analysis_id})"
                         )
                     found_count = sum(
@@ -1644,12 +1649,6 @@ class BrowserReviewService:
                     progress(
                         f"MTBP: completed with {found_count}/{len(query_pairs)} "
                         "variant(s) matched"
-                    )
-                for audit_path, evidence in audit_records:
-                    evidence.raw["remote_report_cleanup"] = remote_cleanup
-                    audit_path.write_text(
-                        json.dumps(asdict(evidence), ensure_ascii=False, indent=2),
-                        encoding="utf-8",
                     )
         except MtbpReportTimeout:
             current_url = context.pages[0].url if context and context.pages else self.login_url("MTBP")
@@ -1730,81 +1729,56 @@ class BrowserReviewService:
         *,
         progress: Callable[[str], None] | None,
     ) -> dict[str, Any]:
-        """Batch-delete app reports at the threshold or when capacity is exhausted."""
+        """Refuse new submissions when MTBP has no free report slot."""
         self._goto_with_retries(page, MTBP_REPORTS_URL)
-        deleted: list[str] = []
-        failed: list[dict[str, str]] = []
         remaining = page.locator("button.delete-patient").count()
         generated = page.locator(
             "button.delete-patient[data-patient-name^='ARCHER-']"
         )
         generated_count = generated.count()
-        threshold_reached = generated_count >= MTBP_ARCHER_CLEANUP_THRESHOLD
-        capacity_reached = remaining >= MTBP_REPORT_LIMIT
-        if not threshold_reached and not capacity_reached:
-            return {
-                "status": "retained",
-                "trigger": "none",
-                "deleted_stale_reports": [],
-                "failed_deletions": [],
-                "remaining_reports": remaining,
-                "remaining_archer_reports": generated_count,
-            }
-
-        trigger = "archer_threshold" if threshold_reached else "report_capacity"
-        for _ in range(MTBP_REPORT_LIMIT + 1):
-            generated = page.locator(
-                "button.delete-patient[data-patient-name^='ARCHER-']"
-            )
-            generated_count = generated.count()
-            if generated_count == 0:
-                break
-            analysis_id = (
-                generated.nth(0).get_attribute("data-patient-name")
-                or ""
-            )
-            if not analysis_id.startswith("ARCHER-"):
-                failed.append(
-                    {"analysis_id": analysis_id, "reason": "unsafe identifier"}
-                )
-                break
-            outcome = self._delete_mtbp_report(page, analysis_id)
-            if outcome["status"] == "deleted":
-                deleted.append(analysis_id)
-                if progress:
-                    progress(f"MTBP: deleted stale application report {analysis_id}")
-            else:
-                failed.append(
-                    {
-                        "analysis_id": analysis_id,
-                        "reason": outcome.get("message", outcome["status"]),
-                    }
-                )
-                break
-            remaining = page.locator("button.delete-patient").count()
-
-        generated_remaining = page.locator(
-            "button.delete-patient[data-patient-name^='ARCHER-']"
-        ).count()
-        if generated_remaining:
-            raise RuntimeError(
-                "MTBP batch cleanup did not remove every ARCHER report; "
-                f"{generated_remaining} application report(s) remain."
-            )
         if remaining >= MTBP_REPORT_LIMIT:
             raise RuntimeError(
                 f"MTBP has {remaining} reports and allows only {MTBP_REPORT_LIMIT}. "
-                "No additional application-created ARCHER report could be removed safely; "
-                "delete an older report manually in the MTBP Reports List."
+                "The app will not delete an unresolved report automatically; "
+                "delete an older report manually in the MTBP Reports List or resume "
+                "after a pending report has been recovered."
             )
         return {
-            "status": "deleted_batch",
-            "trigger": trigger,
-            "deleted_stale_reports": deleted,
-            "failed_deletions": failed,
+            "status": "retained",
+            "trigger": "none",
+            "deleted_stale_reports": [],
+            "failed_deletions": [],
             "remaining_reports": remaining,
-            "remaining_archer_reports": generated_remaining,
+            "remaining_archer_reports": generated_count,
         }
+
+    def _finalize_mtbp_report(
+        self,
+        page: Any,
+        analysis_id: str,
+        audit_records: list[tuple[Path, DatabaseEvidence]],
+    ) -> dict[str, str]:
+        """Persist local evidence before removing one exact completed report."""
+        for audit_path, evidence in audit_records:
+            self._write_audit(evidence, audit_path)
+        fully_captured = bool(audit_records) and all(
+            evidence.status == "found" and evidence.raw.get("screenshots")
+            for _, evidence in audit_records
+        )
+        if fully_captured:
+            outcome = self._delete_mtbp_report(page, analysis_id)
+        else:
+            outcome = {
+                "status": "retained_incomplete",
+                "message": (
+                    "MTBP report retained because local evidence capture is "
+                    "incomplete."
+                ),
+            }
+        for audit_path, evidence in audit_records:
+            evidence.raw["remote_report_cleanup"] = outcome
+            self._write_audit(evidence, audit_path)
+        return outcome
 
     def _delete_mtbp_report(self, page: Any, analysis_id: str) -> dict[str, str]:
         """Delete one exact app-generated report and never touch manual report IDs."""
