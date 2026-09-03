@@ -70,5 +70,11 @@ def application_stylesheet() -> str:
         QLineEdit:focus, QTableWidget:focus {{
             border: 2px solid #087EA4;
         }}
-        QPushButton#PrimaryButton {{ min-height: 24px; }}
+        QPushButton:not([compact="true"]) {{
+            min-height: 44px;
+            padding: 9px 15px;
+        }}
+        QPushButton#PrimaryButton, QPushButton#ReportButton {{
+            min-height: 44px;
+        }}
     """

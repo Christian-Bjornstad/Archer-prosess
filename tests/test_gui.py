@@ -4,6 +4,7 @@ import re
 import time
 
 from PIL import Image
+from PyQt6.QtWidgets import QPushButton
 
 from archer_processor.core import DatabaseEvidence, VariantProcessor, default_artifact_rules
 from archer_processor.gui.app import (
@@ -27,6 +28,36 @@ from archer_processor.gui.widgets.run_status import RunStatusStrip
 from archer_processor.reports import ExcelReportWriter, PatientReportOutcome
 from archer_processor.services import DatabaseSearchService
 from archer_processor.services import AppSettings
+
+
+def test_primary_and_secondary_text_actions_are_at_least_44px(qt_app):
+    window = MainWindow()
+    text_actions = [
+        button
+        for button in window.findChildren(QPushButton)
+        if button.text() and button.objectName() != "SidebarButton"
+    ]
+
+    assert all(button.minimumHeight() >= 44 for button in text_actions)
+    assert window.patient_excel_btn.text() == "Generer VEDLEGG_APP"
+    assert window.patient_excel_btn.parent().objectName() == "ReportsGroup"
+
+
+def test_evidence_actions_fit_target_window_sizes(qt_app):
+    window = MainWindow()
+    window.show()
+    for width, height in [(1120, 720), (1440, 900)]:
+        window.resize(width, height)
+        qt_app.processEvents()
+        viewport = window.database_scroll.viewport().rect()
+        for button in [
+            window.search_btn,
+            window.rewrite_btn,
+            window.patient_excel_btn,
+        ]:
+            point = button.mapTo(window.database_scroll.viewport(), button.rect().topLeft())
+            assert point.x() >= 0
+            assert point.x() + button.width() <= viewport.width()
 
 
 def test_database_tab_contains_current_sources(qt_app):

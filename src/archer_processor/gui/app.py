@@ -943,6 +943,9 @@ class MainWindow(QMainWindow):
             *root.findChildren(QCheckBox),
         ]:
             control.setCursor(Qt.CursorShape.PointingHandCursor)
+        for button in root.findChildren(QPushButton):
+            if button.text() and button.objectName() != "SidebarButton":
+                button.setMinimumHeight(max(44, button.minimumHeight()))
 
         self.setCentralWidget(root)
         self.status_bar = QStatusBar()
@@ -1327,6 +1330,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(options)
 
         exports = QGroupBox("Reports")
+        exports.setObjectName("ReportsGroup")
         exports.setMinimumHeight(105)
         export_layout = QHBoxLayout(exports)
         export_help = QLabel(
