@@ -89,6 +89,66 @@ def test_patient_overview_sorts_variants_by_descending_af_with_missing_last(tmp_
         workbook.close()
 
 
+def test_patient_overview_preserves_manual_comment_and_hsmd_after_af_reordering(
+    tmp_path,
+):
+    result = VariantProcessor().process(
+        FIXTURE, "2026-09-03", tmp_path / "review.xlsx"
+    )
+    base = result.variants[3]
+    first = replace(base, source_row=101, hgvsc="NM_000546.6:c.100A>G", af=0.30)
+    second = replace(base, source_row=102, hgvsc="NM_000546.6:c.200A>G", af=0.10)
+    output = tmp_path / "patient.xlsx"
+    writer = PatientExcelReportWriter()
+
+    writer.write_patient(result, base.patient_id, [first, second], output, {})
+    workbook = openpyxl.load_workbook(output)
+    try:
+        overview = workbook["Oversikt"]
+        headers = [overview.cell(10, column).value for column in range(1, 11)]
+        assert headers == [
+            "Gen",
+            "HGVSc",
+            "HGVSp",
+            "Kort evidens",
+            "Kommentar",
+            "MTBP",
+            "Franklin",
+            "ClinVar",
+            "OncoKB",
+            "COSMIC",
+        ]
+        second_row = next(
+            row
+            for row in range(11, overview.max_row + 1)
+            if overview.cell(row, 2).value == second.hgvsc
+        )
+        overview.cell(second_row, 4, "MTBP - gammelt\nHSMD - intern klassifikasjon")
+        overview.cell(second_row, 5, "Vurdert manuelt")
+        workbook.save(output)
+    finally:
+        workbook.close()
+
+    first.af = 0.05
+    second.af = 0.40
+    writer.write_patient(result, base.patient_id, [first, second], output, {})
+
+    regenerated = openpyxl.load_workbook(output)
+    try:
+        overview = regenerated["Oversikt"]
+        second_row = next(
+            row
+            for row in range(11, overview.max_row + 1)
+            if overview.cell(row, 2).value == second.hgvsc
+        )
+        assert second_row == 11
+        assert overview.cell(second_row, 5).value == "Vurdert manuelt"
+        assert "HSMD - intern klassifikasjon" in overview.cell(second_row, 4).value
+        assert "MTBP - gammelt" not in overview.cell(second_row, 4).value
+    finally:
+        regenerated.close()
+
+
 def test_patient_data_sheet_includes_artifacts_without_skip_column(tmp_path):
     result = VariantProcessor().process(
         FIXTURE, "2026-08-11", tmp_path / "review.xlsx"
@@ -287,14 +347,15 @@ def test_patient_excel_report_uses_requested_sheet_layout_and_image_order(tmp_pa
     overview = workbook["Oversikt"]
     assert overview["A1"].value == "VPM-tolkning – 26OUM00004"
     assert overview["A3"].value is None
-    assert [overview.cell(10, column).value for column in range(1, 10)] == [
+    assert [overview.cell(10, column).value for column in range(1, 11)] == [
         "Gen", "HGVSc", "HGVSp", "Kort evidens",
-        "MTBP", "Franklin", "ClinVar", "OncoKB", "COSMIC",
+        "Kommentar", "MTBP", "Franklin", "ClinVar", "OncoKB", "COSMIC",
     ]
     assert "ClinVar - Pathogenic" in overview["D11"].value
-    assert overview["G11"].value == "Pathogenic"
-    assert overview["G11"].hyperlink.target.endswith("/12345/")
-    assert overview["E11"].hyperlink is None
+    assert "HSMD -" in overview["D11"].value
+    assert overview["H11"].value == "Pathogenic"
+    assert overview["H11"].hyperlink.target.endswith("/12345/")
+    assert overview["F11"].hyperlink is None
     assert workbook["Vedlegg"]["A1"].value == "26OUM00004"
     variant_sheet = workbook["TP53"]
     assert variant_sheet["A6"].hyperlink is None

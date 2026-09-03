@@ -17,6 +17,11 @@ from archer_processor.core.highlights import variant_highlight
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
 from archer_processor.core.sorting import variant_sort_key
 from archer_processor.reports.excel_report import ExcelReportWriter
+from archer_processor.reports.manual_fields import (
+    ManualVariantFields,
+    read_manual_fields,
+    variant_manual_key,
+)
 
 
 REPORT_DATABASES = ("MTBP", "Franklin", "ClinVar", "OncoKB", "COSMIC")
@@ -119,9 +124,17 @@ class PatientExcelReportWriter:
         evidence: dict[str, list[DatabaseEvidence]],
     ) -> Path:
         variants = sorted(variants, key=variant_sort_key)
+        manual_fields = read_manual_fields(output_path, patient_id)
         workbook = Workbook()
         placeholder = workbook.active
-        self._overview_sheet(workbook, result, patient_id, variants, evidence)
+        self._overview_sheet(
+            workbook,
+            result,
+            patient_id,
+            variants,
+            evidence,
+            manual_fields,
+        )
         workbook.remove(placeholder)
         self._attachment_sheet(workbook, patient_id)
         patient_data = [
@@ -240,34 +253,51 @@ class PatientExcelReportWriter:
         patient_id: str,
         variants: list[VariantRecord],
         evidence: dict[str, list[DatabaseEvidence]],
+        manual_fields: dict[str, ManualVariantFields],
     ) -> None:
         ws = workbook.create_sheet("Oversikt")
         self._base_sheet(ws)
         ws.sheet_properties.tabColor = self.colors["navy"]
-        ws.merge_cells("A1:I2")
+        ws.merge_cells("A1:J2")
         ws["A1"] = f"VPM-tolkning – {patient_id}"
         self._title_style(ws["A1"])
-        self._info_row(ws, 5, "DIT/pasientnummer", patient_id, end_column=9)
-        self._info_row(ws, 6, "Rapportdato", result.run_date, end_column=9)
-        self._info_row(ws, 7, "Antall varianter", len(variants), end_column=9)
+        self._info_row(ws, 5, "DIT/pasientnummer", patient_id, end_column=10)
+        self._info_row(ws, 6, "Rapportdato", result.run_date, end_column=10)
+        self._info_row(ws, 7, "Antall varianter", len(variants), end_column=10)
 
-        ws.merge_cells("A9:I9")
+        ws.merge_cells("A9:J9")
         ws["A9"] = "Varianter og signifikant evidens"
         self._section_style(ws["A9"])
-        headers = ["Gen", "HGVSc", "HGVSp", "Kort evidens", *REPORT_DATABASES]
+        headers = [
+            "Gen",
+            "HGVSc",
+            "HGVSp",
+            "Kort evidens",
+            "Kommentar",
+            *REPORT_DATABASES,
+        ]
         for column, header in enumerate(headers, start=1):
             cell = ws.cell(10, column, header)
             self._header_style(cell)
         for row, variant in enumerate(variants, start=11):
             by_database = self._by_database(evidence.get(self._key(variant), []))
+            manual = manual_fields.get(
+                variant_manual_key(patient_id, variant), ManualVariantFields()
+            )
             values: list[Any] = [
                 variant.symbol,
                 variant.hgvsc,
                 variant.hgvsp,
                 "\n".join(
-                    f"{database} - {self._compact_evidence(by_database.get(database, []))}"
-                    for database in REPORT_DATABASES
+                    [
+                        *[
+                            f"{database} - {self._compact_evidence(by_database.get(database, []))}"
+                            for database in REPORT_DATABASES
+                        ],
+                        manual.hsmd,
+                    ]
                 ),
+                manual.comment,
                 *[
                     self._compact_evidence(by_database.get(database, []))
                     for database in REPORT_DATABASES
@@ -277,7 +307,7 @@ class PatientExcelReportWriter:
                 cell = ws.cell(row, column, value)
                 cell.border = self._border()
                 cell.alignment = Alignment(vertical="top", wrap_text=True)
-            for offset, database in enumerate(REPORT_DATABASES, start=5):
+            for offset, database in enumerate(REPORT_DATABASES, start=6):
                 items = by_database.get(database, [])
                 if items and items[0].url and database != "MTBP":
                     ws.cell(row, offset).hyperlink = items[0].url
@@ -301,7 +331,7 @@ class PatientExcelReportWriter:
                     else self.colors["pale_blue"]
                 )
             if fill_color:
-                for column in range(1, 10):
+                for column in range(1, 11):
                     ws.cell(row, column).fill = PatternFill(
                         "solid", fgColor=fill_color
                     )
@@ -310,11 +340,12 @@ class PatientExcelReportWriter:
         ws.column_dimensions["B"].width = 31
         ws.column_dimensions["C"].width = 25
         ws.column_dimensions["D"].width = 52
-        for column in "EFGHI":
+        ws.column_dimensions["E"].width = 32
+        for column in "FGHIJ":
             ws.column_dimensions[column].width = 22
-        ws.auto_filter.ref = f"A10:I{max(10, 10 + len(variants))}"
+        ws.auto_filter.ref = f"A10:J{max(10, 10 + len(variants))}"
         ws.freeze_panes = "A10"
-        ws.print_area = f"A1:I{max(16, 11 + len(variants))}"
+        ws.print_area = f"A1:J{max(16, 11 + len(variants))}"
 
     def _attachment_sheet(self, workbook: Workbook, patient_id: str) -> None:
         ws = workbook.create_sheet("Vedlegg")
