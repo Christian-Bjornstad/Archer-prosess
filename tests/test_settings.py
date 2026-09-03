@@ -210,7 +210,7 @@ def test_legacy_four_artifact_defaults_migrate_to_fragmentation_v2_catalog(
 
     loaded = AppSettings.load()
 
-    assert loaded.artifact_catalog_version == 2
+    assert loaded.artifact_catalog_version == 3
     assert loaded.artifact_rules == default_artifact_rules()
 
 
@@ -229,3 +229,37 @@ def test_custom_artifacts_are_preserved_during_catalog_version_migration(
     loaded = AppSettings.load()
 
     assert loaded.artifact_rules == custom
+    assert loaded.artifact_catalog_version == 3
+
+
+def test_fragmentation_v2_defaults_migrate_to_v3_catalog(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(AppSettings, "config_path", classmethod(lambda cls: config_path))
+    monkeypatch.setattr(
+        "archer_processor.services.settings.credentials.get_saved_password",
+        lambda provider, username: "",
+    )
+    v1_additions = {
+        "NM_004364.4:c.288C>G",
+        "NM_004364.4:c.280G>C",
+        "NM_004364.4:c.296G>C",
+    }
+    former_v2 = [
+        entry
+        for entry in default_artifact_rules()
+        if entry["hgvsc"] not in v1_additions
+    ]
+    config_path.write_text(
+        json.dumps(
+            {
+                "artifact_catalog_version": 2,
+                "artifact_rules": former_v2,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = AppSettings.load()
+
+    assert loaded.artifact_catalog_version == 3
+    assert loaded.artifact_rules == default_artifact_rules()

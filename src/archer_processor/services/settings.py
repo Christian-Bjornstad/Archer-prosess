@@ -33,7 +33,7 @@ class AppSettings:
     mtbp_cancer_type: str = "Blood"
     last_processed_workbook: str = ""
     offer_recent_analysis: bool = True
-    artifact_catalog_version: int = 2
+    artifact_catalog_version: int = 3
     artifact_rules: list[dict[str, str]] = field(default_factory=default_artifact_rules)
     enabled_databases: list[str] = field(
         default_factory=lambda: [
@@ -91,6 +91,25 @@ class AppSettings:
             if configured_hgvsc == legacy_hgvsc:
                 settings.artifact_rules = default_artifact_rules()
             settings.artifact_catalog_version = 2
+        if int(data.get("artifact_catalog_version", 0) or 0) < 3:
+            fragmentation_v1_additions = {
+                "NM_004364.4:c.288C>G",
+                "NM_004364.4:c.280G>C",
+                "NM_004364.4:c.296G>C",
+            }
+            former_v2_hgvsc = {
+                str(entry.get("hgvsc") or "").strip()
+                for entry in default_artifact_rules()
+                if str(entry.get("hgvsc") or "").strip()
+                not in fragmentation_v1_additions
+            }
+            configured_hgvsc = {
+                str(entry.get("hgvsc") or "").strip()
+                for entry in settings.artifact_rules
+            }
+            if configured_hgvsc == former_v2_hgvsc:
+                settings.artifact_rules = default_artifact_rules()
+            settings.artifact_catalog_version = 3
         settings.browser_delay_seconds = max(0, int(settings.browser_delay_seconds))
         settings.browser_delay_max_seconds = max(
             settings.browser_delay_seconds,

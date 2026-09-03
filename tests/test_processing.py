@@ -40,11 +40,16 @@ def test_production_rules_and_boundaries():
     assert by_sample["26OUM00005"].warnings
 
 
-def test_default_artifact_catalog_comes_from_fragmentation_v2_hgvsc_column():
+def test_default_artifact_catalog_includes_fragmentation_v1_and_v2_hgvsc_columns():
     rules = default_artifact_rules()
 
-    assert len(rules) == 36
-    assert len({entry["hgvsc"] for entry in rules}) == 36
+    assert len(rules) == 39
+    assert len({entry["hgvsc"] for entry in rules}) == 39
+    assert {
+        "NM_004364.4:c.288C>G",
+        "NM_004364.4:c.280G>C",
+        "NM_004364.4:c.296G>C",
+    } <= {entry["hgvsc"] for entry in rules}
     assert {entry["gene"] for entry in rules} >= {
         "ASXL1",
         "ATRX",
