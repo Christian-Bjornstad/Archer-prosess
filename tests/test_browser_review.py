@@ -10,6 +10,7 @@ from archer_processor.services.browser_review import (
     BrowserReviewService,
     _cosmic_identifier,
     _cosmic_identifiers,
+    _cosmic_genomic_query,
     _cosmic_numeric_id,
     _cosmic_source_url,
     _expanded_capture_box,
@@ -25,6 +26,7 @@ from archer_processor.services.browser_review import (
     parse_oncokb_page,
 )
 from archer_processor.services.capture_validation import CaptureValidation
+from archer_processor.services.provider_failures import ProviderFailureKind
 
 
 VALID_CAPTURE = lambda _: CaptureValidation(True, "ok", 800, 500, 10.0)
@@ -200,6 +202,267 @@ def test_cosmic_lookup_tries_each_identifier_until_verified_match(
     assert evidence.status == "found"
     assert evidence.accession == "COSV222"
     assert evidence.raw["query_attempts"] == ["COSM111", "COSV222"]
+
+
+def test_cosmic_uses_genomic_fallback_after_all_identifiers_miss(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    variant.cosmic_id = "COSM111; COSV222"
+    service = BrowserReviewService(profile_root=tmp_path)
+    genomic_attempts = []
+
+    monkeypatch.setattr(
+        service,
+        "_lookup_cosmic_with_retry",
+        lambda page, candidate, query_url, artifact_directory, *, progress: (
+            DatabaseEvidence(
+                "COSMIC",
+                "not_found",
+                "identifier did not resolve",
+                accession=candidate.cosmic_id,
+                raw={"failure_kind": ProviderFailureKind.NOT_FOUND.value},
+            )
+        ),
+    )
+
+    def genomic_lookup(page, candidate, query, artifact_directory, *, progress):
+        genomic_attempts.append(query)
+        return DatabaseEvidence("COSMIC", "found", "genomic match", accession="COSV999")
+
+    monkeypatch.setattr(service, "_lookup_cosmic_genomic_with_retry", genomic_lookup)
+
+    evidence = service._lookup_cosmic_variant(
+        object(), variant, tmp_path / "cosmic", progress=None
+    )
+
+    expected = "chr17:g.7578406G>A"
+    assert _cosmic_genomic_query(variant) == expected
+    assert genomic_attempts == [expected]
+    assert evidence.status == "found"
+    assert evidence.raw["lookup_mode"] == "genomic_fallback"
+    assert evidence.raw["query_attempts"] == ["COSM111", "COSV222", expected]
+
+
+def _genomic_fallback_service(tmp_path, monkeypatch, *, identifier_status="not_found"):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    variant.cosmic_id = "COSM111; COSV222"
+    service = BrowserReviewService(
+        profile_root=tmp_path, navigation_timeout_ms=100
+    )
+    monkeypatch.setattr(
+        service,
+        "_lookup_cosmic_with_retry",
+        lambda page, candidate, query_url, artifact_directory, *, progress: (
+            DatabaseEvidence(
+                "COSMIC",
+                identifier_status,
+                "identifier did not resolve",
+                accession=candidate.cosmic_id,
+                raw={"failure_kind": ProviderFailureKind.NOT_FOUND.value},
+            )
+        ),
+    )
+    return service, variant
+
+
+class _GenomicLinks:
+    def __init__(self, values):
+        self.values = values
+
+    def evaluate_all(self, script):
+        return self.values
+
+
+class _NoMatches:
+    def evaluate_all(self, script):
+        return []
+
+
+class _BodyText:
+    def __init__(self, text):
+        self.text = text
+
+    def inner_text(self, timeout=None):
+        return self.text
+
+
+TP53_MATCHING_BODY = "TP53 GRCh37 chr17:7578406 G>A c.524G>A R175H"
+
+
+class _GenomicPage:
+    """Fake COSMIC search page listing genome=37 candidate URLs.
+
+    ``body`` is the text served for every candidate page; it must carry the
+    variant's GRCh37 identity for ``_cosmic_page_matches_variant`` to accept.
+    """
+
+    def __init__(self, candidates, body=TP53_MATCHING_BODY):
+        self.url = "https://cancer.sanger.ac.uk/cosmic/search?q=chr17"
+        self.candidates = list(candidates)
+        self.body = body
+
+    def locator(self, selector):
+        if selector == "a[href*='/cosmic/mutation/overview']":
+            return _GenomicLinks(self.candidates)
+        if selector == "a[href*='genome=37'][href*='id=']":
+            return _GenomicLinks([])
+        if selector == "body":
+            return _BodyText(self.body)
+        return _NoMatches()
+
+    def goto(self, url, **kwargs):
+        self.url = url
+
+    def wait_for_timeout(self, milliseconds):
+        pass
+
+
+GRCH37_TP53 = (
+    "https://cancer.sanger.ac.uk/cosmic/mutation/overview"
+    "?cosm=COSM10648&genome=37&id=43598117&trans=TP53"
+)
+
+
+def test_cosmic_genomic_fallback_accepts_one_verified_candidate(
+    tmp_path, monkeypatch
+):
+    service, variant = _genomic_fallback_service(tmp_path, monkeypatch)
+    page = _GenomicPage([GRCH37_TP53])
+    monkeypatch.setattr(service, "_wait_for_cosmic_result", lambda page: None)
+    monkeypatch.setattr(
+        service,
+        "_capture_cosmic_result",
+        lambda variant, page, directory: DatabaseEvidence(
+            "COSMIC", "found", "genomic match", accession="COSV999", url=page.url
+        ),
+    )
+
+    evidence = service._lookup_cosmic_genomic_with_retry(
+        page, variant, _cosmic_genomic_query(variant), tmp_path, progress=None
+    )
+
+    assert evidence.status == "found"
+    assert evidence.url == GRCH37_TP53
+
+
+def test_cosmic_genomic_fallback_is_ambiguous_for_two_verified_candidates(
+    tmp_path, monkeypatch
+):
+    service, variant = _genomic_fallback_service(tmp_path, monkeypatch)
+    page = _GenomicPage([GRCH37_TP53, GRCH37_TP53 + "&alt=1"])
+    monkeypatch.setattr(service, "_wait_for_cosmic_result", lambda page: None)
+
+    evidence = service._lookup_cosmic_genomic_with_retry(
+        page, variant, _cosmic_genomic_query(variant), tmp_path, progress=None
+    )
+
+    assert evidence.status == "ambiguous"
+    assert evidence.raw["failure_kind"] == ProviderFailureKind.AMBIGUOUS.value
+
+
+def test_cosmic_genomic_fallback_rejects_identity_mismatch(
+    tmp_path, monkeypatch
+):
+    service, variant = _genomic_fallback_service(tmp_path, monkeypatch)
+    page = _GenomicPage(
+        [GRCH37_TP53],
+        body="TP53 GRCh37 chr17:7578407 T>C c.524G>T",
+    )
+    monkeypatch.setattr(service, "_wait_for_cosmic_result", lambda page: None)
+
+    evidence = service._lookup_cosmic_genomic_with_retry(
+        page, variant, _cosmic_genomic_query(variant), tmp_path, progress=None
+    )
+
+    assert evidence.status == "identity_mismatch"
+    assert evidence.raw["failure_kind"] == ProviderFailureKind.IDENTITY_MISMATCH.value
+
+
+def test_cosmic_genomic_fallback_reports_missing_candidates(
+    tmp_path, monkeypatch
+):
+    service, variant = _genomic_fallback_service(tmp_path, monkeypatch)
+    page = _GenomicPage([])
+
+    evidence = service._lookup_cosmic_genomic_with_retry(
+        page, variant, _cosmic_genomic_query(variant), tmp_path, progress=None
+    )
+
+    assert evidence.status == "not_found"
+    assert evidence.raw["failure_kind"] == ProviderFailureKind.NOT_FOUND.value
+
+
+def test_cosmic_genomic_fallback_retries_transient_failure_once(
+    tmp_path, monkeypatch
+):
+    service, variant = _genomic_fallback_service(tmp_path, monkeypatch)
+    page = _GenomicPage([GRCH37_TP53])
+    wait_calls = []
+
+    def wait_for_result(current_page):
+        wait_calls.append(current_page.url)
+        if len(wait_calls) == 1:
+            raise TimeoutError("transient render")
+
+    monkeypatch.setattr(service, "_wait_for_cosmic_result", wait_for_result)
+    monkeypatch.setattr(
+        service,
+        "_capture_cosmic_result",
+        lambda variant, page, directory: DatabaseEvidence("COSMIC", "found", "ok"),
+    )
+    messages = []
+    evidence = service._lookup_cosmic_genomic_with_retry(
+        page, variant, _cosmic_genomic_query(variant), tmp_path,
+        progress=messages.append,
+    )
+
+    assert evidence.status == "found"
+    assert len(wait_calls) == 2
+    assert any("retrying once" in message for message in messages)
+
+
+def test_cosmic_genomic_fallback_propagates_persistent_timeout(
+    tmp_path, monkeypatch
+):
+    service, variant = _genomic_fallback_service(tmp_path, monkeypatch)
+    page = _GenomicPage([GRCH37_TP53])
+
+    def wait_for_result(current_page):
+        raise TimeoutError("page never rendered")
+
+    monkeypatch.setattr(service, "_wait_for_cosmic_result", wait_for_result)
+
+    with pytest.raises(TimeoutError):
+        service._lookup_cosmic_genomic_with_retry(
+            page, variant, _cosmic_genomic_query(variant), tmp_path, progress=None
+        )
+
+
+def test_cosmic_genomic_fallback_without_alleles_reports_invalid_query(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    variant.cosmic_id = "COSM111"
+    variant.genomic_location = ""
+    variant.ref_allele = ""
+    variant.alt_allele = ""
+    service = BrowserReviewService(profile_root=tmp_path)
+    monkeypatch.setattr(
+        service,
+        "_lookup_cosmic_with_retry",
+        lambda page, candidate, query_url, artifact_directory, *, progress: (
+            DatabaseEvidence("COSMIC", "not_found", "missing")
+        ),
+    )
+
+    evidence = service._lookup_cosmic_variant(
+        object(), variant, tmp_path / "cosmic", progress=None
+    )
+
+    assert evidence.status == "not_found"
+    assert "query_attempt_results" in evidence.raw
+    assert evidence.raw["query_attempt_results"][-1]["status"] == "not_found"
 
 
 def test_cosmic_search_resolves_canonical_internal_mutation_id(tmp_path):

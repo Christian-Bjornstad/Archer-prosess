@@ -14,6 +14,10 @@ from urllib.parse import quote
 
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
 from archer_processor.services.genomic_notation import format_mtbp_grch37
+from archer_processor.services.provider_failures import (
+    ProviderFailureKind,
+    ProviderLookupError,
+)
 from archer_processor.services.evidence_audit import persist_evidence_result
 from archer_processor.services.browser_popups import dismiss_known_overlays
 from archer_processor.services.capture_validation import (
@@ -500,13 +504,8 @@ class BrowserReviewService:
         progress: Callable[[str], None] | None,
     ) -> DatabaseEvidence:
         identifiers = _cosmic_identifiers(variant.cosmic_id)
-        if not identifiers:
-            return DatabaseEvidence(
-                "COSMIC",
-                "invalid_query",
-                "No COSM/COSV identifier was present in the Archer COSMICID column.",
-            )
         attempts: list[str] = []
+        attempt_results: list[dict[str, str]] = []
         last_result: DatabaseEvidence | None = None
         for cosmic_id in identifiers:
             attempts.append(cosmic_id)
@@ -526,13 +525,89 @@ class BrowserReviewService:
                 if result.status == "found":
                     self._cosmic_cache[cosmic_id] = result
             result.raw["query_attempts"] = list(attempts)
+            attempt_results.append(
+                {"query": cosmic_id, "status": result.status}
+            )
+            result.raw["query_attempt_results"] = list(attempt_results)
             if result.status == "found":
                 return result
             last_result = result
             if result.status not in {"not_found", "identity_mismatch"}:
                 return result
-        assert last_result is not None
-        return last_result
+        genomic_query = _cosmic_genomic_query(variant)
+        if genomic_query:
+            attempts.append(genomic_query)
+            result = self._lookup_cosmic_genomic_with_retry(
+                page,
+                variant,
+                genomic_query,
+                artifact_directory,
+                progress=progress,
+            )
+            attempt_results.append(
+                {"query": genomic_query, "status": result.status}
+            )
+            result.raw.update(
+                {
+                    "lookup_mode": "genomic_fallback",
+                    "query_attempts": attempts,
+                    "query_attempt_results": attempt_results,
+                }
+            )
+            return result
+        if last_result is not None:
+            return last_result
+        return DatabaseEvidence(
+            "COSMIC",
+            "invalid_query",
+            "No COSM/COSV identifier or unambiguous GRCh37 genomic query was available.",
+            raw={"failure_kind": ProviderFailureKind.NOT_FOUND.value},
+        )
+
+    def _lookup_cosmic_genomic_with_retry(
+        self,
+        page: Any,
+        variant: VariantRecord,
+        query: str,
+        artifact_directory: Path,
+        *,
+        progress: Callable[[str], None] | None,
+    ) -> DatabaseEvidence:
+        query_url = (
+            "https://cancer.sanger.ac.uk/cosmic/search?q="
+            f"{quote(query, safe='')}"
+        )
+        for attempt in range(2):
+            try:
+                page.goto(
+                    query_url,
+                    wait_until="domcontentloaded",
+                    timeout=self.navigation_timeout_ms,
+                )
+                dismiss_known_overlays(page)
+                self._resolve_cosmic_genomic_page(page, variant)
+                self._wait_for_cosmic_result(page)
+                return self._capture_cosmic_result(
+                    variant, page, artifact_directory
+                )
+            except ProviderLookupError as exc:
+                return DatabaseEvidence(
+                    "COSMIC",
+                    exc.kind.value,
+                    str(exc),
+                    accession=query,
+                    url=page.url,
+                    raw={"failure_kind": exc.kind.value},
+                )
+            except Exception:
+                if attempt == 1:
+                    raise
+                if progress:
+                    progress(
+                        "COSMIC: transient genomic fallback failure; retrying once"
+                    )
+                page.wait_for_timeout(750)
+        raise RuntimeError("COSMIC genomic retry loop ended unexpectedly.")
 
     def _lookup_cosmic_with_retry(
         self,
@@ -565,6 +640,15 @@ class BrowserReviewService:
                 self._wait_for_cosmic_result(page)
                 return self._capture_cosmic_result(
                     variant, page, artifact_directory
+                )
+            except ProviderLookupError as exc:
+                return DatabaseEvidence(
+                    "COSMIC",
+                    exc.kind.value,
+                    str(exc),
+                    accession=_cosmic_identifier(variant.cosmic_id),
+                    url=page.url,
+                    raw={"failure_kind": exc.kind.value},
                 )
             except Exception:
                 if attempt == 1:
@@ -602,12 +686,14 @@ class BrowserReviewService:
                     )
                     break
                 if len(candidates) > 1:
-                    raise RuntimeError(
+                    raise ProviderLookupError(
+                        ProviderFailureKind.AMBIGUOUS,
                         f"COSMIC returned multiple canonical pages for {variant.cosmic_id}."
                     )
                 page.wait_for_timeout(500)
             else:
-                raise RuntimeError(
+                raise ProviderLookupError(
+                    ProviderFailureKind.NOT_FOUND,
                     f"COSMIC did not expose a canonical mutation link for {variant.cosmic_id}."
                 )
 
@@ -626,13 +712,94 @@ class BrowserReviewService:
             if candidates:
                 break
             page.wait_for_timeout(500)
-        if len(candidates) != 1:
-            raise RuntimeError("COSMIC GRCh37 mutation link was not uniquely available.")
+        if not candidates:
+            raise ProviderLookupError(
+                ProviderFailureKind.NOT_FOUND,
+                "COSMIC did not expose a GRCh37 mutation link.",
+            )
+        if len(candidates) > 1:
+            raise ProviderLookupError(
+                ProviderFailureKind.AMBIGUOUS,
+                "COSMIC exposed multiple GRCh37 mutation links.",
+            )
         page.goto(
             candidates[0],
             wait_until="domcontentloaded",
             timeout=self.navigation_timeout_ms,
         )
+
+    def _resolve_cosmic_genomic_page(
+        self, page: Any, variant: VariantRecord
+    ) -> None:
+        links = page.locator("a[href*='/cosmic/mutation/overview']")
+        candidates: list[str] = []
+        for _ in range(max(1, self.navigation_timeout_ms // 500)):
+            candidates = list(
+                dict.fromkeys(
+                    href
+                    for href in links.evaluate_all(
+                        "nodes => nodes.map(node => node.href)"
+                    )
+                    if href
+                )
+            )
+            if candidates:
+                break
+            page.wait_for_timeout(500)
+        if not candidates:
+            raise ProviderLookupError(
+                ProviderFailureKind.NOT_FOUND,
+                "COSMIC genomic fallback returned no mutation candidates.",
+            )
+
+        verified_urls: list[str] = []
+        for candidate_url in candidates:
+            page.goto(
+                candidate_url,
+                wait_until="domcontentloaded",
+                timeout=self.navigation_timeout_ms,
+            )
+            grch37_links = page.locator("a[href*='genome=37'][href*='id=']")
+            grch37_candidates = list(
+                dict.fromkeys(
+                    href
+                    for href in grch37_links.evaluate_all(
+                        "nodes => nodes.map(node => node.href)"
+                    )
+                    if href
+                )
+            )
+            urls = grch37_candidates or (
+                [page.url] if "genome=37" in page.url else []
+            )
+            for grch37_url in urls:
+                page.goto(
+                    grch37_url,
+                    wait_until="domcontentloaded",
+                    timeout=self.navigation_timeout_ms,
+                )
+                body_text = page.locator("body").inner_text(
+                    timeout=self.navigation_timeout_ms
+                )
+                if _cosmic_page_matches_variant(body_text, page.url, variant):
+                    verified_urls.append(page.url)
+        verified_urls = list(dict.fromkeys(verified_urls))
+        if not verified_urls:
+            raise ProviderLookupError(
+                ProviderFailureKind.IDENTITY_MISMATCH,
+                "COSMIC genomic candidates did not match the requested GRCh37 variant.",
+            )
+        if len(verified_urls) > 1:
+            raise ProviderLookupError(
+                ProviderFailureKind.AMBIGUOUS,
+                "COSMIC genomic fallback returned multiple verified candidates.",
+            )
+        if page.url != verified_urls[0]:
+            page.goto(
+                verified_urls[0],
+                wait_until="domcontentloaded",
+                timeout=self.navigation_timeout_ms,
+            )
 
     def _search_clinvar(
         self,
@@ -815,10 +982,11 @@ class BrowserReviewService:
         if cosmic_id and cosmic_id not in body_text and not variant_identity_matches:
             return DatabaseEvidence(
                 "COSMIC",
-                "not_found",
-                f"COSMIC did not resolve the requested identifier {cosmic_id}.",
+                "identity_mismatch",
+                f"COSMIC resolved {cosmic_id}, but the page did not match the requested variant.",
                 accession=cosmic_id,
                 url=page.url,
+                raw={"failure_kind": ProviderFailureKind.IDENTITY_MISMATCH.value},
             )
 
         base_path = self._screenshot_path(artifact_directory, "COSMIC", variant)
@@ -3269,6 +3437,51 @@ def _cosmic_numeric_id(value: str | None) -> str:
     identifier = _cosmic_identifier(value)
     match = re.search(r"\d+", identifier)
     return match.group(0) if match else ""
+
+
+def _cosmic_genomic_query(variant: VariantRecord) -> str:
+    return format_mtbp_grch37(
+        variant.genomic_location,
+        variant.ref_allele,
+        variant.alt_allele,
+    )
+
+
+def _cosmic_page_matches_variant(
+    body_text: str, url: str, variant: VariantRecord
+) -> bool:
+    compact = re.sub(r"\s+", "", body_text or "").casefold()
+    gene = (variant.symbol or "").casefold()
+    cdna = _cdna_change(variant.hgvsc).casefold()
+    protein = _protein_change(variant.hgvsp).casefold()
+    if gene and gene in compact and any(
+        value and value in compact for value in (cdna, protein)
+    ):
+        return True
+
+    expected = genomic_identity(variant)
+    if expected is None:
+        return False
+    assembly_matches = (
+        "grch37" in compact
+        or "hg19" in compact
+        or "genome=37" in (url or "").casefold()
+    )
+    chromosome_matches = bool(
+        re.search(
+            rf"(?:chr)?{re.escape(expected.chromosome.casefold())}[:\s]",
+            (body_text or "").casefold(),
+        )
+    )
+    position_matches = str(expected.position) in compact
+    allele_matches = any(
+        token in compact
+        for token in (
+            f"{expected.reference}>{expected.alternate}".casefold(),
+            f"{expected.reference}/{expected.alternate}".casefold(),
+        )
+    )
+    return assembly_matches and chromosome_matches and position_matches and allele_matches
 
 
 def _cosmic_source_url(current_url: str, cosmic_id: str | None) -> str:
