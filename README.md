@@ -59,7 +59,8 @@ flowchart LR
 3. Load the reviewed workbook back into the application.
 4. Select the evidence sources and run the patient-by-patient search.
 5. Verify the compact findings and captured source images.
-6. Review the patient workbooks written automatically beside the main workbook.
+6. In **Patient progress**, select one or more patient rows, or leave the table unselected for all patients.
+7. Click **Generer VEDLEGG_APP**. Reports are written to `VEDLEGG_APP` beside the review workbook as `<DIT>_VPM_Tolkning.xlsx`.
 
 Use **Pause Search** to pause at the next safe browser checkpoint and **Resume
 Search** to continue the same queue without repeating completed work. **Stop

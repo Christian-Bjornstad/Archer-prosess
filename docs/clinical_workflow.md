@@ -71,9 +71,16 @@ Search and recovery behavior:
 - Recent-analysis recovery is local and passive: startup can offer the last
   workbook, but it never opens Edge or contacts a provider until the operator
   explicitly starts or resumes evidence collection.
-- **Retry Pending Saves** retries report writing only; it does not restart an
-  evidence provider.
+- Evidence searches never generate patient reports. Select one or more rows in
+  **Patient progress**, or leave the table unselected to include every patient,
+  then click **Generer VEDLEGG_APP**.
+- Reports are written beside the processed workbook in `VEDLEGG_APP` with the
+  exact filename `<DIT>_VPM_Tolkning.xlsx`. Existing reports are atomically
+  replaced through a temporary file, so a failed write leaves the prior report
+  intact. A report open in Excel is classified as locked, listed in the operator
+  summary, and can be retried after closing it.
+- **Retry Pending Saves** retries locked report writing only; it does not restart
+  an evidence provider.
 - Completed source results are restored from one indexed audit-directory scan.
 - Errors, timeouts, identity mismatches, partial captures, and unverified legacy ClinVar results remain resumable.
-- Patient workbooks are written beside the processed workbook during final reconciliation; an Excel file lock is nonfatal and can be retried.
 - Priority colouring uses artifact precedence and strong/weak green only for `Germ > 10` at AF `>=35%` / `<35%` respectively. Tier I and Tier II do not affect row colour.
