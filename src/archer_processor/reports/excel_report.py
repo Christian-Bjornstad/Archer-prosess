@@ -92,6 +92,7 @@ class ExcelReportWriter:
         "weak_green": "E9F6EF",
         "yellow": "FFFF00",
         "orange": "FFC000",
+        "light_orange": "F4B183",
         "red": "C00000",
         "red_text": "FFFFFF",
         "gray": "F2F2F2",
@@ -122,7 +123,11 @@ class ExcelReportWriter:
         self._raw_variant_sheet(
             workbook,
             "Artifacts Removed",
-            [variant for variant in result.variants if variant_highlight(variant) != "artifact"],
+            [
+                variant
+                for variant in result.variants
+                if variant_highlight(variant) not in {"artifact", "artifact_light"}
+            ],
             evidence,
             hide_excluded,
         )
@@ -499,6 +504,7 @@ class ExcelReportWriter:
     def _style_variant_row(self, ws, row_index: int, variant: VariantRecord) -> None:
         fill = {
             "artifact": self.colors["orange"],
+            "artifact_light": self.colors["light_orange"],
             "germline": self.colors["strong_green"],
             "germline_low_af": self.colors["weak_green"],
         }.get(variant_highlight(variant))
@@ -558,7 +564,7 @@ class ExcelReportWriter:
                     [
                         "X"
                         if self._key(variant) in skip_keys
-                        or variant_highlight(variant) == "artifact"
+                        or variant_highlight(variant) in {"artifact", "artifact_light"}
                         else ""
                     ]
                     if include_selection

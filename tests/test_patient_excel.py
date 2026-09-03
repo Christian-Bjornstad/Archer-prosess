@@ -42,6 +42,27 @@ def test_patient_overview_uses_light_blue_and_white_banding(tmp_path):
         workbook.close()
 
 
+def test_patient_overview_uses_light_orange_for_asxl1_transition_band(tmp_path):
+    result = VariantProcessor().process(
+        FIXTURE, "2026-09-03", tmp_path / "review.xlsx"
+    )
+    asxl1 = result.variants[1]
+    asxl1.af = 0.0525
+    asxl1.matched_rules = ["asxl1_1934dup_artifact"]
+    asxl1.decision = "excluded"
+    output = tmp_path / "patient.xlsx"
+
+    PatientExcelReportWriter().write_patient(
+        result, asxl1.patient_id, [asxl1], output, {}
+    )
+
+    workbook = openpyxl.load_workbook(output)
+    try:
+        assert workbook["Oversikt"]["A11"].fill.fgColor.rgb == "00F4B183"
+    finally:
+        workbook.close()
+
+
 def test_patient_data_sheet_includes_artifacts_without_skip_column(tmp_path):
     result = VariantProcessor().process(
         FIXTURE, "2026-08-11", tmp_path / "review.xlsx"

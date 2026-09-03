@@ -19,6 +19,8 @@ class Palette:
     pale_green = "#E9F6EF"
     strong_green = "#CDEDD8"
     pale_orange = "#FCE4D6"
+    artifact_orange = "#FFC000"
+    artifact_light_orange = "#F4B183"
     pale_red = "#F8E8E8"
     pale_yellow = "#FFF5D6"
 

@@ -252,6 +252,35 @@ def test_excel_export_keeps_row_coloring_on_raw_sheets(tmp_path):
     assert "26OUM00005_VPM_S5_R1_001" not in removed_by_sample
 
 
+def test_excel_export_uses_light_orange_for_asxl1_five_to_five_point_five_percent(
+    tmp_path,
+):
+    output = tmp_path / "review.xlsx"
+    result = VariantProcessor().process(FIXTURE, "2026-09-03", output)
+    asxl1 = result.variants[1]
+    asxl1.af = 0.0525
+    FilterEngine().apply([asxl1])
+
+    ExcelReportWriter().write(result, output)
+
+    workbook = openpyxl.load_workbook(output)
+    try:
+        with_artifacts = workbook["With Artifacts"]
+        row = next(
+            item
+            for item in with_artifacts.iter_rows(min_row=2)
+            if item[1].value == asxl1.sample
+        )
+        assert row[1].fill.fgColor.rgb == "00F4B183"
+        removed_samples = {
+            item[0].value
+            for item in workbook["Artifacts Removed"].iter_rows(min_row=2)
+        }
+        assert asxl1.sample not in removed_samples
+    finally:
+        workbook.close()
+
+
 def test_excel_review_layout_hides_reference_columns_and_keeps_evidence_compact(tmp_path):
     output = tmp_path / "review.xlsx"
     screenshot = tmp_path / "browser-evidence.png"

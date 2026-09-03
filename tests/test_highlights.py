@@ -23,6 +23,31 @@ def test_artifact_highlight_is_orange_category():
     assert variant_highlight(variant(history_matches=[{"Artf": 1}])) == ""
 
 
+def test_asxl1_artifact_uses_light_orange_above_five_through_five_point_five_percent():
+    at_five = variant(
+        symbol="ASXL1",
+        hgvsc="NM_015338.5:c.1934dup",
+        af=0.05,
+        matched_rules=["asxl1_1934dup_artifact"],
+    )
+    above_five = variant(
+        symbol="ASXL1",
+        hgvsc="NM_015338.5:c.1934dup",
+        af=0.050001,
+        matched_rules=["asxl1_1934dup_artifact"],
+    )
+    at_five_point_five = variant(
+        symbol="ASXL1",
+        hgvsc="NM_015338.5:c.1934dup",
+        af=0.055,
+        matched_rules=["asxl1_1934dup_artifact"],
+    )
+
+    assert variant_highlight(at_five) == "artifact"
+    assert variant_highlight(above_five) == "artifact_light"
+    assert variant_highlight(at_five_point_five) == "artifact_light"
+
+
 def test_tier_counts_never_color_rows():
     assert variant_highlight(variant(raw={"Tier I": 2, "Tier II": 3})) == ""
     assert variant_highlight(variant(raw={"Tier I": 3, "Tier II": 3})) == ""

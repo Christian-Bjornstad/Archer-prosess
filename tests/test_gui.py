@@ -88,7 +88,7 @@ def test_artifact_settings_show_catalog_and_af_exception(qt_app):
         for index in range(window.artifact_table.columnCount())
     ]
 
-    assert window.artifact_table.rowCount() == 36
+    assert window.artifact_table.rowCount() == 39
     assert headers == ["Gene", "HGVSc", "Artifact through AF", "Reason"]
     assert window.artifact_table.item(0, 1).text() == "NM_015338.5:c.1934dup"
     assert window.artifact_table.item(0, 2).text() == "5.5%"
@@ -300,6 +300,25 @@ def test_variant_table_uses_distinct_strong_and_weak_germline_green(qt_app, tmp_
 
     assert window.variant_table.item(0, 0).background().color().name() == "#cdedd8"
     assert window.variant_table.item(1, 0).background().color().name() == "#e9f6ef"
+
+
+def test_variant_table_uses_distinct_asxl1_artifact_oranges(qt_app, tmp_path):
+    window = MainWindow()
+    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+    window.result = VariantProcessor().process(
+        fixture, "2026-09-03", tmp_path / "review.xlsx"
+    )
+    strong = window.result.variants[1]
+    strong.af = 0.05
+    strong.matched_rules = ["asxl1_1934dup_artifact"]
+    light = window.result.variants[2]
+    light.af = 0.0525
+    light.matched_rules = ["asxl1_1934dup_artifact"]
+
+    window._refresh_variant_table()
+
+    assert window.variant_table.item(1, 0).background().color().name() == "#ffc000"
+    assert window.variant_table.item(2, 0).background().color().name() == "#f4b183"
 
 
 def test_locked_workbook_shows_warning_without_raising(qt_app, tmp_path, monkeypatch):

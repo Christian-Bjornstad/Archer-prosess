@@ -80,6 +80,7 @@ class PatientExcelReportWriter:
         "strong_green": "C6EFCE",
         "weak_green": "E9F6EF",
         "orange": "FFC000",
+        "light_orange": "F4B183",
         "pale_orange": "FFF3E8",
         "gray": "F3F6F8",
         "muted": "5E6A73",
@@ -286,6 +287,7 @@ class PatientExcelReportWriter:
             # keep their orange attention color.
             fill_color = {
                 "artifact": self.colors["orange"],
+                "artifact_light": self.colors["light_orange"],
                 "tier": self.colors["pale_blue"],
                 "germline": self.colors["pale_blue"],
                 "germline_low_af": self.colors["white"],

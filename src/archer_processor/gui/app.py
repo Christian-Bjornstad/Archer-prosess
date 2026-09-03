@@ -2553,7 +2553,9 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem(value)
                 highlight = variant_highlight(variant)
                 if highlight == "artifact":
-                    item.setBackground(QColor(Palette.pale_orange))
+                    item.setBackground(QColor(Palette.artifact_orange))
+                elif highlight == "artifact_light":
+                    item.setBackground(QColor(Palette.artifact_light_orange))
                 elif highlight == "germline":
                     item.setBackground(QColor(Palette.strong_green))
                 elif highlight == "germline_low_af":
