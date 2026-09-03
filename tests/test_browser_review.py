@@ -1444,6 +1444,27 @@ def test_mtbp_screenshot_rediscovers_target_after_hidden_incident(tmp_path):
     assert path.exists()
 
 
+def test_mtbp_full_patient_report_is_captured_once(tmp_path):
+    calls = []
+
+    class Page:
+        def screenshot(self, *, path, full_page):
+            calls.append((Path(path), full_page))
+            Image.new("RGB", (1200, 800), "white").save(path)
+
+    service = BrowserReviewService(
+        profile_root=tmp_path,
+        capture_validator=VALID_CAPTURE,
+    )
+
+    output = service._capture_mtbp_full_report(
+        Page(), tmp_path / "evidence", "ARCHER-20260903T120000Z-test"
+    )
+
+    assert calls == [(output, True)]
+    assert output.name == "ARCHER-20260903T120000Z-test-full-report.png"
+
+
 def test_mtbp_report_parser_fails_closed_on_variant_identity_mismatch():
     variant = ArcherTsvReader().read(FIXTURE)[3]
     rows = [{

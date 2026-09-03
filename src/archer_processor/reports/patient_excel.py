@@ -136,7 +136,7 @@ class PatientExcelReportWriter:
             manual_fields,
         )
         workbook.remove(placeholder)
-        self._attachment_sheet(workbook, patient_id)
+        self._attachment_sheet(workbook, patient_id, variants, evidence)
         patient_data = [
             variant for variant in result.variants
             if variant.patient_id == patient_id
@@ -347,13 +347,35 @@ class PatientExcelReportWriter:
         ws.freeze_panes = "A10"
         ws.print_area = f"A1:J{max(16, 11 + len(variants))}"
 
-    def _attachment_sheet(self, workbook: Workbook, patient_id: str) -> None:
+    def _attachment_sheet(
+        self,
+        workbook: Workbook,
+        patient_id: str,
+        variants: list[VariantRecord],
+        evidence: dict[str, list[DatabaseEvidence]],
+    ) -> None:
         ws = workbook.create_sheet("Vedlegg")
         self._base_sheet(ws)
         ws.sheet_properties.tabColor = self.colors["muted"]
         ws["A1"] = patient_id
         ws["A1"].font = Font(size=18, bold=True, color=self.colors["navy"])
         ws.column_dimensions["A"].width = max(18, len(patient_id) + 4)
+        report_paths: list[Path] = []
+        seen: set[str] = set()
+        for variant in variants:
+            for item in evidence.get(self._key(variant), []):
+                if item.database != "MTBP":
+                    continue
+                value = str(item.raw.get("patient_report_screenshot") or "").strip()
+                if value and value not in seen:
+                    seen.add(value)
+                    report_paths.append(Path(value))
+        row = 3
+        for report_path in report_paths:
+            ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
+            ws.cell(row, 1, "MTBP – samlet pasientrapport")
+            self._section_style(ws.cell(row, 1))
+            row = self._add_image(ws, report_path, row + 1) + 1
 
     def _data_sheet(
         self,

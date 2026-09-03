@@ -149,6 +149,45 @@ def test_patient_overview_preserves_manual_comment_and_hsmd_after_af_reordering(
         regenerated.close()
 
 
+def test_patient_attachment_contains_combined_mtbp_report_only_once(tmp_path):
+    result = VariantProcessor().process(
+        FIXTURE, "2026-09-03", tmp_path / "review.xlsx"
+    )
+    first = result.variants[3]
+    second = replace(
+        first,
+        source_row=first.source_row + 1,
+        hgvsc="NM_000546.6:c.743G>A",
+        hgvsp="p.R248Q",
+    )
+    screenshot = tmp_path / "mtbp-full-report.png"
+    Image.new("RGB", (1200, 800), "white").save(screenshot)
+    evidence = {
+        DatabaseSearchService().variant_key(variant): [
+            DatabaseEvidence(
+                "MTBP",
+                "found",
+                "matched",
+                raw={"patient_report_screenshot": str(screenshot)},
+            )
+        ]
+        for variant in (first, second)
+    }
+    output = tmp_path / "patient.xlsx"
+
+    PatientExcelReportWriter().write_patient(
+        result, first.patient_id, [first, second], output, evidence
+    )
+
+    workbook = openpyxl.load_workbook(output)
+    try:
+        attachment = workbook["Vedlegg"]
+        assert len(attachment._images) == 1
+        assert attachment["A3"].value == "MTBP – samlet pasientrapport"
+    finally:
+        workbook.close()
+
+
 def test_patient_data_sheet_includes_artifacts_without_skip_column(tmp_path):
     result = VariantProcessor().process(
         FIXTURE, "2026-08-11", tmp_path / "review.xlsx"

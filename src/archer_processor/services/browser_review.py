@@ -1667,6 +1667,16 @@ class BrowserReviewService:
                     page.url,
                     cancer_type=self.mtbp_cancer_type,
                 )
+                full_report_path: Path | None = None
+                full_report_error = ""
+                try:
+                    full_report_path = self._capture_mtbp_full_report(
+                        page,
+                        artifact_directory,
+                        analysis_id,
+                    )
+                except Exception as exc:
+                    full_report_error = str(exc)
                 if progress and fallback_keys:
                     accepted_fallbacks = sum(
                         parsed[self.variant_key(variant)].status == "found"
@@ -1718,6 +1728,10 @@ class BrowserReviewService:
                             "remote_report_preflight_cleanup": preflight_cleanup,
                             "screenshot": str(screenshot_path or ""),
                             "screenshots": screenshot_records,
+                            "patient_report_screenshot": str(
+                                full_report_path or ""
+                            ),
+                            "patient_report_capture_error": full_report_error,
                             "visible_text_preview": body_text[:12_000],
                         }
                     )
@@ -2866,6 +2880,22 @@ class BrowserReviewService:
                 False, f"mtbp_target:{last_error}", 0, 0, 0.0
             )
         )
+
+    def _capture_mtbp_full_report(
+        self,
+        page: Any,
+        artifact_directory: Path,
+        analysis_id: str,
+    ) -> Path:
+        artifact_directory.mkdir(parents=True, exist_ok=True)
+        safe_analysis_id = re.sub(r"[^A-Za-z0-9_-]+", "_", analysis_id).strip("_")
+        screenshot_path = artifact_directory / f"{safe_analysis_id}-full-report.png"
+
+        def capture() -> None:
+            page.screenshot(path=str(screenshot_path), full_page=True)
+
+        self._capture_with_incident_retry(page, screenshot_path, capture)
+        return screenshot_path
 
     def _locate_mtbp_screenshot_target(
         self, page: Any, variant: VariantRecord
