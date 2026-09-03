@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import quote
 
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
+from archer_processor.services.genomic_notation import format_mtbp_grch37
 from archer_processor.services.evidence_audit import persist_evidence_result
 from archer_processor.services.browser_popups import dismiss_known_overlays
 from archer_processor.services.capture_validation import (
@@ -3575,45 +3576,11 @@ def _mtbp_genomic_query(variant: VariantRecord) -> str:
     inserted/deleted sequence itself in HGVS, so a simple ``REF>ALT`` string is
     only correct for substitutions.
     """
-    location = re.sub(r"\s+", "", variant.genomic_location or "")
-    match = re.fullmatch(
-        r"(?:chr)?(?P<chromosome>[0-9]{1,2}|X|Y|M|MT):(?P<position>\d+)(?:-\d+)?",
-        location,
-        flags=re.IGNORECASE,
+    return format_mtbp_grch37(
+        variant.genomic_location,
+        variant.ref_allele,
+        variant.alt_allele,
     )
-    if not match:
-        return ""
-    chromosome = match.group("chromosome").upper()
-    if chromosome == "MT":
-        chromosome = "M"
-    position = int(match.group("position"))
-    ref = re.sub(r"\s+", "", variant.ref_allele or "").upper()
-    alt = re.sub(r"\s+", "", variant.alt_allele or "").upper()
-    if (
-        not ref
-        or not alt
-        or ref == alt
-        or not re.fullmatch(r"[ACGTN]+", ref)
-        or not re.fullmatch(r"[ACGTN]+", alt)
-    ):
-        return ""
-
-    prefix = f"chr{chromosome}:g."
-    if len(ref) == len(alt) == 1:
-        return f"{prefix}{position}{ref}>{alt}"
-    if alt.startswith(ref):
-        inserted = alt[len(ref):]
-        left = position + len(ref) - 1
-        return f"{prefix}{left}_{left + 1}ins{inserted}"
-    if ref.startswith(alt):
-        start = position + len(alt)
-        end = position + len(ref) - 1
-        coordinate = str(start) if start == end else f"{start}_{end}"
-        return f"{prefix}{coordinate}del"
-
-    end = position + len(ref) - 1
-    coordinate = str(position) if position == end else f"{position}_{end}"
-    return f"{prefix}{coordinate}delins{alt}"
 
 
 def _mtbp_accession(value: str) -> bool:
