@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import openpyxl
@@ -160,6 +161,55 @@ def test_excel_export_preserves_raw_columns_and_adds_database_columns(tmp_path):
     ]
     assert row[headers.index("HGVSc")] == variant.raw["HGVSc"]
     assert "CIViC Evidence" not in headers
+
+
+def test_review_workbook_sorts_each_patient_by_descending_numeric_percent_af(tmp_path):
+    output = tmp_path / "review.xlsx"
+    result = VariantProcessor().process(FIXTURE, "2026-09-03", output)
+    base = result.variants[3]
+
+    def same_patient_variant(source_row, hgvsc, af):
+        sample = f"26OUM00999_VPM_S{source_row}_R1_001"
+        raw = {**base.raw, "Sample": sample, "HGVSc": hgvsc, "AF": af}
+        return replace(
+            base,
+            source_row=source_row,
+            sample=sample,
+            hgvsc=hgvsc,
+            af=af,
+            raw=raw,
+            matched_rules=[],
+            decision="included",
+        )
+
+    low = same_patient_variant(101, "NM_000546.6:c.100A>G", 0.10)
+    missing = same_patient_variant(102, "NM_000546.6:c.200A>G", None)
+    high = same_patient_variant(103, "NM_000546.6:c.300A>G", 0.25)
+    result.variants = [low, missing, high]
+
+    ExcelReportWriter().write(result, output)
+
+    workbook = openpyxl.load_workbook(output)
+    try:
+        for sheet_name in ("With Artifacts", "Artifacts Removed"):
+            sheet = workbook[sheet_name]
+            headers = [cell.value for cell in sheet[1]]
+            hgvsc_col = headers.index("HGVSc") + 1
+            af_col = headers.index("AF") + 1
+            assert [sheet.cell(row, hgvsc_col).value for row in range(2, 5)] == [
+                high.hgvsc,
+                low.hgvsc,
+                missing.hgvsc,
+            ]
+            assert [sheet.cell(row, af_col).value for row in range(2, 5)] == [
+                0.25,
+                0.10,
+                None,
+            ]
+            assert sheet.cell(2, af_col).number_format == "0.00%"
+            assert sheet.cell(3, af_col).number_format == "0.00%"
+    finally:
+        workbook.close()
 
 
 def test_database_selection_sheet_round_trips_x_marks(tmp_path):

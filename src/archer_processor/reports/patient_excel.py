@@ -15,6 +15,7 @@ from PIL import Image as PillowImage
 
 from archer_processor.core.highlights import variant_highlight
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
+from archer_processor.core.sorting import variant_sort_key
 from archer_processor.reports.excel_report import ExcelReportWriter
 
 
@@ -117,6 +118,7 @@ class PatientExcelReportWriter:
         output_path: Path,
         evidence: dict[str, list[DatabaseEvidence]],
     ) -> Path:
+        variants = sorted(variants, key=variant_sort_key)
         workbook = Workbook()
         placeholder = workbook.active
         self._overview_sheet(workbook, result, patient_id, variants, evidence)

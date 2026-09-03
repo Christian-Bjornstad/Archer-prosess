@@ -63,6 +63,32 @@ def test_patient_overview_uses_light_orange_for_asxl1_transition_band(tmp_path):
         workbook.close()
 
 
+def test_patient_overview_sorts_variants_by_descending_af_with_missing_last(tmp_path):
+    result = VariantProcessor().process(
+        FIXTURE, "2026-09-03", tmp_path / "review.xlsx"
+    )
+    base = result.variants[3]
+    low = replace(base, source_row=101, hgvsc="NM_000546.6:c.100A>G", af=0.10)
+    missing = replace(base, source_row=102, hgvsc="NM_000546.6:c.200A>G", af=None)
+    high = replace(base, source_row=103, hgvsc="NM_000546.6:c.300A>G", af=0.25)
+    output = tmp_path / "patient.xlsx"
+
+    PatientExcelReportWriter().write_patient(
+        result, base.patient_id, [low, missing, high], output, {}
+    )
+
+    workbook = openpyxl.load_workbook(output)
+    try:
+        overview = workbook["Oversikt"]
+        assert [overview.cell(row, 2).value for row in range(11, 14)] == [
+            high.hgvsc,
+            low.hgvsc,
+            missing.hgvsc,
+        ]
+    finally:
+        workbook.close()
+
+
 def test_patient_data_sheet_includes_artifacts_without_skip_column(tmp_path):
     result = VariantProcessor().process(
         FIXTURE, "2026-08-11", tmp_path / "review.xlsx"
@@ -104,8 +130,13 @@ def test_patient_data_sheet_includes_artifacts_without_skip_column(tmp_path):
         ]
         assert data.max_row == 3
         assert data.sheet_properties.tabColor.rgb == "004F8A5B"
-        assert data["A2"].fill.fgColor.rgb == "00C6EFCE"
-        assert data["A3"].fill.fgColor.rgb == "00FFC000"
+        hgvsc_column = headers.index("HGVSc") + 1
+        colors_by_hgvsc = {
+            data.cell(row, hgvsc_column).value: data.cell(row, 1).fill.fgColor.rgb
+            for row in range(2, data.max_row + 1)
+        }
+        assert colors_by_hgvsc[strong.hgvsc] == "00C6EFCE"
+        assert colors_by_hgvsc[artifact.hgvsc] == "00FFC000"
         report_column = headers.index("Report") + 1
         assert data.column_dimensions[
             openpyxl.utils.get_column_letter(report_column)
