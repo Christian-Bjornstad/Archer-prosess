@@ -14,10 +14,19 @@ Core workflow:
 
 Initial production rules:
 
-- Exclude configured artifact variants. The default artifact list contains `NM_004119.2:c.1419-4dup`, `NM_004119.2:c.1419-4del`, `NM_004972.3:c.3291+16dup`, and `NM_004972.3:c.3291+16del`.
-- Exclude `NM_015338.5:c.1934dup` as an artifact through 5.5% AF; retain it above 5.5%.
+- Exclude configured artifact variants. The default catalog combines DNA
+  Fragmentering v2 with the v1-only CEBPA entries `NM_004364.4:c.288C>G`,
+  `NM_004364.4:c.280G>C`, and `NM_004364.4:c.296G>C`.
+- Exclude `NM_015338.5:c.1934dup` through 5.5% AF. Display it strong orange at
+  AF `<=5.0%`, light orange at AF `>5.0%` and `<=5.5%`, and retain it above
+  5.5%.
 
 The artifact list can be reviewed and edited in Settings. Use Reset Defaults to restore the current default artifact list.
+
+The review workbook keeps AF numeric, displays it as a percentage, and sorts
+variants by descending AF within each patient, with missing AF last. Patient
+overview regeneration preserves the manual `Kommentar` cell and the manual
+`HSMD -` line by patient and variant identity rather than row number.
 
 Special review flags from the current clinical notes:
 

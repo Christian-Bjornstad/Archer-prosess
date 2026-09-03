@@ -154,13 +154,17 @@ It contains exactly two data sheets:
 
 The workbook mirrors the laboratory review layout with frozen identifier columns,
 hidden low-priority technical fields, familiar row colours, and compact evidence
-columns at the far right. Evidence text does not expand row height.
+columns at the far right. AF remains numeric, is shown as a percentage, and is
+sorted from highest to lowest within each patient. Evidence text does not expand
+row height.
 
 ### Patient workbooks
 
 Patient reports are named `<DIT>_VPM_Tolkning.xlsx` and contain:
 
-- **Oversikt** — compact findings such as `ClinVar – Benign`, plus source links.
+- **Oversikt** — compact findings such as `ClinVar – Benign`, plus source links,
+  a manual **Kommentar** column, and a manual `HSMD -` line. Kommentar and HSMD
+  text follow the variant when a workbook is regenerated and AF order changes.
 - **Vedlegg** — the DIT identifier and space for manual additions.
 - **One sheet per variant** — linked compact evidence followed by embedded screenshots with plain, non-linked captions.
 
@@ -190,6 +194,9 @@ captures remain pending when **Resume Incomplete Search** is used.
 ## Priority colours
 
 Artifact colouring always takes precedence. Non-artifact rows are highlighted:
+
+- strong orange for `ASXL1 NM_015338.5:c.1934dup` through 5.0% AF;
+- light orange for the same ASXL1 variant above 5.0% through 5.5% AF;
 
 - strong green when `Germ > 10` and AF is at least 35%;
 - weak green when `Germ > 10` and AF is below 35%;
@@ -235,8 +242,9 @@ Use the in-app **Settings** page to configure:
 - minimized/background Edge mode;
 - MTBP timeout and cancer type;
 - local artifact rules. The defaults contain the 36 `HGVSc` entries from
-  **Artefakter DNA Fragmentering v2**; `NM_015338.5:c.1934dup` is treated as an
-  artifact through 5.5% AF and retained above that threshold;
+  **Artefakter DNA Fragmentering v2** plus the three v1-only CEBPA entries
+  `c.288C>G`, `c.280G>C`, and `c.296G>C`; `NM_015338.5:c.1934dup` is treated as
+  an artifact through 5.5% AF and retained above that threshold;
 - default evidence sources.
 
 Non-secret settings are stored in `%USERPROFILE%\.archer-prosess\config.json`.
