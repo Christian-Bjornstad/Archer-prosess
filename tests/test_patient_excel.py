@@ -2,6 +2,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import openpyxl
+from openpyxl import Workbook
 from PIL import Image
 
 from archer_processor.core import DatabaseEvidence, VariantProcessor
@@ -448,4 +449,58 @@ def test_patient_excel_filename_is_dit_vpm_tolkning(tmp_path):
 
     outputs = PatientExcelReportWriter().write_all(result, tmp_path / "patients", {})
 
-    assert outputs[0].name.endswith("_Myolid_Tolkning_APP.xlsx")
+    assert outputs[0].name.endswith("_VPM_Tolkning_APP.xlsx")
+
+
+def test_write_patient_saves_via_temporary_file_then_replaces(tmp_path, monkeypatch):
+    result = VariantProcessor().process(
+        FIXTURE, "2026-09-03", tmp_path / "review.xlsx"
+    )
+    variant = result.variants[0]
+    output = tmp_path / "VEDLEGG_APP" / f"{variant.patient_id}_VPM_Tolkning_APP.xlsx"
+    saved_paths = []
+    real_save = Workbook.save
+
+    def recording_save(workbook_self, filename):
+        saved_paths.append(Path(filename))
+        return real_save(workbook_self, filename)
+
+    monkeypatch.setattr(Workbook, "save", recording_save)
+
+    PatientExcelReportWriter().write_patient(
+        result, variant.patient_id, [variant], output, {}
+    )
+
+    assert len(saved_paths) == 1
+    assert saved_paths[0] != output
+    assert saved_paths[0].name.endswith(".tmp.xlsx")
+    assert saved_paths[0].parent == output.parent
+    assert output.exists()
+    assert [entry for entry in output.parent.iterdir()] == [output]
+
+
+def test_failed_save_keeps_existing_workbook_and_removes_temporary_file(
+    tmp_path, monkeypatch
+):
+    result = VariantProcessor().process(
+        FIXTURE, "2026-09-03", tmp_path / "review.xlsx"
+    )
+    variant = result.variants[0]
+    output = tmp_path / f"{variant.patient_id}_VPM_Tolkning_APP.xlsx"
+    writer = PatientExcelReportWriter()
+    writer.write_patient(result, variant.patient_id, [variant], output, {})
+    before = output.read_bytes()
+
+    def exploding_save(workbook_self, filename):
+        Path(filename).write_bytes(b"partial bytes")
+        raise RuntimeError("save exploded")
+
+    monkeypatch.setattr(Workbook, "save", exploding_save)
+
+    try:
+        writer.write_patient(result, variant.patient_id, [variant], output, {})
+    except RuntimeError:
+        pass
+
+    assert output.read_bytes() == before
+    assert [entry for entry in output.parent.iterdir()] == [output]

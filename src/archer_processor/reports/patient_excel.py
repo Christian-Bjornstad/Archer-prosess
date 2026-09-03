@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -25,6 +26,13 @@ from archer_processor.reports.manual_fields import (
 
 
 REPORT_DATABASES = ("MTBP", "Franklin", "ClinVar", "OncoKB", "COSMIC")
+VEDLEGG_APP_DIRECTORY = "VEDLEGG_APP"
+
+
+def patient_report_filename(patient_id: str) -> str:
+    """Approved filename for one patient's VPM interpretation workbook."""
+    safe_id = re.sub(r"[^A-Za-z0-9_-]+", "_", patient_id).strip("_")
+    return f"{safe_id}_VPM_Tolkning_APP.xlsx"
 TEXT_DATABASES = REPORT_DATABASES
 IMAGE_DATABASES = REPORT_DATABASES
 COSMIC_FIELDS = (
@@ -109,8 +117,7 @@ class PatientExcelReportWriter:
         output_directory.mkdir(parents=True, exist_ok=True)
         outputs: list[Path] = []
         for patient_id, variants in sorted(grouped.items()):
-            safe_patient = re.sub(r"[^A-Za-z0-9_-]+", "_", patient_id).strip("_")
-            output = output_directory / f"{safe_patient}_Myolid_Tolkning_APP.xlsx"
+            output = output_directory / patient_report_filename(patient_id)
             self.write_patient(result, patient_id, variants, output, evidence)
             outputs.append(output)
         return outputs
@@ -158,8 +165,24 @@ class PatientExcelReportWriter:
                 variant,
                 evidence.get(self._key(variant), []),
             )
+        return self._save_atomically(workbook, output_path)
+
+    @staticmethod
+    def _save_atomically(workbook: Workbook, output_path: Path) -> Path:
+        """Write a complete temporary workbook, then replace the destination.
+
+        The destination is only replaced after a successful save, so a failed
+        write never leaves a half-written patient workbook behind. The manual
+        Kommentar/HSMD fields were read from the destination before this call.
+        """
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        workbook.save(output_path)
+        temporary = output_path.with_name(f"{output_path.stem}.{os.getpid()}.tmp.xlsx")
+        try:
+            workbook.save(temporary)
+            Path(temporary).replace(output_path)
+        finally:
+            if temporary.exists() and temporary != output_path:
+                temporary.unlink(missing_ok=True)
         return output_path
 
     def _report_sheet(
