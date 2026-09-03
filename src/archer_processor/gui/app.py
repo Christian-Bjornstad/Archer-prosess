@@ -296,13 +296,6 @@ class DatabaseWorker(QObject):
                 self.status.emit(f"{database}: website lookup in Microsoft Edge")
             patients = _variants_grouped_by_patient(self.variants)
             all_evidence: dict[str, list[DatabaseEvidence]] = {}
-            coordinator = (
-                PatientReportCoordinator(
-                    self.result, self.report_variants, self.existing_evidence
-                )
-                if self.result is not None
-                else None
-            )
             self.status.emit(
                 f"Patient-by-patient search started: {len(patients)} patients, "
                 f"{len(self.databases)} sources"
@@ -378,17 +371,12 @@ class DatabaseWorker(QObject):
                     _merge_evidence_results(patient_evidence, browser_evidence)
 
                 _merge_evidence_results(all_evidence, patient_evidence)
-                if coordinator is not None:
-                    coordinator.merge(patient_evidence)
                 self.status.emit(f"{prefix}: complete")
                 self.progress.emit(
                     patient_index,
                     len(patients),
                     f"Completed {patient_id}",
                 )
-            if coordinator is not None:
-                for outcome in coordinator.reconcile():
-                    self.report_outcome.emit(outcome)
             self.finished.emit(all_evidence)
         except BrowserReviewCancelled:
             self.cancelled.emit()
@@ -543,13 +531,6 @@ class BrowserReviewWorker(QObject):
             )
             all_evidence: dict[str, list[DatabaseEvidence]] = {}
             patients = _variants_grouped_by_patient(self.variants)
-            coordinator = (
-                PatientReportCoordinator(
-                    self.result, self.report_variants, self.existing_evidence
-                )
-                if self.result is not None
-                else None
-            )
             self.progress.emit(0, len(patients), "Preparing signed-in browser queue")
             original_patient_total = max(
                 self.patient_indexes.values(), default=len(patients)
@@ -576,8 +557,6 @@ class BrowserReviewWorker(QObject):
                     prefix,
                 )
                 _merge_evidence_results(all_evidence, patient_evidence)
-                if coordinator is not None:
-                    coordinator.merge(patient_evidence)
                 self.status.emit(f"{prefix}: browser sources complete")
                 self.progress.emit(patient_index, len(patients), f"Completed {patient_id}")
                 if patient_index < len(patients):
@@ -598,17 +577,11 @@ class BrowserReviewWorker(QObject):
                             chunk = min(0.25, remaining)
                             time.sleep(chunk)
                             remaining -= chunk
-            if coordinator is not None:
-                for outcome in coordinator.reconcile():
-                    self.report_outcome.emit(outcome)
             final_retry_evidence = self._final_failed_pass(all_evidence, patients)
             if final_retry_evidence:
                 _merge_evidence_results(all_evidence, final_retry_evidence)
                 _merge_evidence_results(self._pass_evidence, final_retry_evidence)
                 self.patient_finished.emit(final_retry_evidence)
-            if coordinator is not None:
-                for outcome in coordinator.reconcile():
-                    self.report_outcome.emit(outcome)
             self.finished.emit(all_evidence)
         except BrowserReviewCancelled:
             self.cancelled.emit()

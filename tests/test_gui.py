@@ -694,18 +694,17 @@ def test_database_worker_completes_all_sources_before_next_patient(
 
     class FakeReportCoordinator:
         def __init__(self, result, variants, evidence):
-            pass
+            report_events.append("constructed")
+            raise AssertionError("evidence searches must not coordinate patient reports")
 
         def merge(self, incoming):
-            report_events.append("merge")
-
-        def write_patient(self, patient_id):
-            report_events.append(f"write:{patient_id}")
-            raise AssertionError("patient reports must not be written mid-search")
+            raise AssertionError("evidence searches must not merge patient reports")
 
         def reconcile(self):
-            report_events.append("reconcile")
-            return []
+            raise AssertionError("evidence searches must not write patient reports")
+
+        def write_patient(self, patient_id):
+            raise AssertionError("patient reports must not be written mid-search")
 
     class FakeApiService:
         def __init__(self, settings):
@@ -808,7 +807,7 @@ def test_database_worker_completes_all_sources_before_next_patient(
     # No API query is delayed; the only pause is before patient 2's website phase.
     assert 10 <= sum(slept) <= 20
     assert all(delay <= 0.25 for delay in slept)
-    assert report_events == ["merge", "merge", "reconcile"]
+    assert report_events == []
     assert prior_snapshots == [restored_evidence, restored_evidence]
 
 
