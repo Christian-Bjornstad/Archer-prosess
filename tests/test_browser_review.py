@@ -9,6 +9,7 @@ from archer_processor.services.browser_review import (
     BrowserReviewCancelled,
     BrowserReviewService,
     _cosmic_identifier,
+    _cosmic_identifiers,
     _cosmic_numeric_id,
     _cosmic_source_url,
     _expanded_capture_box,
@@ -164,8 +165,41 @@ def test_browser_resume_skips_completed_sources_and_checkpoints_each_provider(
 
 def test_cosmic_identifier_uses_first_archer_cosmic_id():
     assert _cosmic_identifier("COSM476; COSV56056643") == "COSM476"
+    assert _cosmic_identifiers("COSM476; COSV56056643, COSM476") == [
+        "COSM476",
+        "COSV56056643",
+    ]
     assert _cosmic_numeric_id("COSM476; COSV56056643") == "476"
     assert _cosmic_numeric_id("") == ""
+
+
+def test_cosmic_lookup_tries_each_identifier_until_verified_match(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    variant.cosmic_id = "COSM111; COSV222"
+    service = BrowserReviewService(profile_root=tmp_path)
+    attempts = []
+
+    def lookup(page, candidate, query_url, artifact_directory, *, progress):
+        attempts.append(candidate.cosmic_id)
+        return DatabaseEvidence(
+            "COSMIC",
+            "found" if candidate.cosmic_id == "COSV222" else "not_found",
+            "matched" if candidate.cosmic_id == "COSV222" else "missing",
+            accession=candidate.cosmic_id,
+        )
+
+    monkeypatch.setattr(service, "_lookup_cosmic_with_retry", lookup)
+
+    evidence = service._lookup_cosmic_variant(
+        object(), variant, tmp_path / "cosmic", progress=None
+    )
+
+    assert attempts == ["COSM111", "COSV222"]
+    assert evidence.status == "found"
+    assert evidence.accession == "COSV222"
+    assert evidence.raw["query_attempts"] == ["COSM111", "COSV222"]
 
 
 def test_cosmic_search_resolves_canonical_internal_mutation_id(tmp_path):

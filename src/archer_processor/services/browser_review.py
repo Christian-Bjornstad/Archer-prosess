@@ -6,7 +6,7 @@ import random
 import re
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -462,42 +462,25 @@ class BrowserReviewService:
                 for index, variant in enumerate(variants, start=1):
                     self._check_cancelled()
                     key = self.variant_key(variant)
-                    query_url = self.query_url("COSMIC", variant)
-                    if not query_url:
-                        results[key] = DatabaseEvidence(
-                            "COSMIC",
-                            "invalid_query",
-                            "No COSM/COSV identifier was present in the Archer COSMICID column.",
-                        )
-                        continue
-                    cosmic_id = _cosmic_identifier(variant.cosmic_id)
-                    if cosmic_id in self._cosmic_cache:
-                        results[key] = self._cosmic_cache[cosmic_id]
-                        if progress:
-                            progress(f"COSMIC cache hit: {cosmic_id}")
-                        continue
                     if progress:
                         progress(
                             f"COSMIC browser lookup {index}/{len(variants)}: "
                             f"{variant.cosmic_id}"
                         )
                     try:
-                        results[key] = self._lookup_cosmic_with_retry(
+                        results[key] = self._lookup_cosmic_variant(
                             page,
                             variant,
-                            query_url,
                             artifact_directory,
                             progress=progress,
                         )
-                        if results[key].status == "found":
-                            self._cosmic_cache[cosmic_id] = results[key]
                     except Exception as exc:
                         results[key] = DatabaseEvidence(
                             "COSMIC",
                             "error",
                             f"COSMIC browser lookup failed: {exc}",
                             accession=variant.cosmic_id,
-                            url=query_url,
+                            url=self.query_url("COSMIC", variant),
                         )
                     if index < len(variants):
                         self._wait_between_queries(page, "COSMIC", progress=progress)
@@ -507,6 +490,49 @@ class BrowserReviewService:
                 except browser_error:
                     pass
         return results
+
+    def _lookup_cosmic_variant(
+        self,
+        page: Any,
+        variant: VariantRecord,
+        artifact_directory: Path,
+        *,
+        progress: Callable[[str], None] | None,
+    ) -> DatabaseEvidence:
+        identifiers = _cosmic_identifiers(variant.cosmic_id)
+        if not identifiers:
+            return DatabaseEvidence(
+                "COSMIC",
+                "invalid_query",
+                "No COSM/COSV identifier was present in the Archer COSMICID column.",
+            )
+        attempts: list[str] = []
+        last_result: DatabaseEvidence | None = None
+        for cosmic_id in identifiers:
+            attempts.append(cosmic_id)
+            if cosmic_id in self._cosmic_cache:
+                result = self._cosmic_cache[cosmic_id]
+                if progress:
+                    progress(f"COSMIC cache hit: {cosmic_id}")
+            else:
+                candidate = replace(variant, cosmic_id=cosmic_id)
+                result = self._lookup_cosmic_with_retry(
+                    page,
+                    candidate,
+                    self.query_url("COSMIC", candidate),
+                    artifact_directory,
+                    progress=progress,
+                )
+                if result.status == "found":
+                    self._cosmic_cache[cosmic_id] = result
+            result.raw["query_attempts"] = list(attempts)
+            if result.status == "found":
+                return result
+            last_result = result
+            if result.status not in {"not_found", "identity_mismatch"}:
+                return result
+        assert last_result is not None
+        return last_result
 
     def _lookup_cosmic_with_retry(
         self,
@@ -3224,8 +3250,19 @@ def _expanded_capture_box(
 
 
 def _cosmic_identifier(value: str | None) -> str:
-    match = re.search(r"\bCOS(?:M|V)\d+\b", value or "", re.IGNORECASE)
-    return match.group(0).upper() if match else ""
+    identifiers = _cosmic_identifiers(value)
+    return identifiers[0] if identifiers else ""
+
+
+def _cosmic_identifiers(value: str | None) -> list[str]:
+    identifiers: list[str] = []
+    seen: set[str] = set()
+    for match in re.finditer(r"\bCOS(?:M|V)\d+\b", value or "", re.IGNORECASE):
+        identifier = match.group(0).upper()
+        if identifier not in seen:
+            seen.add(identifier)
+            identifiers.append(identifier)
+    return identifiers
 
 
 def _cosmic_numeric_id(value: str | None) -> str:
