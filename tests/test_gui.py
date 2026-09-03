@@ -10,6 +10,7 @@ from archer_processor.gui.app import (
     BrowserReviewWorker,
     DatabaseWorker,
     MainWindow,
+    PatientReportWorker,
     _completed_evidence_sources,
     _protected_remote_evidence_sources,
 )
@@ -206,13 +207,13 @@ def test_activity_updates_current_provider_and_timeline(qt_app):
     assert window.activity_timeline.rowCount() == 1
 
 
-def test_pending_report_exposes_retry_action(qt_app, tmp_path):
+def test_locked_report_exposes_retry_action(qt_app, tmp_path):
     window = MainWindow()
     window.report_outcomes = {
         "SYNTHETIC02": PatientReportOutcome(
             "SYNTHETIC02",
             tmp_path / "SYNTHETIC02_VPM_Tolkning.xlsx",
-            "pending",
+            "locked",
             "locked",
         )
     }
@@ -220,6 +221,70 @@ def test_pending_report_exposes_retry_action(qt_app, tmp_path):
     window._refresh_operations_cockpit()
 
     assert not window.retry_report_saves_button.isHidden()
+
+
+def test_selected_patient_ids_use_all_patients_without_selection(qt_app, tmp_path):
+    window = MainWindow()
+    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+    window.result = VariantProcessor().process(
+        fixture, "2026-08-01", tmp_path / "review.xlsx"
+    )
+    window._refresh_operations_cockpit()
+
+    expected = sorted({variant.patient_id for variant in window.result.variants})
+    assert window._selected_patient_ids() == expected
+
+
+def test_selected_patient_ids_deduplicate_selected_rows(qt_app, tmp_path):
+    window = MainWindow()
+    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+    window.result = VariantProcessor().process(
+        fixture, "2026-08-01", tmp_path / "review.xlsx"
+    )
+    window._refresh_operations_cockpit()
+    first_patient = window.status_matrix.item(0, 0).text()
+    window.status_matrix.selectRow(0)
+
+    assert window._selected_patient_ids() == [first_patient]
+
+
+def test_report_summary_uses_exact_norwegian_categories(qt_app, tmp_path):
+    window = MainWindow()
+    outcomes = [
+        PatientReportOutcome("P1", tmp_path / "P1.xlsx", "created", ""),
+        PatientReportOutcome("P2", tmp_path / "P2.xlsx", "updated", ""),
+        PatientReportOutcome("P3", tmp_path / "P3.xlsx", "locked", "open"),
+        PatientReportOutcome("P4", tmp_path / "P4.xlsx", "failed", "disk"),
+    ]
+
+    summary = window._report_outcome_summary(outcomes)
+
+    assert summary == (
+        "Opprettet: 1 · Oppdatert: 1 · "
+        "Hoppet over/låst: 1 · Feilet: 1"
+    )
+
+
+def test_patient_report_worker_emits_progress_per_patient(qt_app, tmp_path):
+    class Coordinator:
+        @staticmethod
+        def write_patient(patient_id):
+            return PatientReportOutcome(
+                patient_id, tmp_path / f"{patient_id}.xlsx", "created", ""
+            )
+
+    worker = PatientReportWorker(Coordinator(), ["P2", "P1"])
+    progress = []
+    finished = []
+    worker.progress.connect(
+        lambda current, total, detail: progress.append((current, total, detail))
+    )
+    worker.finished.connect(finished.append)
+
+    worker.run()
+
+    assert progress == [(1, 2, "P2"), (2, 2, "P1")]
+    assert [outcome.patient_id for outcome in finished[0]] == ["P2", "P1"]
 
 
 def test_review_filters_and_search_progress_are_visible(qt_app, tmp_path):
