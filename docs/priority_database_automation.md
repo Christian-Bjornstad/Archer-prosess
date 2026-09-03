@@ -43,6 +43,7 @@ Implementation notes:
 - Direct genomic result URLs are not constructed from Archer `Ref/Alt Allele`: TP53 testing showed these values can be transcript-oriented and produce the wrong reverse-strand genomic allele.
 - Anonymous Franklin use is limited (the current user observed 15 searches). Saved browser credentials avoid relying on that anonymous allowance.
 - Fail closed when a required section or normalized variant identity changes.
+- Overview capture boxes are expanded before screenshotting: a fixed safety margin is added on both horizontal sides and above the gene/variant heading, and the resulting box is clamped to the rendered document. After capture, each image is re-opened and validated; blank, implausibly narrow, or truncated captures are rejected so resume can recapture them instead of accepting incomplete evidence.
 
 ### MTBP
 
@@ -50,6 +51,17 @@ Implementation notes:
 - `https://mtbp.org/analyse/` redirects to a Keycloak login.
 - MTBP supports SNVs, small indels, copy-number alterations and fusions through VCF or free-text variant lists.
 - The public portal states that it is for academic research only. Its FAQ directs requests for programmatic or local access to `mtbp@scilifelab.se`.
+
+### COSMIC
+
+Resolution order and operator-visible failure categories in the current implementation:
+
+- Every distinct `COSM`/`COSV` identifier in the Archer `COSMICID` column is tried in source order, deduplicated. Canonical redirects and merged identifiers are accepted only after the GRCh37 variant identity of the resulting page is verified.
+- When all identifiers miss, exactly one genomic search using the normalized GRCh37 notation (for example `chr17:g.7578406G>A`) is performed. A candidate is opened only when chromosome, position, REF, ALT, and assembly match the requested variant. Multiple verified candidates fail closed as ambiguous; a mismatched candidate fails closed as an identity mismatch. The first search result alone is never accepted.
+- A result without identifiers and without a computable genomic query is reported as an invalid query rather than a provider error.
+- Distinct statuses: `found` (verified match), `not_found` (no matching record), `login_required` (session required), `layout_changed` (provider markup changed), `ambiguous` (multiple verified candidates), `identity_mismatch` (candidate identity differs), `transient`/timeout (retryable render error). Transient and unverified results remain retryable on resume.
+- Screenshots capture Overview, Tissue distribution, and Samples filtered to `lymphoid`; the structured audit JSON retains every attempted query and its outcome.
+- The organisation's COSMIC licence must permit use in patient-care reporting before clinical deployment.
 
 Validated login-assisted workflow:
 
