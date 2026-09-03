@@ -1240,17 +1240,20 @@ class BrowserReviewService:
                 key = self.variant_key(variant)
                 if key not in confirmed_absent:
                     results.setdefault(key, prior)
-        for index, variant in enumerate(variants, start=1):
+        pending_variants = [
+            variant
+            for variant in variants
+            if self.variant_key(variant) not in results
+        ]
+        if pending_variants:
             self._check_cancelled()
-            if self.variant_key(variant) in results:
-                continue
             if progress:
                 progress(
-                    f"MTBP variant {index}/{len(variants)}: "
-                    f"{variant.symbol} {_protein_change(variant.hgvsp) or _cdna_change(variant.hgvsc)}"
+                    "MTBP: submitting one combined patient report with "
+                    f"{len(pending_variants)} variant(s)"
                 )
             current = self._search_mtbp_batch(
-                [variant], artifact_directory, progress=progress
+                pending_variants, artifact_directory, progress=progress
             )
             for evidence in current.values():
                 evidence.url = ""
@@ -1258,14 +1261,6 @@ class BrowserReviewService:
                     if isinstance(record, dict):
                         record["url"] = ""
             results.update(current)
-            if index < len(variants):
-                delay_ms = self._next_request_delay_ms()
-                if delay_ms > 0:
-                    if progress:
-                        progress(
-                            f"MTBP: safety buffer {delay_ms / 1_000:.1f}s before next variant"
-                        )
-                    self._interruptible_sleep(delay_ms / 1_000)
         pending = [
             (variant, results[self.variant_key(variant)])
             for variant in variants

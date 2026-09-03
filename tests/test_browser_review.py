@@ -1612,7 +1612,7 @@ def test_mtbp_reuses_proven_genomic_fallback_after_transcript_rejection(tmp_path
     assert learned
 
 
-def test_mtbp_runs_each_variant_as_an_independent_report(tmp_path, monkeypatch):
+def test_mtbp_submits_one_combined_report_for_patient(tmp_path, monkeypatch):
     variants = ArcherTsvReader().read(FIXTURE)[3:5]
     service = BrowserReviewService(
         profile_root=tmp_path,
@@ -1622,9 +1622,7 @@ def test_mtbp_runs_each_variant_as_an_independent_report(tmp_path, monkeypatch):
     submitted = []
 
     def run_one(batch, artifact_directory, *, progress):
-        assert len(batch) == 1
-        variant = batch[0]
-        submitted.append(variant.hgvsc)
+        submitted.append([variant.hgvsc for variant in batch])
         return {
             service.variant_key(variant): DatabaseEvidence(
                 "MTBP",
@@ -1637,12 +1635,13 @@ def test_mtbp_runs_each_variant_as_an_independent_report(tmp_path, monkeypatch):
                     ]
                 },
             )
+            for variant in batch
         }
 
     monkeypatch.setattr(service, "_search_mtbp_batch", run_one)
     results = service._search_mtbp(variants, tmp_path / "mtbp", progress=None)
 
-    assert submitted == [variant.hgvsc for variant in variants]
+    assert submitted == [[variant.hgvsc for variant in variants]]
     assert len(results) == 2
     assert all(item.url == "" for item in results.values())
     assert all(item.raw["screenshots"][0]["url"] == "" for item in results.values())
@@ -1730,17 +1729,16 @@ def test_mtbp_rechecks_late_reports_without_resubmitting(tmp_path, monkeypatch):
     calls = []
 
     def run_one(batch, artifact_directory, *, progress):
-        variant = batch[0]
-        calls.append(("submit", variant.hgvsc))
-        status = "timeout" if len(calls) == 1 else "found"
+        calls.append(("submit", [variant.hgvsc for variant in batch]))
         return {
             service.variant_key(variant): DatabaseEvidence(
                 "MTBP",
-                status,
-                status,
+                "timeout" if index == 0 else "found",
+                "timeout" if index == 0 else "found",
                 accession=variant.hgvsc,
-                raw={"analysis_id": "ARCHER-late"} if status == "timeout" else {},
+                raw={"analysis_id": "ARCHER-late"} if index == 0 else {},
             )
+            for index, variant in enumerate(batch)
         }
 
     def recover(pending, artifact_directory, *, progress):
@@ -1756,8 +1754,7 @@ def test_mtbp_rechecks_late_reports_without_resubmitting(tmp_path, monkeypatch):
     results = service._search_mtbp(variants, tmp_path / "mtbp", progress=None)
 
     assert calls == [
-        ("submit", variants[0].hgvsc),
-        ("submit", variants[1].hgvsc),
+        ("submit", [variant.hgvsc for variant in variants]),
         ("recover", variants[0].hgvsc),
     ]
     assert results[service.variant_key(variants[0])].status == "found"
