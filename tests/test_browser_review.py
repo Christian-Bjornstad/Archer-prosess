@@ -11,6 +11,7 @@ from archer_processor.services.browser_review import (
     _cosmic_identifier,
     _cosmic_numeric_id,
     _cosmic_source_url,
+    _expanded_capture_box,
     _franklin_queries,
     _mtbp_genomic_query,
     _mtbp_query_rejected,
@@ -29,6 +30,17 @@ VALID_CAPTURE = lambda _: CaptureValidation(True, "ok", 800, 500, 10.0)
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+
+
+def test_expanded_capture_box_adds_margins_and_clamps_to_document():
+    assert _expanded_capture_box(
+        {"x": 10, "y": 20, "width": 100, "height": 80},
+        {"x": 0, "y": 0, "width": 500, "height": 400},
+    ) == {"x": 0.0, "y": 0.0, "width": 142.0, "height": 124.0}
+    assert _expanded_capture_box(
+        {"x": 450, "y": 350, "width": 45, "height": 45},
+        {"x": 0, "y": 0, "width": 500, "height": 400},
+    ) == {"x": 418.0, "y": 326.0, "width": 82.0, "height": 74.0}
 
 
 def test_browser_query_urls_use_normalized_variant_identity(tmp_path):
@@ -1089,7 +1101,7 @@ def test_franklin_classification_capture_ends_with_complete_de_novo_card(tmp_pat
     assert page.captures[0]["clip"] == {
         "x": 0,
         "y": 0,
-        "width": 1000,
+        "width": 1032,
         "height": 100,
     }
     assert not any("Population" in item["label"] for item in screenshots)
@@ -1145,10 +1157,10 @@ def test_franklin_overview_starts_above_visible_gene_header(tmp_path):
     )
 
     assert captures[0]["clip"] == {
-        "x": 70,
-        "y": 74,
-        "width": 930,
-        "height": 286,
+        "x": 38,
+        "y": 66,
+        "width": 994,
+        "height": 294,
     }
 
 

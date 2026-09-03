@@ -2517,26 +2517,45 @@ class BrowserReviewService:
             page, gene_symbol, panel_y, float(category_box["y"])
         )
         if header_box is None:
-            clip_x = max(0, panel_x)
-            clip_y = max(0, panel_y - 220)
-            clip_width = float(panel_box["width"])
+            target_left = panel_x
+            target_top = max(0, panel_y - 220)
+            target_right = panel_right
         else:
             header_x = float(header_box["x"])
             header_right = header_x + float(header_box["width"])
-            clip_x = max(0, min(panel_x, header_x))
-            clip_y = max(0, float(header_box["y"]) - 16)
-            clip_width = max(panel_right, header_right) - clip_x
-        height = float(category_box["y"]) - clip_y
-        if height <= 1:
+            target_left = min(panel_x, header_x)
+            target_top = float(header_box["y"])
+            target_right = max(panel_right, header_right)
+        target_bottom = float(category_box["y"])
+        if target_bottom - target_top <= 1:
             raise RuntimeError("Franklin classification overview could not be cropped.")
+        try:
+            document_box = page.evaluate(
+                "() => ({x: 0, y: 0, width: document.documentElement.scrollWidth, "
+                "height: document.documentElement.scrollHeight})"
+            )
+        except (AttributeError, TypeError):
+            document_box = None
+        if not isinstance(document_box, dict):
+            document_box = {
+                "x": 0,
+                "y": 0,
+                "width": target_right + 32,
+                "height": target_bottom,
+            }
+        clip = _expanded_capture_box(
+            {
+                "x": target_left,
+                "y": target_top,
+                "width": target_right - target_left,
+                "height": target_bottom - target_top,
+            },
+            document_box,
+            bottom_margin=0,
+        )
         page.screenshot(
             path=str(screenshot_path),
-            clip={
-                "x": clip_x,
-                "y": clip_y,
-                "width": clip_width,
-                "height": height,
-            },
+            clip=clip,
         )
 
     @staticmethod
@@ -3175,6 +3194,33 @@ class BrowserReviewService:
     @staticmethod
     def variant_key(variant: VariantRecord) -> str:
         return f"{variant.sample}|{variant.hgvsc}"
+
+
+def _expanded_capture_box(
+    target_box: dict[str, float],
+    document_box: dict[str, float],
+    horizontal_margin: int = 32,
+    top_margin: int = 24,
+    bottom_margin: int = 24,
+) -> dict[str, float]:
+    document_left = float(document_box.get("x", 0))
+    document_top = float(document_box.get("y", 0))
+    document_right = document_left + float(document_box["width"])
+    document_bottom = document_top + float(document_box["height"])
+    target_left = float(target_box["x"])
+    target_top = float(target_box["y"])
+    target_right = target_left + float(target_box["width"])
+    target_bottom = target_top + float(target_box["height"])
+    left = max(document_left, target_left - horizontal_margin)
+    top = max(document_top, target_top - top_margin)
+    right = min(document_right, target_right + horizontal_margin)
+    bottom = min(document_bottom, target_bottom + bottom_margin)
+    return {
+        "x": left,
+        "y": top,
+        "width": max(0.0, right - left),
+        "height": max(0.0, bottom - top),
+    }
 
 
 def _cosmic_identifier(value: str | None) -> str:
