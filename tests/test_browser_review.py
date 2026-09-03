@@ -14,6 +14,7 @@ from archer_processor.services.browser_review import (
     _franklin_queries,
     _mtbp_genomic_query,
     _mtbp_query_rejected,
+    _mtbp_retry_query,
     _mtbp_screenshot_row_matches,
     _mtbp_unmapped_queries,
     _mtbp_variant_query,
@@ -1661,6 +1662,20 @@ def test_mtbp_validation_error_identifies_rejected_entries():
     assert rejected == ["CEBPA:p.His195_Pro196dup", "EZH2:c.118-4dup"]
     assert _mtbp_query_rejected("NM_004456.4:c.118-4dup", rejected)
     assert not _mtbp_query_rejected("NM_000546.6:c.524G>A", rejected)
+
+
+def test_mtbp_replaces_only_explicitly_rejected_query_with_genomic_fallback():
+    accepted, rejected = ArcherTsvReader().read(FIXTURE)[3:5]
+    accepted_query = _mtbp_variant_query(accepted)
+    rejected_query = _mtbp_variant_query(rejected)
+    unmapped = [rejected_query]
+
+    assert _mtbp_retry_query(
+        accepted, accepted_query, [accepted_query], unmapped
+    ) == accepted_query
+    assert _mtbp_retry_query(
+        rejected, rejected_query, [rejected_query], unmapped
+    ) == _mtbp_genomic_query(rejected)
 
 
 def test_mtbp_queue_recovers_report_from_reports_list(tmp_path):

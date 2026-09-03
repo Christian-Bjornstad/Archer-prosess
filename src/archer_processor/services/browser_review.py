@@ -1588,8 +1588,13 @@ class BrowserReviewService:
                     finally_rejected: list[tuple[VariantRecord, str]] = []
                     for variant, query in rejected_pairs:
                         key = self.variant_key(variant)
-                        fallback = _mtbp_genomic_query(variant)
-                        if fallback and fallback not in query_attempts[key]:
+                        fallback = _mtbp_retry_query(
+                            variant,
+                            query,
+                            query_attempts[key],
+                            unmapped,
+                        )
+                        if fallback and fallback != query:
                             self._mtbp_rejected_transcript_queries.add(query)
                             query_attempts[key].append(fallback)
                             replacement_by_key[key] = (variant, fallback)
@@ -3614,6 +3619,21 @@ def _mtbp_query_rejected(query: str, rejected: list[str]) -> bool:
         if coordinate and coordinate == rejected_normalized.split(":", 1)[-1]:
             return True
     return False
+
+
+def _mtbp_retry_query(
+    variant: VariantRecord,
+    current_query: str,
+    query_attempts: list[str],
+    rejected: list[str],
+) -> str:
+    """Keep accepted queries and replace only an explicitly rejected query."""
+    if not _mtbp_query_rejected(current_query, rejected):
+        return current_query
+    fallback = _mtbp_genomic_query(variant)
+    if fallback and fallback not in query_attempts:
+        return fallback
+    return ""
 
 
 def _mtbp_normalized_protein(value: str) -> str:
