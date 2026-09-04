@@ -7,6 +7,13 @@ from archer_processor.core.models import VariantRecord
 
 def variant_highlight(variant: VariantRecord) -> str:
     if _is_artifact(variant):
+        if (
+            variant.symbol.upper() == "ASXL1"
+            and variant.hgvsc == "NM_015338.5:c.1934dup"
+            and variant.af is not None
+            and 0.05 < variant.af <= 0.055
+        ):
+            return "artifact_light"
         return "artifact"
     if _variant_sum(variant, "Germ") > 10 and variant.af is not None:
         return "germline" if variant.af >= 0.35 else "germline_low_af"

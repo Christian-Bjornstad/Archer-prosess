@@ -19,6 +19,8 @@ class Palette:
     pale_green = "#E9F6EF"
     strong_green = "#CDEDD8"
     pale_orange = "#FCE4D6"
+    artifact_orange = "#FFC000"
+    artifact_light_orange = "#F4B183"
     pale_red = "#F8E8E8"
     pale_yellow = "#FFF5D6"
 
@@ -68,5 +70,11 @@ def application_stylesheet() -> str:
         QLineEdit:focus, QTableWidget:focus {{
             border: 2px solid #087EA4;
         }}
-        QPushButton#PrimaryButton {{ min-height: 24px; }}
+        QPushButton:not([compact="true"]) {{
+            min-height: 44px;
+            padding: 9px 15px;
+        }}
+        QPushButton#PrimaryButton, QPushButton#ReportButton {{
+            min-height: 44px;
+        }}
     """

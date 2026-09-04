@@ -4,12 +4,14 @@ import re
 import time
 
 from PIL import Image
+from PyQt6.QtWidgets import QPushButton
 
 from archer_processor.core import DatabaseEvidence, VariantProcessor, default_artifact_rules
 from archer_processor.gui.app import (
     BrowserReviewWorker,
     DatabaseWorker,
     MainWindow,
+    PatientReportWorker,
     _completed_evidence_sources,
     _protected_remote_evidence_sources,
 )
@@ -26,6 +28,36 @@ from archer_processor.gui.widgets.run_status import RunStatusStrip
 from archer_processor.reports import ExcelReportWriter, PatientReportOutcome
 from archer_processor.services import DatabaseSearchService
 from archer_processor.services import AppSettings
+
+
+def test_primary_and_secondary_text_actions_are_at_least_44px(qt_app):
+    window = MainWindow()
+    text_actions = [
+        button
+        for button in window.findChildren(QPushButton)
+        if button.text() and button.objectName() != "SidebarButton"
+    ]
+
+    assert all(button.minimumHeight() >= 44 for button in text_actions)
+    assert window.patient_excel_btn.text() == "Generer VEDLEGG_APP"
+    assert window.patient_excel_btn.parent().objectName() == "ReportsGroup"
+
+
+def test_evidence_actions_fit_target_window_sizes(qt_app):
+    window = MainWindow()
+    window.show()
+    for width, height in [(1120, 720), (1440, 900)]:
+        window.resize(width, height)
+        qt_app.processEvents()
+        viewport = window.database_scroll.viewport().rect()
+        for button in [
+            window.search_btn,
+            window.rewrite_btn,
+            window.patient_excel_btn,
+        ]:
+            point = button.mapTo(window.database_scroll.viewport(), button.rect().topLeft())
+            assert point.x() >= 0
+            assert point.x() + button.width() <= viewport.width()
 
 
 def test_database_tab_contains_current_sources(qt_app):
@@ -88,7 +120,7 @@ def test_artifact_settings_show_catalog_and_af_exception(qt_app):
         for index in range(window.artifact_table.columnCount())
     ]
 
-    assert window.artifact_table.rowCount() == 36
+    assert window.artifact_table.rowCount() == 39
     assert headers == ["Gene", "HGVSc", "Artifact through AF", "Reason"]
     assert window.artifact_table.item(0, 1).text() == "NM_015338.5:c.1934dup"
     assert window.artifact_table.item(0, 2).text() == "5.5%"
@@ -206,13 +238,13 @@ def test_activity_updates_current_provider_and_timeline(qt_app):
     assert window.activity_timeline.rowCount() == 1
 
 
-def test_pending_report_exposes_retry_action(qt_app, tmp_path):
+def test_locked_report_exposes_retry_action(qt_app, tmp_path):
     window = MainWindow()
     window.report_outcomes = {
         "SYNTHETIC02": PatientReportOutcome(
             "SYNTHETIC02",
             tmp_path / "SYNTHETIC02_VPM_Tolkning.xlsx",
-            "pending",
+            "locked",
             "locked",
         )
     }
@@ -220,6 +252,70 @@ def test_pending_report_exposes_retry_action(qt_app, tmp_path):
     window._refresh_operations_cockpit()
 
     assert not window.retry_report_saves_button.isHidden()
+
+
+def test_selected_patient_ids_use_all_patients_without_selection(qt_app, tmp_path):
+    window = MainWindow()
+    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+    window.result = VariantProcessor().process(
+        fixture, "2026-08-01", tmp_path / "review.xlsx"
+    )
+    window._refresh_operations_cockpit()
+
+    expected = sorted({variant.patient_id for variant in window.result.variants})
+    assert window._selected_patient_ids() == expected
+
+
+def test_selected_patient_ids_deduplicate_selected_rows(qt_app, tmp_path):
+    window = MainWindow()
+    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+    window.result = VariantProcessor().process(
+        fixture, "2026-08-01", tmp_path / "review.xlsx"
+    )
+    window._refresh_operations_cockpit()
+    first_patient = window.status_matrix.item(0, 0).text()
+    window.status_matrix.selectRow(0)
+
+    assert window._selected_patient_ids() == [first_patient]
+
+
+def test_report_summary_uses_exact_norwegian_categories(qt_app, tmp_path):
+    window = MainWindow()
+    outcomes = [
+        PatientReportOutcome("P1", tmp_path / "P1.xlsx", "created", ""),
+        PatientReportOutcome("P2", tmp_path / "P2.xlsx", "updated", ""),
+        PatientReportOutcome("P3", tmp_path / "P3.xlsx", "locked", "open"),
+        PatientReportOutcome("P4", tmp_path / "P4.xlsx", "failed", "disk"),
+    ]
+
+    summary = window._report_outcome_summary(outcomes)
+
+    assert summary == (
+        "Opprettet: 1 · Oppdatert: 1 · "
+        "Hoppet over/låst: 1 · Feilet: 1"
+    )
+
+
+def test_patient_report_worker_emits_progress_per_patient(qt_app, tmp_path):
+    class Coordinator:
+        @staticmethod
+        def write_patient(patient_id):
+            return PatientReportOutcome(
+                patient_id, tmp_path / f"{patient_id}.xlsx", "created", ""
+            )
+
+    worker = PatientReportWorker(Coordinator(), ["P2", "P1"])
+    progress = []
+    finished = []
+    worker.progress.connect(
+        lambda current, total, detail: progress.append((current, total, detail))
+    )
+    worker.finished.connect(finished.append)
+
+    worker.run()
+
+    assert progress == [(1, 2, "P2"), (2, 2, "P1")]
+    assert [outcome.patient_id for outcome in finished[0]] == ["P2", "P1"]
 
 
 def test_review_filters_and_search_progress_are_visible(qt_app, tmp_path):
@@ -300,6 +396,25 @@ def test_variant_table_uses_distinct_strong_and_weak_germline_green(qt_app, tmp_
 
     assert window.variant_table.item(0, 0).background().color().name() == "#cdedd8"
     assert window.variant_table.item(1, 0).background().color().name() == "#e9f6ef"
+
+
+def test_variant_table_uses_distinct_asxl1_artifact_oranges(qt_app, tmp_path):
+    window = MainWindow()
+    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+    window.result = VariantProcessor().process(
+        fixture, "2026-09-03", tmp_path / "review.xlsx"
+    )
+    strong = window.result.variants[1]
+    strong.af = 0.05
+    strong.matched_rules = ["asxl1_1934dup_artifact"]
+    light = window.result.variants[2]
+    light.af = 0.0525
+    light.matched_rules = ["asxl1_1934dup_artifact"]
+
+    window._refresh_variant_table()
+
+    assert window.variant_table.item(1, 0).background().color().name() == "#ffc000"
+    assert window.variant_table.item(2, 0).background().color().name() == "#f4b183"
 
 
 def test_locked_workbook_shows_warning_without_raising(qt_app, tmp_path, monkeypatch):
@@ -675,18 +790,17 @@ def test_database_worker_completes_all_sources_before_next_patient(
 
     class FakeReportCoordinator:
         def __init__(self, result, variants, evidence):
-            pass
+            report_events.append("constructed")
+            raise AssertionError("evidence searches must not coordinate patient reports")
 
         def merge(self, incoming):
-            report_events.append("merge")
-
-        def write_patient(self, patient_id):
-            report_events.append(f"write:{patient_id}")
-            raise AssertionError("patient reports must not be written mid-search")
+            raise AssertionError("evidence searches must not merge patient reports")
 
         def reconcile(self):
-            report_events.append("reconcile")
-            return []
+            raise AssertionError("evidence searches must not write patient reports")
+
+        def write_patient(self, patient_id):
+            raise AssertionError("patient reports must not be written mid-search")
 
     class FakeApiService:
         def __init__(self, settings):
@@ -789,7 +903,7 @@ def test_database_worker_completes_all_sources_before_next_patient(
     # No API query is delayed; the only pause is before patient 2's website phase.
     assert 10 <= sum(slept) <= 20
     assert all(delay <= 0.25 for delay in slept)
-    assert report_events == ["merge", "merge", "reconcile"]
+    assert report_events == []
     assert prior_snapshots == [restored_evidence, restored_evidence]
 
 

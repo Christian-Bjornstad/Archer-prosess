@@ -6,7 +6,21 @@ from pathlib import Path
 from typing import Sequence
 
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
-from archer_processor.reports.patient_excel import PatientExcelReportWriter
+from archer_processor.reports.patient_excel import (
+    PatientExcelReportWriter,
+    patient_report_filename,
+)
+
+VEDLEGG_APP_DIRECTORY = "VEDLEGG_APP"
+
+
+def patient_report_path(review_workbook: Path, patient_id: str) -> Path:
+    """Approved destination for one patient's VPM interpretation workbook."""
+    return (
+        review_workbook.parent
+        / VEDLEGG_APP_DIRECTORY
+        / patient_report_filename(patient_id)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,25 +56,35 @@ class PatientReportCoordinator:
         if self.result.output_path is None:
             raise ValueError("Patient reports require a processed workbook path.")
         variants = [item for item in self.variants if item.patient_id == patient_id]
-        safe_id = re.sub(r"[^A-Za-z0-9_-]+", "_", patient_id).strip("_")
-        output = self.result.output_path.parent / f"{safe_id}_Myolid_Tolkning.xlsx"
+        output = patient_report_path(self.result.output_path, patient_id)
+        existed = output.exists()
         try:
+            output.parent.mkdir(parents=True, exist_ok=True)
             self.writer.write_patient(
                 self.result, patient_id, variants, output, self.evidence
             )
         except PermissionError as exc:
             self.pending.add(patient_id)
-            return PatientReportOutcome(patient_id, output, "pending", str(exc))
+            return PatientReportOutcome(patient_id, output, "locked", str(exc))
+        except Exception as exc:
+            return PatientReportOutcome(patient_id, output, "failed", str(exc))
         self.pending.discard(patient_id)
         self.written.add(patient_id)
         return PatientReportOutcome(
-            patient_id, output, "written", "Patient report written."
+            patient_id,
+            output,
+            "updated" if existed else "created",
+            "Patient report written.",
         )
+
+    def write_patients(self, patient_ids: Sequence[str]) -> list[PatientReportOutcome]:
+        unique = sorted(dict.fromkeys(patient_ids))
+        return [self.write_patient(patient_id) for patient_id in unique]
 
     def reconcile(self) -> list[PatientReportOutcome]:
         patients = {variant.patient_id for variant in self.variants}
         required = (patients - self.written) | self.pending
-        return [self.write_patient(patient_id) for patient_id in sorted(required)]
+        return self.write_patients(sorted(required))
 
     def retry_pending(self) -> list[PatientReportOutcome]:
-        return [self.write_patient(patient_id) for patient_id in sorted(self.pending)]
+        return self.write_patients(sorted(self.pending))

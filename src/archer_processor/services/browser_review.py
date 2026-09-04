@@ -6,13 +6,18 @@ import random
 import re
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
+from archer_processor.services.genomic_notation import format_mtbp_grch37
+from archer_processor.services.provider_failures import (
+    ProviderFailureKind,
+    ProviderLookupError,
+)
 from archer_processor.services.evidence_audit import persist_evidence_result
 from archer_processor.services.browser_popups import dismiss_known_overlays
 from archer_processor.services.capture_validation import (
@@ -461,42 +466,25 @@ class BrowserReviewService:
                 for index, variant in enumerate(variants, start=1):
                     self._check_cancelled()
                     key = self.variant_key(variant)
-                    query_url = self.query_url("COSMIC", variant)
-                    if not query_url:
-                        results[key] = DatabaseEvidence(
-                            "COSMIC",
-                            "invalid_query",
-                            "No COSM/COSV identifier was present in the Archer COSMICID column.",
-                        )
-                        continue
-                    cosmic_id = _cosmic_identifier(variant.cosmic_id)
-                    if cosmic_id in self._cosmic_cache:
-                        results[key] = self._cosmic_cache[cosmic_id]
-                        if progress:
-                            progress(f"COSMIC cache hit: {cosmic_id}")
-                        continue
                     if progress:
                         progress(
                             f"COSMIC browser lookup {index}/{len(variants)}: "
                             f"{variant.cosmic_id}"
                         )
                     try:
-                        results[key] = self._lookup_cosmic_with_retry(
+                        results[key] = self._lookup_cosmic_variant(
                             page,
                             variant,
-                            query_url,
                             artifact_directory,
                             progress=progress,
                         )
-                        if results[key].status == "found":
-                            self._cosmic_cache[cosmic_id] = results[key]
                     except Exception as exc:
                         results[key] = DatabaseEvidence(
                             "COSMIC",
                             "error",
                             f"COSMIC browser lookup failed: {exc}",
                             accession=variant.cosmic_id,
-                            url=query_url,
+                            url=self.query_url("COSMIC", variant),
                         )
                     if index < len(variants):
                         self._wait_between_queries(page, "COSMIC", progress=progress)
@@ -506,6 +494,120 @@ class BrowserReviewService:
                 except browser_error:
                     pass
         return results
+
+    def _lookup_cosmic_variant(
+        self,
+        page: Any,
+        variant: VariantRecord,
+        artifact_directory: Path,
+        *,
+        progress: Callable[[str], None] | None,
+    ) -> DatabaseEvidence:
+        identifiers = _cosmic_identifiers(variant.cosmic_id)
+        attempts: list[str] = []
+        attempt_results: list[dict[str, str]] = []
+        last_result: DatabaseEvidence | None = None
+        for cosmic_id in identifiers:
+            attempts.append(cosmic_id)
+            if cosmic_id in self._cosmic_cache:
+                result = self._cosmic_cache[cosmic_id]
+                if progress:
+                    progress(f"COSMIC cache hit: {cosmic_id}")
+            else:
+                candidate = replace(variant, cosmic_id=cosmic_id)
+                result = self._lookup_cosmic_with_retry(
+                    page,
+                    candidate,
+                    self.query_url("COSMIC", candidate),
+                    artifact_directory,
+                    progress=progress,
+                )
+                if result.status == "found":
+                    self._cosmic_cache[cosmic_id] = result
+            result.raw["query_attempts"] = list(attempts)
+            attempt_results.append(
+                {"query": cosmic_id, "status": result.status}
+            )
+            result.raw["query_attempt_results"] = list(attempt_results)
+            if result.status == "found":
+                return result
+            last_result = result
+            if result.status not in {"not_found", "identity_mismatch"}:
+                return result
+        genomic_query = _cosmic_genomic_query(variant)
+        if genomic_query:
+            attempts.append(genomic_query)
+            result = self._lookup_cosmic_genomic_with_retry(
+                page,
+                variant,
+                genomic_query,
+                artifact_directory,
+                progress=progress,
+            )
+            attempt_results.append(
+                {"query": genomic_query, "status": result.status}
+            )
+            result.raw.update(
+                {
+                    "lookup_mode": "genomic_fallback",
+                    "query_attempts": attempts,
+                    "query_attempt_results": attempt_results,
+                }
+            )
+            return result
+        if last_result is not None:
+            return last_result
+        return DatabaseEvidence(
+            "COSMIC",
+            "invalid_query",
+            "No COSM/COSV identifier or unambiguous GRCh37 genomic query was available.",
+            raw={"failure_kind": ProviderFailureKind.NOT_FOUND.value},
+        )
+
+    def _lookup_cosmic_genomic_with_retry(
+        self,
+        page: Any,
+        variant: VariantRecord,
+        query: str,
+        artifact_directory: Path,
+        *,
+        progress: Callable[[str], None] | None,
+    ) -> DatabaseEvidence:
+        query_url = (
+            "https://cancer.sanger.ac.uk/cosmic/search?q="
+            f"{quote(query, safe='')}"
+        )
+        for attempt in range(2):
+            try:
+                page.goto(
+                    query_url,
+                    wait_until="domcontentloaded",
+                    timeout=self.navigation_timeout_ms,
+                )
+                dismiss_known_overlays(page)
+                self._resolve_cosmic_genomic_page(page, variant)
+                self._wait_for_cosmic_result(page)
+                return self._capture_cosmic_result(
+                    variant, page, artifact_directory
+                )
+            except ProviderLookupError as exc:
+                return DatabaseEvidence(
+                    "COSMIC",
+                    exc.kind.value,
+                    str(exc),
+                    accession=query,
+                    url=page.url,
+                    raw={"failure_kind": exc.kind.value},
+                )
+            except Exception:
+                if attempt == 1:
+                    raise
+                if progress:
+                    progress(
+                        "COSMIC: transient genomic fallback failure; retrying once"
+                    )
+                page.wait_for_timeout(750)
+        raise RuntimeError("COSMIC genomic retry loop ended unexpectedly.")
 
     def _lookup_cosmic_with_retry(
         self,
@@ -538,6 +640,15 @@ class BrowserReviewService:
                 self._wait_for_cosmic_result(page)
                 return self._capture_cosmic_result(
                     variant, page, artifact_directory
+                )
+            except ProviderLookupError as exc:
+                return DatabaseEvidence(
+                    "COSMIC",
+                    exc.kind.value,
+                    str(exc),
+                    accession=_cosmic_identifier(variant.cosmic_id),
+                    url=page.url,
+                    raw={"failure_kind": exc.kind.value},
                 )
             except Exception:
                 if attempt == 1:
@@ -575,12 +686,14 @@ class BrowserReviewService:
                     )
                     break
                 if len(candidates) > 1:
-                    raise RuntimeError(
+                    raise ProviderLookupError(
+                        ProviderFailureKind.AMBIGUOUS,
                         f"COSMIC returned multiple canonical pages for {variant.cosmic_id}."
                     )
                 page.wait_for_timeout(500)
             else:
-                raise RuntimeError(
+                raise ProviderLookupError(
+                    ProviderFailureKind.NOT_FOUND,
                     f"COSMIC did not expose a canonical mutation link for {variant.cosmic_id}."
                 )
 
@@ -599,13 +712,94 @@ class BrowserReviewService:
             if candidates:
                 break
             page.wait_for_timeout(500)
-        if len(candidates) != 1:
-            raise RuntimeError("COSMIC GRCh37 mutation link was not uniquely available.")
+        if not candidates:
+            raise ProviderLookupError(
+                ProviderFailureKind.NOT_FOUND,
+                "COSMIC did not expose a GRCh37 mutation link.",
+            )
+        if len(candidates) > 1:
+            raise ProviderLookupError(
+                ProviderFailureKind.AMBIGUOUS,
+                "COSMIC exposed multiple GRCh37 mutation links.",
+            )
         page.goto(
             candidates[0],
             wait_until="domcontentloaded",
             timeout=self.navigation_timeout_ms,
         )
+
+    def _resolve_cosmic_genomic_page(
+        self, page: Any, variant: VariantRecord
+    ) -> None:
+        links = page.locator("a[href*='/cosmic/mutation/overview']")
+        candidates: list[str] = []
+        for _ in range(max(1, self.navigation_timeout_ms // 500)):
+            candidates = list(
+                dict.fromkeys(
+                    href
+                    for href in links.evaluate_all(
+                        "nodes => nodes.map(node => node.href)"
+                    )
+                    if href
+                )
+            )
+            if candidates:
+                break
+            page.wait_for_timeout(500)
+        if not candidates:
+            raise ProviderLookupError(
+                ProviderFailureKind.NOT_FOUND,
+                "COSMIC genomic fallback returned no mutation candidates.",
+            )
+
+        verified_urls: list[str] = []
+        for candidate_url in candidates:
+            page.goto(
+                candidate_url,
+                wait_until="domcontentloaded",
+                timeout=self.navigation_timeout_ms,
+            )
+            grch37_links = page.locator("a[href*='genome=37'][href*='id=']")
+            grch37_candidates = list(
+                dict.fromkeys(
+                    href
+                    for href in grch37_links.evaluate_all(
+                        "nodes => nodes.map(node => node.href)"
+                    )
+                    if href
+                )
+            )
+            urls = grch37_candidates or (
+                [page.url] if "genome=37" in page.url else []
+            )
+            for grch37_url in urls:
+                page.goto(
+                    grch37_url,
+                    wait_until="domcontentloaded",
+                    timeout=self.navigation_timeout_ms,
+                )
+                body_text = page.locator("body").inner_text(
+                    timeout=self.navigation_timeout_ms
+                )
+                if _cosmic_page_matches_variant(body_text, page.url, variant):
+                    verified_urls.append(page.url)
+        verified_urls = list(dict.fromkeys(verified_urls))
+        if not verified_urls:
+            raise ProviderLookupError(
+                ProviderFailureKind.IDENTITY_MISMATCH,
+                "COSMIC genomic candidates did not match the requested GRCh37 variant.",
+            )
+        if len(verified_urls) > 1:
+            raise ProviderLookupError(
+                ProviderFailureKind.AMBIGUOUS,
+                "COSMIC genomic fallback returned multiple verified candidates.",
+            )
+        if page.url != verified_urls[0]:
+            page.goto(
+                verified_urls[0],
+                wait_until="domcontentloaded",
+                timeout=self.navigation_timeout_ms,
+            )
 
     def _search_clinvar(
         self,
@@ -788,10 +982,11 @@ class BrowserReviewService:
         if cosmic_id and cosmic_id not in body_text and not variant_identity_matches:
             return DatabaseEvidence(
                 "COSMIC",
-                "not_found",
-                f"COSMIC did not resolve the requested identifier {cosmic_id}.",
+                "identity_mismatch",
+                f"COSMIC resolved {cosmic_id}, but the page did not match the requested variant.",
                 accession=cosmic_id,
                 url=page.url,
+                raw={"failure_kind": ProviderFailureKind.IDENTITY_MISMATCH.value},
             )
 
         base_path = self._screenshot_path(artifact_directory, "COSMIC", variant)
@@ -1239,17 +1434,20 @@ class BrowserReviewService:
                 key = self.variant_key(variant)
                 if key not in confirmed_absent:
                     results.setdefault(key, prior)
-        for index, variant in enumerate(variants, start=1):
+        pending_variants = [
+            variant
+            for variant in variants
+            if self.variant_key(variant) not in results
+        ]
+        if pending_variants:
             self._check_cancelled()
-            if self.variant_key(variant) in results:
-                continue
             if progress:
                 progress(
-                    f"MTBP variant {index}/{len(variants)}: "
-                    f"{variant.symbol} {_protein_change(variant.hgvsp) or _cdna_change(variant.hgvsc)}"
+                    "MTBP: submitting one combined patient report with "
+                    f"{len(pending_variants)} variant(s)"
                 )
             current = self._search_mtbp_batch(
-                [variant], artifact_directory, progress=progress
+                pending_variants, artifact_directory, progress=progress
             )
             for evidence in current.values():
                 evidence.url = ""
@@ -1257,14 +1455,6 @@ class BrowserReviewService:
                     if isinstance(record, dict):
                         record["url"] = ""
             results.update(current)
-            if index < len(variants):
-                delay_ms = self._next_request_delay_ms()
-                if delay_ms > 0:
-                    if progress:
-                        progress(
-                            f"MTBP: safety buffer {delay_ms / 1_000:.1f}s before next variant"
-                        )
-                    self._interruptible_sleep(delay_ms / 1_000)
         pending = [
             (variant, results[self.variant_key(variant)])
             for variant in variants
@@ -1592,8 +1782,13 @@ class BrowserReviewService:
                     finally_rejected: list[tuple[VariantRecord, str]] = []
                     for variant, query in rejected_pairs:
                         key = self.variant_key(variant)
-                        fallback = _mtbp_genomic_query(variant)
-                        if fallback and fallback not in query_attempts[key]:
+                        fallback = _mtbp_retry_query(
+                            variant,
+                            query,
+                            query_attempts[key],
+                            unmapped,
+                        )
+                        if fallback and fallback != query:
                             self._mtbp_rejected_transcript_queries.add(query)
                             query_attempts[key].append(fallback)
                             replacement_by_key[key] = (variant, fallback)
@@ -1666,6 +1861,16 @@ class BrowserReviewService:
                     page.url,
                     cancer_type=self.mtbp_cancer_type,
                 )
+                full_report_path: Path | None = None
+                full_report_error = ""
+                try:
+                    full_report_path = self._capture_mtbp_full_report(
+                        page,
+                        artifact_directory,
+                        analysis_id,
+                    )
+                except Exception as exc:
+                    full_report_error = str(exc)
                 if progress and fallback_keys:
                     accepted_fallbacks = sum(
                         parsed[self.variant_key(variant)].status == "found"
@@ -1717,6 +1922,10 @@ class BrowserReviewService:
                             "remote_report_preflight_cleanup": preflight_cleanup,
                             "screenshot": str(screenshot_path or ""),
                             "screenshots": screenshot_records,
+                            "patient_report_screenshot": str(
+                                full_report_path or ""
+                            ),
+                            "patient_report_capture_error": full_report_error,
                             "visible_text_preview": body_text[:12_000],
                         }
                     )
@@ -2502,26 +2711,45 @@ class BrowserReviewService:
             page, gene_symbol, panel_y, float(category_box["y"])
         )
         if header_box is None:
-            clip_x = max(0, panel_x)
-            clip_y = max(0, panel_y - 220)
-            clip_width = float(panel_box["width"])
+            target_left = panel_x
+            target_top = max(0, panel_y - 220)
+            target_right = panel_right
         else:
             header_x = float(header_box["x"])
             header_right = header_x + float(header_box["width"])
-            clip_x = max(0, min(panel_x, header_x))
-            clip_y = max(0, float(header_box["y"]) - 16)
-            clip_width = max(panel_right, header_right) - clip_x
-        height = float(category_box["y"]) - clip_y
-        if height <= 1:
+            target_left = min(panel_x, header_x)
+            target_top = float(header_box["y"])
+            target_right = max(panel_right, header_right)
+        target_bottom = float(category_box["y"])
+        if target_bottom - target_top <= 1:
             raise RuntimeError("Franklin classification overview could not be cropped.")
+        try:
+            document_box = page.evaluate(
+                "() => ({x: 0, y: 0, width: document.documentElement.scrollWidth, "
+                "height: document.documentElement.scrollHeight})"
+            )
+        except (AttributeError, TypeError):
+            document_box = None
+        if not isinstance(document_box, dict):
+            document_box = {
+                "x": 0,
+                "y": 0,
+                "width": target_right + 32,
+                "height": target_bottom,
+            }
+        clip = _expanded_capture_box(
+            {
+                "x": target_left,
+                "y": target_top,
+                "width": target_right - target_left,
+                "height": target_bottom - target_top,
+            },
+            document_box,
+            bottom_margin=0,
+        )
         page.screenshot(
             path=str(screenshot_path),
-            clip={
-                "x": clip_x,
-                "y": clip_y,
-                "width": clip_width,
-                "height": height,
-            },
+            clip=clip,
         )
 
     @staticmethod
@@ -2866,6 +3094,22 @@ class BrowserReviewService:
             )
         )
 
+    def _capture_mtbp_full_report(
+        self,
+        page: Any,
+        artifact_directory: Path,
+        analysis_id: str,
+    ) -> Path:
+        artifact_directory.mkdir(parents=True, exist_ok=True)
+        safe_analysis_id = re.sub(r"[^A-Za-z0-9_-]+", "_", analysis_id).strip("_")
+        screenshot_path = artifact_directory / f"{safe_analysis_id}-full-report.png"
+
+        def capture() -> None:
+            page.screenshot(path=str(screenshot_path), full_page=True)
+
+        self._capture_with_incident_retry(page, screenshot_path, capture)
+        return screenshot_path
+
     def _locate_mtbp_screenshot_target(
         self, page: Any, variant: VariantRecord
     ) -> tuple[Any, Any]:
@@ -3146,15 +3390,98 @@ class BrowserReviewService:
         return f"{variant.sample}|{variant.hgvsc}"
 
 
+def _expanded_capture_box(
+    target_box: dict[str, float],
+    document_box: dict[str, float],
+    horizontal_margin: int = 32,
+    top_margin: int = 24,
+    bottom_margin: int = 24,
+) -> dict[str, float]:
+    document_left = float(document_box.get("x", 0))
+    document_top = float(document_box.get("y", 0))
+    document_right = document_left + float(document_box["width"])
+    document_bottom = document_top + float(document_box["height"])
+    target_left = float(target_box["x"])
+    target_top = float(target_box["y"])
+    target_right = target_left + float(target_box["width"])
+    target_bottom = target_top + float(target_box["height"])
+    left = max(document_left, target_left - horizontal_margin)
+    top = max(document_top, target_top - top_margin)
+    right = min(document_right, target_right + horizontal_margin)
+    bottom = min(document_bottom, target_bottom + bottom_margin)
+    return {
+        "x": left,
+        "y": top,
+        "width": max(0.0, right - left),
+        "height": max(0.0, bottom - top),
+    }
+
+
 def _cosmic_identifier(value: str | None) -> str:
-    match = re.search(r"\bCOS(?:M|V)\d+\b", value or "", re.IGNORECASE)
-    return match.group(0).upper() if match else ""
+    identifiers = _cosmic_identifiers(value)
+    return identifiers[0] if identifiers else ""
+
+
+def _cosmic_identifiers(value: str | None) -> list[str]:
+    identifiers: list[str] = []
+    seen: set[str] = set()
+    for match in re.finditer(r"\bCOS(?:M|V)\d+\b", value or "", re.IGNORECASE):
+        identifier = match.group(0).upper()
+        if identifier not in seen:
+            seen.add(identifier)
+            identifiers.append(identifier)
+    return identifiers
 
 
 def _cosmic_numeric_id(value: str | None) -> str:
     identifier = _cosmic_identifier(value)
     match = re.search(r"\d+", identifier)
     return match.group(0) if match else ""
+
+
+def _cosmic_genomic_query(variant: VariantRecord) -> str:
+    return format_mtbp_grch37(
+        variant.genomic_location,
+        variant.ref_allele,
+        variant.alt_allele,
+    )
+
+
+def _cosmic_page_matches_variant(
+    body_text: str, url: str, variant: VariantRecord
+) -> bool:
+    compact = re.sub(r"\s+", "", body_text or "").casefold()
+    gene = (variant.symbol or "").casefold()
+    cdna = _cdna_change(variant.hgvsc).casefold()
+    protein = _protein_change(variant.hgvsp).casefold()
+    if gene and gene in compact and any(
+        value and value in compact for value in (cdna, protein)
+    ):
+        return True
+
+    expected = genomic_identity(variant)
+    if expected is None:
+        return False
+    assembly_matches = (
+        "grch37" in compact
+        or "hg19" in compact
+        or "genome=37" in (url or "").casefold()
+    )
+    chromosome_matches = bool(
+        re.search(
+            rf"(?:chr)?{re.escape(expected.chromosome.casefold())}[:\s]",
+            (body_text or "").casefold(),
+        )
+    )
+    position_matches = str(expected.position) in compact
+    allele_matches = any(
+        token in compact
+        for token in (
+            f"{expected.reference}>{expected.alternate}".casefold(),
+            f"{expected.reference}/{expected.alternate}".casefold(),
+        )
+    )
+    return assembly_matches and chromosome_matches and position_matches and allele_matches
 
 
 def _cosmic_source_url(current_url: str, cosmic_id: str | None) -> str:
@@ -3575,45 +3902,11 @@ def _mtbp_genomic_query(variant: VariantRecord) -> str:
     inserted/deleted sequence itself in HGVS, so a simple ``REF>ALT`` string is
     only correct for substitutions.
     """
-    location = re.sub(r"\s+", "", variant.genomic_location or "")
-    match = re.fullmatch(
-        r"(?:chr)?(?P<chromosome>[0-9]{1,2}|X|Y|M|MT):(?P<position>\d+)(?:-\d+)?",
-        location,
-        flags=re.IGNORECASE,
+    return format_mtbp_grch37(
+        variant.genomic_location,
+        variant.ref_allele,
+        variant.alt_allele,
     )
-    if not match:
-        return ""
-    chromosome = match.group("chromosome").upper()
-    if chromosome == "MT":
-        chromosome = "M"
-    position = int(match.group("position"))
-    ref = re.sub(r"\s+", "", variant.ref_allele or "").upper()
-    alt = re.sub(r"\s+", "", variant.alt_allele or "").upper()
-    if (
-        not ref
-        or not alt
-        or ref == alt
-        or not re.fullmatch(r"[ACGTN]+", ref)
-        or not re.fullmatch(r"[ACGTN]+", alt)
-    ):
-        return ""
-
-    prefix = f"chr{chromosome}:g."
-    if len(ref) == len(alt) == 1:
-        return f"{prefix}{position}{ref}>{alt}"
-    if alt.startswith(ref):
-        inserted = alt[len(ref):]
-        left = position + len(ref) - 1
-        return f"{prefix}{left}_{left + 1}ins{inserted}"
-    if ref.startswith(alt):
-        start = position + len(alt)
-        end = position + len(ref) - 1
-        coordinate = str(start) if start == end else f"{start}_{end}"
-        return f"{prefix}{coordinate}del"
-
-    end = position + len(ref) - 1
-    coordinate = str(position) if position == end else f"{position}_{end}"
-    return f"{prefix}{coordinate}delins{alt}"
 
 
 def _mtbp_accession(value: str) -> bool:
@@ -3652,6 +3945,21 @@ def _mtbp_query_rejected(query: str, rejected: list[str]) -> bool:
         if coordinate and coordinate == rejected_normalized.split(":", 1)[-1]:
             return True
     return False
+
+
+def _mtbp_retry_query(
+    variant: VariantRecord,
+    current_query: str,
+    query_attempts: list[str],
+    rejected: list[str],
+) -> str:
+    """Keep accepted queries and replace only an explicitly rejected query."""
+    if not _mtbp_query_rejected(current_query, rejected):
+        return current_query
+    fallback = _mtbp_genomic_query(variant)
+    if fallback and fallback not in query_attempts:
+        return fallback
+    return ""
 
 
 def _mtbp_normalized_protein(value: str) -> str:

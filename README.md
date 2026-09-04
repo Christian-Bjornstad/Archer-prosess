@@ -59,7 +59,8 @@ flowchart LR
 3. Load the reviewed workbook back into the application.
 4. Select the evidence sources and run the patient-by-patient search.
 5. Verify the compact findings and captured source images.
-6. Review the patient workbooks written automatically beside the main workbook.
+6. In **Patient progress**, select one or more patient rows, or leave the table unselected for all patients.
+7. Click **Generer VEDLEGG_APP**. Reports are written to `VEDLEGG_APP` beside the review workbook as `<DIT>_VPM_Tolkning.xlsx`.
 
 Use **Pause Search** to pause at the next safe browser checkpoint and **Resume
 Search** to continue the same queue without repeating completed work. **Stop
@@ -89,11 +90,11 @@ the provider exposes that choice.
 
 | Source | Capture strategy | Key safeguards |
 | --- | --- | --- |
-| **MTBP** | One pseudonymous report per variant and one alteration-centric screenshot | Transcript HGVS first, then a validated GRCh37 genomic fallback; returned variant identity is checked; successfully captured reports are deleted from the portal and personal report URLs are not exported |
-| **Franklin** | Classification-only ACMG/Oncology overviews, each named evidence card, Predictions, and Population Frequencies | Explicit **hg19** + **Somatic** search; clipped evidence cards are expanded for full capture; ACMG stops after De Novo Data; Somatic Clinical Evidence and Add More Evidence are excluded |
+| **MTBP** | One pseudonymous combined report per patient, one full report image, and local alteration-centric crops | Transcript HGVS first; only rejected variants change to validated GRCh37 genomic fallback before the patient batch is resubmitted; returned variant identity is checked; successfully captured reports are deleted from the portal and personal report URLs are not exported |
+| **Franklin** | Classification-only ACMG/Oncology overviews, each named evidence card, Predictions, and Population Frequencies | Explicit **hg19** + **Somatic** search; capture bounds include a fixed safety margin on both sides and space above the heading, clamped to the document; ACMG stops after De Novo Data; Somatic Clinical Evidence and Add More Evidence are excluded; blank, narrow, or truncated captures are rejected and retried on resume |
 | **ClinVar** | Variant title and focused germline/somatic classification summary | Opens a candidate only after chromosome, VCF position, reference, alternate, and **GRCh37** assembly all match exactly; older unverified results are queued for verification |
 | **OncoKB** | Variant Overview and Mutation Effect | Rejects the cookie overlay before taking the screenshot |
-| **COSMIC** | Overview, Tissue distribution, and Samples filtered to `lymphoid` | Uses the Archer `COSMICID` and resolves the canonical GRCh37 mutation page |
+| **COSMIC** | Overview, Tissue distribution, and Samples filtered to `lymphoid` | Tries every distinct COSM/COSV identifier from the Archer `COSMICID` column in source order; after all identifiers miss, performs exactly one genomic GRCh37 search and accepts a candidate only after chromosome, position, REF, ALT, and assembly are verified; multiple verified candidates or an identity mismatch fail closed |
 
 Patient report images are embedded in this order:
 
@@ -154,13 +155,17 @@ It contains exactly two data sheets:
 
 The workbook mirrors the laboratory review layout with frozen identifier columns,
 hidden low-priority technical fields, familiar row colours, and compact evidence
-columns at the far right. Evidence text does not expand row height.
+columns at the far right. AF remains numeric, is shown as a percentage, and is
+sorted from highest to lowest within each patient. Evidence text does not expand
+row height.
 
 ### Patient workbooks
 
 Patient reports are named `<DIT>_VPM_Tolkning.xlsx` and contain:
 
-- **Oversikt** — compact findings such as `ClinVar – Benign`, plus source links.
+- **Oversikt** — compact findings such as `ClinVar – Benign`, plus source links,
+  a manual **Kommentar** column, and a manual `HSMD -` line. Kommentar and HSMD
+  text follow the variant when a workbook is regenerated and AF order changes.
 - **Vedlegg** — the DIT identifier and space for manual additions.
 - **One sheet per variant** — linked compact evidence followed by embedded screenshots with plain, non-linked captions.
 
@@ -190,6 +195,9 @@ captures remain pending when **Resume Incomplete Search** is used.
 ## Priority colours
 
 Artifact colouring always takes precedence. Non-artifact rows are highlighted:
+
+- strong orange for `ASXL1 NM_015338.5:c.1934dup` through 5.0% AF;
+- light orange for the same ASXL1 variant above 5.0% through 5.5% AF;
 
 - strong green when `Germ > 10` and AF is at least 35%;
 - weak green when `Germ > 10` and AF is below 35%;
@@ -235,8 +243,9 @@ Use the in-app **Settings** page to configure:
 - minimized/background Edge mode;
 - MTBP timeout and cancer type;
 - local artifact rules. The defaults contain the 36 `HGVSc` entries from
-  **Artefakter DNA Fragmentering v2**; `NM_015338.5:c.1934dup` is treated as an
-  artifact through 5.5% AF and retained above that threshold;
+  **Artefakter DNA Fragmentering v2** plus the three v1-only CEBPA entries
+  `c.288C>G`, `c.280G>C`, and `c.296G>C`; `NM_015338.5:c.1934dup` is treated as
+  an artifact through 5.5% AF and retained above that threshold;
 - default evidence sources.
 
 Non-secret settings are stored in `%USERPROFILE%\.archer-prosess\config.json`.

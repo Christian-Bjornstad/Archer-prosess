@@ -12,6 +12,7 @@ from openpyxl.utils import get_column_letter
 
 from archer_processor.core.highlights import priority_warning, variant_highlight
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
+from archer_processor.core.sorting import variant_sort_key
 
 
 DEFAULT_DATABASE_COLUMNS = [
@@ -92,6 +93,7 @@ class ExcelReportWriter:
         "weak_green": "E9F6EF",
         "yellow": "FFFF00",
         "orange": "FFC000",
+        "light_orange": "F4B183",
         "red": "C00000",
         "red_text": "FFFFFF",
         "gray": "F2F2F2",
@@ -122,7 +124,11 @@ class ExcelReportWriter:
         self._raw_variant_sheet(
             workbook,
             "Artifacts Removed",
-            [variant for variant in result.variants if variant_highlight(variant) != "artifact"],
+            [
+                variant
+                for variant in result.variants
+                if variant_highlight(variant) not in {"artifact", "artifact_light"}
+            ],
             evidence,
             hide_excluded,
         )
@@ -160,7 +166,8 @@ class ExcelReportWriter:
         self._headers(ws, headers)
         ws["A1"].fill = PatternFill("solid", fgColor=self.colors["yellow"])
         ws["A1"].font = Font(bold=True, color=self.colors["navy"])
-        for row_index, variant in enumerate(variants, start=2):
+        sorted_variants = sorted(variants, key=variant_sort_key)
+        for row_index, variant in enumerate(sorted_variants, start=2):
             values = [
                 "X" if self._key(variant) in skip_keys else "",
                 variant.patient_id,
@@ -499,6 +506,7 @@ class ExcelReportWriter:
     def _style_variant_row(self, ws, row_index: int, variant: VariantRecord) -> None:
         fill = {
             "artifact": self.colors["orange"],
+            "artifact_light": self.colors["light_orange"],
             "germline": self.colors["strong_green"],
             "germline_low_af": self.colors["weak_green"],
         }.get(variant_highlight(variant))
@@ -551,20 +559,26 @@ class ExcelReportWriter:
         evidence_columns = set(range(evidence_start, evidence_start + len(database_columns)))
         skip_keys = database_skip_keys or set()
 
-        for row_index, variant in enumerate(variants, start=2):
+        sorted_variants = sorted(variants, key=variant_sort_key)
+        for row_index, variant in enumerate(sorted_variants, start=2):
             evidence_by_database = self._evidence_by_database(evidence.get(self._key(variant), []))
             values = [
                 *(
                     [
                         "X"
                         if self._key(variant) in skip_keys
-                        or variant_highlight(variant) == "artifact"
+                        or variant_highlight(variant) in {"artifact", "artifact_light"}
                         else ""
                     ]
                     if include_selection
                     else []
                 ),
-                *[self._raw_value(variant.raw.get(column)) for column in raw_columns],
+                *[
+                    self._raw_value(
+                        variant.af if column == "AF" else variant.raw.get(column)
+                    )
+                    for column in raw_columns
+                ],
                 *[self._evidence_cell(evidence_by_database.get(database, [])) for database in database_columns],
             ]
             for col_index, value in enumerate(values, start=1):
@@ -573,7 +587,7 @@ class ExcelReportWriter:
                 cell.alignment = Alignment(vertical="center", wrap_text=False)
                 raw_index = col_index - raw_offset - 1
                 if 0 <= raw_index < len(raw_columns) and raw_columns[raw_index] == "AF" and value not in [None, ""]:
-                    cell.number_format = "0.0000"
+                    cell.number_format = "0.00%"
             if include_selection:
                 ws.cell(row_index, 1).fill = PatternFill(
                     "solid", fgColor=self.colors["yellow"]

@@ -9,11 +9,15 @@ from archer_processor.services.browser_review import (
     BrowserReviewCancelled,
     BrowserReviewService,
     _cosmic_identifier,
+    _cosmic_identifiers,
+    _cosmic_genomic_query,
     _cosmic_numeric_id,
     _cosmic_source_url,
+    _expanded_capture_box,
     _franklin_queries,
     _mtbp_genomic_query,
     _mtbp_query_rejected,
+    _mtbp_retry_query,
     _mtbp_screenshot_row_matches,
     _mtbp_unmapped_queries,
     _mtbp_variant_query,
@@ -22,12 +26,24 @@ from archer_processor.services.browser_review import (
     parse_oncokb_page,
 )
 from archer_processor.services.capture_validation import CaptureValidation
+from archer_processor.services.provider_failures import ProviderFailureKind
 
 
 VALID_CAPTURE = lambda _: CaptureValidation(True, "ok", 800, 500, 10.0)
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+
+
+def test_expanded_capture_box_adds_margins_and_clamps_to_document():
+    assert _expanded_capture_box(
+        {"x": 10, "y": 20, "width": 100, "height": 80},
+        {"x": 0, "y": 0, "width": 500, "height": 400},
+    ) == {"x": 0.0, "y": 0.0, "width": 142.0, "height": 124.0}
+    assert _expanded_capture_box(
+        {"x": 450, "y": 350, "width": 45, "height": 45},
+        {"x": 0, "y": 0, "width": 500, "height": 400},
+    ) == {"x": 418.0, "y": 326.0, "width": 82.0, "height": 74.0}
 
 
 def test_browser_query_urls_use_normalized_variant_identity(tmp_path):
@@ -151,8 +167,302 @@ def test_browser_resume_skips_completed_sources_and_checkpoints_each_provider(
 
 def test_cosmic_identifier_uses_first_archer_cosmic_id():
     assert _cosmic_identifier("COSM476; COSV56056643") == "COSM476"
+    assert _cosmic_identifiers("COSM476; COSV56056643, COSM476") == [
+        "COSM476",
+        "COSV56056643",
+    ]
     assert _cosmic_numeric_id("COSM476; COSV56056643") == "476"
     assert _cosmic_numeric_id("") == ""
+
+
+def test_cosmic_lookup_tries_each_identifier_until_verified_match(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    variant.cosmic_id = "COSM111; COSV222"
+    service = BrowserReviewService(profile_root=tmp_path)
+    attempts = []
+
+    def lookup(page, candidate, query_url, artifact_directory, *, progress):
+        attempts.append(candidate.cosmic_id)
+        return DatabaseEvidence(
+            "COSMIC",
+            "found" if candidate.cosmic_id == "COSV222" else "not_found",
+            "matched" if candidate.cosmic_id == "COSV222" else "missing",
+            accession=candidate.cosmic_id,
+        )
+
+    monkeypatch.setattr(service, "_lookup_cosmic_with_retry", lookup)
+
+    evidence = service._lookup_cosmic_variant(
+        object(), variant, tmp_path / "cosmic", progress=None
+    )
+
+    assert attempts == ["COSM111", "COSV222"]
+    assert evidence.status == "found"
+    assert evidence.accession == "COSV222"
+    assert evidence.raw["query_attempts"] == ["COSM111", "COSV222"]
+
+
+def test_cosmic_uses_genomic_fallback_after_all_identifiers_miss(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    variant.cosmic_id = "COSM111; COSV222"
+    service = BrowserReviewService(profile_root=tmp_path)
+    genomic_attempts = []
+
+    monkeypatch.setattr(
+        service,
+        "_lookup_cosmic_with_retry",
+        lambda page, candidate, query_url, artifact_directory, *, progress: (
+            DatabaseEvidence(
+                "COSMIC",
+                "not_found",
+                "identifier did not resolve",
+                accession=candidate.cosmic_id,
+                raw={"failure_kind": ProviderFailureKind.NOT_FOUND.value},
+            )
+        ),
+    )
+
+    def genomic_lookup(page, candidate, query, artifact_directory, *, progress):
+        genomic_attempts.append(query)
+        return DatabaseEvidence("COSMIC", "found", "genomic match", accession="COSV999")
+
+    monkeypatch.setattr(service, "_lookup_cosmic_genomic_with_retry", genomic_lookup)
+
+    evidence = service._lookup_cosmic_variant(
+        object(), variant, tmp_path / "cosmic", progress=None
+    )
+
+    expected = "chr17:g.7578406G>A"
+    assert _cosmic_genomic_query(variant) == expected
+    assert genomic_attempts == [expected]
+    assert evidence.status == "found"
+    assert evidence.raw["lookup_mode"] == "genomic_fallback"
+    assert evidence.raw["query_attempts"] == ["COSM111", "COSV222", expected]
+
+
+def _genomic_fallback_service(tmp_path, monkeypatch, *, identifier_status="not_found"):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    variant.cosmic_id = "COSM111; COSV222"
+    service = BrowserReviewService(
+        profile_root=tmp_path, navigation_timeout_ms=100
+    )
+    monkeypatch.setattr(
+        service,
+        "_lookup_cosmic_with_retry",
+        lambda page, candidate, query_url, artifact_directory, *, progress: (
+            DatabaseEvidence(
+                "COSMIC",
+                identifier_status,
+                "identifier did not resolve",
+                accession=candidate.cosmic_id,
+                raw={"failure_kind": ProviderFailureKind.NOT_FOUND.value},
+            )
+        ),
+    )
+    return service, variant
+
+
+class _GenomicLinks:
+    def __init__(self, values):
+        self.values = values
+
+    def evaluate_all(self, script):
+        return self.values
+
+
+class _NoMatches:
+    def evaluate_all(self, script):
+        return []
+
+
+class _BodyText:
+    def __init__(self, text):
+        self.text = text
+
+    def inner_text(self, timeout=None):
+        return self.text
+
+
+TP53_MATCHING_BODY = "TP53 GRCh37 chr17:7578406 G>A c.524G>A R175H"
+
+
+class _GenomicPage:
+    """Fake COSMIC search page listing genome=37 candidate URLs.
+
+    ``body`` is the text served for every candidate page; it must carry the
+    variant's GRCh37 identity for ``_cosmic_page_matches_variant`` to accept.
+    """
+
+    def __init__(self, candidates, body=TP53_MATCHING_BODY):
+        self.url = "https://cancer.sanger.ac.uk/cosmic/search?q=chr17"
+        self.candidates = list(candidates)
+        self.body = body
+
+    def locator(self, selector):
+        if selector == "a[href*='/cosmic/mutation/overview']":
+            return _GenomicLinks(self.candidates)
+        if selector == "a[href*='genome=37'][href*='id=']":
+            return _GenomicLinks([])
+        if selector == "body":
+            return _BodyText(self.body)
+        return _NoMatches()
+
+    def goto(self, url, **kwargs):
+        self.url = url
+
+    def wait_for_timeout(self, milliseconds):
+        pass
+
+
+GRCH37_TP53 = (
+    "https://cancer.sanger.ac.uk/cosmic/mutation/overview"
+    "?cosm=COSM10648&genome=37&id=43598117&trans=TP53"
+)
+
+
+def test_cosmic_genomic_fallback_accepts_one_verified_candidate(
+    tmp_path, monkeypatch
+):
+    service, variant = _genomic_fallback_service(tmp_path, monkeypatch)
+    page = _GenomicPage([GRCH37_TP53])
+    monkeypatch.setattr(service, "_wait_for_cosmic_result", lambda page: None)
+    monkeypatch.setattr(
+        service,
+        "_capture_cosmic_result",
+        lambda variant, page, directory: DatabaseEvidence(
+            "COSMIC", "found", "genomic match", accession="COSV999", url=page.url
+        ),
+    )
+
+    evidence = service._lookup_cosmic_genomic_with_retry(
+        page, variant, _cosmic_genomic_query(variant), tmp_path, progress=None
+    )
+
+    assert evidence.status == "found"
+    assert evidence.url == GRCH37_TP53
+
+
+def test_cosmic_genomic_fallback_is_ambiguous_for_two_verified_candidates(
+    tmp_path, monkeypatch
+):
+    service, variant = _genomic_fallback_service(tmp_path, monkeypatch)
+    page = _GenomicPage([GRCH37_TP53, GRCH37_TP53 + "&alt=1"])
+    monkeypatch.setattr(service, "_wait_for_cosmic_result", lambda page: None)
+
+    evidence = service._lookup_cosmic_genomic_with_retry(
+        page, variant, _cosmic_genomic_query(variant), tmp_path, progress=None
+    )
+
+    assert evidence.status == "ambiguous"
+    assert evidence.raw["failure_kind"] == ProviderFailureKind.AMBIGUOUS.value
+
+
+def test_cosmic_genomic_fallback_rejects_identity_mismatch(
+    tmp_path, monkeypatch
+):
+    service, variant = _genomic_fallback_service(tmp_path, monkeypatch)
+    page = _GenomicPage(
+        [GRCH37_TP53],
+        body="TP53 GRCh37 chr17:7578407 T>C c.524G>T",
+    )
+    monkeypatch.setattr(service, "_wait_for_cosmic_result", lambda page: None)
+
+    evidence = service._lookup_cosmic_genomic_with_retry(
+        page, variant, _cosmic_genomic_query(variant), tmp_path, progress=None
+    )
+
+    assert evidence.status == "identity_mismatch"
+    assert evidence.raw["failure_kind"] == ProviderFailureKind.IDENTITY_MISMATCH.value
+
+
+def test_cosmic_genomic_fallback_reports_missing_candidates(
+    tmp_path, monkeypatch
+):
+    service, variant = _genomic_fallback_service(tmp_path, monkeypatch)
+    page = _GenomicPage([])
+
+    evidence = service._lookup_cosmic_genomic_with_retry(
+        page, variant, _cosmic_genomic_query(variant), tmp_path, progress=None
+    )
+
+    assert evidence.status == "not_found"
+    assert evidence.raw["failure_kind"] == ProviderFailureKind.NOT_FOUND.value
+
+
+def test_cosmic_genomic_fallback_retries_transient_failure_once(
+    tmp_path, monkeypatch
+):
+    service, variant = _genomic_fallback_service(tmp_path, monkeypatch)
+    page = _GenomicPage([GRCH37_TP53])
+    wait_calls = []
+
+    def wait_for_result(current_page):
+        wait_calls.append(current_page.url)
+        if len(wait_calls) == 1:
+            raise TimeoutError("transient render")
+
+    monkeypatch.setattr(service, "_wait_for_cosmic_result", wait_for_result)
+    monkeypatch.setattr(
+        service,
+        "_capture_cosmic_result",
+        lambda variant, page, directory: DatabaseEvidence("COSMIC", "found", "ok"),
+    )
+    messages = []
+    evidence = service._lookup_cosmic_genomic_with_retry(
+        page, variant, _cosmic_genomic_query(variant), tmp_path,
+        progress=messages.append,
+    )
+
+    assert evidence.status == "found"
+    assert len(wait_calls) == 2
+    assert any("retrying once" in message for message in messages)
+
+
+def test_cosmic_genomic_fallback_propagates_persistent_timeout(
+    tmp_path, monkeypatch
+):
+    service, variant = _genomic_fallback_service(tmp_path, monkeypatch)
+    page = _GenomicPage([GRCH37_TP53])
+
+    def wait_for_result(current_page):
+        raise TimeoutError("page never rendered")
+
+    monkeypatch.setattr(service, "_wait_for_cosmic_result", wait_for_result)
+
+    with pytest.raises(TimeoutError):
+        service._lookup_cosmic_genomic_with_retry(
+            page, variant, _cosmic_genomic_query(variant), tmp_path, progress=None
+        )
+
+
+def test_cosmic_genomic_fallback_without_alleles_reports_invalid_query(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    variant.cosmic_id = "COSM111"
+    variant.genomic_location = ""
+    variant.ref_allele = ""
+    variant.alt_allele = ""
+    service = BrowserReviewService(profile_root=tmp_path)
+    monkeypatch.setattr(
+        service,
+        "_lookup_cosmic_with_retry",
+        lambda page, candidate, query_url, artifact_directory, *, progress: (
+            DatabaseEvidence("COSMIC", "not_found", "missing")
+        ),
+    )
+
+    evidence = service._lookup_cosmic_variant(
+        object(), variant, tmp_path / "cosmic", progress=None
+    )
+
+    assert evidence.status == "not_found"
+    assert "query_attempt_results" in evidence.raw
+    assert evidence.raw["query_attempt_results"][-1]["status"] == "not_found"
 
 
 def test_cosmic_search_resolves_canonical_internal_mutation_id(tmp_path):
@@ -1088,7 +1398,7 @@ def test_franklin_classification_capture_ends_with_complete_de_novo_card(tmp_pat
     assert page.captures[0]["clip"] == {
         "x": 0,
         "y": 0,
-        "width": 1000,
+        "width": 1032,
         "height": 100,
     }
     assert not any("Population" in item["label"] for item in screenshots)
@@ -1144,10 +1454,10 @@ def test_franklin_overview_starts_above_visible_gene_header(tmp_path):
     )
 
     assert captures[0]["clip"] == {
-        "x": 70,
-        "y": 74,
-        "width": 930,
-        "height": 286,
+        "x": 38,
+        "y": 66,
+        "width": 994,
+        "height": 294,
     }
 
 
@@ -1443,6 +1753,27 @@ def test_mtbp_screenshot_rediscovers_target_after_hidden_incident(tmp_path):
     assert path.exists()
 
 
+def test_mtbp_full_patient_report_is_captured_once(tmp_path):
+    calls = []
+
+    class Page:
+        def screenshot(self, *, path, full_page):
+            calls.append((Path(path), full_page))
+            Image.new("RGB", (1200, 800), "white").save(path)
+
+    service = BrowserReviewService(
+        profile_root=tmp_path,
+        capture_validator=VALID_CAPTURE,
+    )
+
+    output = service._capture_mtbp_full_report(
+        Page(), tmp_path / "evidence", "ARCHER-20260903T120000Z-test"
+    )
+
+    assert calls == [(output, True)]
+    assert output.name == "ARCHER-20260903T120000Z-test-full-report.png"
+
+
 def test_mtbp_report_parser_fails_closed_on_variant_identity_mismatch():
     variant = ArcherTsvReader().read(FIXTURE)[3]
     rows = [{
@@ -1612,7 +1943,7 @@ def test_mtbp_reuses_proven_genomic_fallback_after_transcript_rejection(tmp_path
     assert learned
 
 
-def test_mtbp_runs_each_variant_as_an_independent_report(tmp_path, monkeypatch):
+def test_mtbp_submits_one_combined_report_for_patient(tmp_path, monkeypatch):
     variants = ArcherTsvReader().read(FIXTURE)[3:5]
     service = BrowserReviewService(
         profile_root=tmp_path,
@@ -1622,9 +1953,7 @@ def test_mtbp_runs_each_variant_as_an_independent_report(tmp_path, monkeypatch):
     submitted = []
 
     def run_one(batch, artifact_directory, *, progress):
-        assert len(batch) == 1
-        variant = batch[0]
-        submitted.append(variant.hgvsc)
+        submitted.append([variant.hgvsc for variant in batch])
         return {
             service.variant_key(variant): DatabaseEvidence(
                 "MTBP",
@@ -1637,12 +1966,13 @@ def test_mtbp_runs_each_variant_as_an_independent_report(tmp_path, monkeypatch):
                     ]
                 },
             )
+            for variant in batch
         }
 
     monkeypatch.setattr(service, "_search_mtbp_batch", run_one)
     results = service._search_mtbp(variants, tmp_path / "mtbp", progress=None)
 
-    assert submitted == [variant.hgvsc for variant in variants]
+    assert submitted == [[variant.hgvsc for variant in variants]]
     assert len(results) == 2
     assert all(item.url == "" for item in results.values())
     assert all(item.raw["screenshots"][0]["url"] == "" for item in results.values())
@@ -1662,6 +1992,20 @@ def test_mtbp_validation_error_identifies_rejected_entries():
     assert rejected == ["CEBPA:p.His195_Pro196dup", "EZH2:c.118-4dup"]
     assert _mtbp_query_rejected("NM_004456.4:c.118-4dup", rejected)
     assert not _mtbp_query_rejected("NM_000546.6:c.524G>A", rejected)
+
+
+def test_mtbp_replaces_only_explicitly_rejected_query_with_genomic_fallback():
+    accepted, rejected = ArcherTsvReader().read(FIXTURE)[3:5]
+    accepted_query = _mtbp_variant_query(accepted)
+    rejected_query = _mtbp_variant_query(rejected)
+    unmapped = [rejected_query]
+
+    assert _mtbp_retry_query(
+        accepted, accepted_query, [accepted_query], unmapped
+    ) == accepted_query
+    assert _mtbp_retry_query(
+        rejected, rejected_query, [rejected_query], unmapped
+    ) == _mtbp_genomic_query(rejected)
 
 
 def test_mtbp_queue_recovers_report_from_reports_list(tmp_path):
@@ -1730,17 +2074,16 @@ def test_mtbp_rechecks_late_reports_without_resubmitting(tmp_path, monkeypatch):
     calls = []
 
     def run_one(batch, artifact_directory, *, progress):
-        variant = batch[0]
-        calls.append(("submit", variant.hgvsc))
-        status = "timeout" if len(calls) == 1 else "found"
+        calls.append(("submit", [variant.hgvsc for variant in batch]))
         return {
             service.variant_key(variant): DatabaseEvidence(
                 "MTBP",
-                status,
-                status,
+                "timeout" if index == 0 else "found",
+                "timeout" if index == 0 else "found",
                 accession=variant.hgvsc,
-                raw={"analysis_id": "ARCHER-late"} if status == "timeout" else {},
+                raw={"analysis_id": "ARCHER-late"} if index == 0 else {},
             )
+            for index, variant in enumerate(batch)
         }
 
     def recover(pending, artifact_directory, *, progress):
@@ -1756,8 +2099,7 @@ def test_mtbp_rechecks_late_reports_without_resubmitting(tmp_path, monkeypatch):
     results = service._search_mtbp(variants, tmp_path / "mtbp", progress=None)
 
     assert calls == [
-        ("submit", variants[0].hgvsc),
-        ("submit", variants[1].hgvsc),
+        ("submit", [variant.hgvsc for variant in variants]),
         ("recover", variants[0].hgvsc),
     ]
     assert results[service.variant_key(variants[0])].status == "found"

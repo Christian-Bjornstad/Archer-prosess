@@ -124,6 +124,32 @@ class ProcessedWorkbookWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class PatientReportWorker(QObject):
+    progress = pyqtSignal(int, int, str)
+    finished = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(
+        self,
+        coordinator: PatientReportCoordinator,
+        patient_ids: list[str],
+    ) -> None:
+        super().__init__()
+        self.coordinator = coordinator
+        self.patient_ids = list(patient_ids)
+
+    def run(self) -> None:
+        try:
+            outcomes = []
+            total = len(self.patient_ids)
+            for current, patient_id in enumerate(self.patient_ids, start=1):
+                outcomes.append(self.coordinator.write_patient(patient_id))
+                self.progress.emit(current, total, patient_id)
+            self.finished.emit(outcomes)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class ReportRetryWorker(QObject):
     finished = pyqtSignal(object)
     failed = pyqtSignal(str)
@@ -296,13 +322,6 @@ class DatabaseWorker(QObject):
                 self.status.emit(f"{database}: website lookup in Microsoft Edge")
             patients = _variants_grouped_by_patient(self.variants)
             all_evidence: dict[str, list[DatabaseEvidence]] = {}
-            coordinator = (
-                PatientReportCoordinator(
-                    self.result, self.report_variants, self.existing_evidence
-                )
-                if self.result is not None
-                else None
-            )
             self.status.emit(
                 f"Patient-by-patient search started: {len(patients)} patients, "
                 f"{len(self.databases)} sources"
@@ -378,17 +397,12 @@ class DatabaseWorker(QObject):
                     _merge_evidence_results(patient_evidence, browser_evidence)
 
                 _merge_evidence_results(all_evidence, patient_evidence)
-                if coordinator is not None:
-                    coordinator.merge(patient_evidence)
                 self.status.emit(f"{prefix}: complete")
                 self.progress.emit(
                     patient_index,
                     len(patients),
                     f"Completed {patient_id}",
                 )
-            if coordinator is not None:
-                for outcome in coordinator.reconcile():
-                    self.report_outcome.emit(outcome)
             self.finished.emit(all_evidence)
         except BrowserReviewCancelled:
             self.cancelled.emit()
@@ -543,13 +557,6 @@ class BrowserReviewWorker(QObject):
             )
             all_evidence: dict[str, list[DatabaseEvidence]] = {}
             patients = _variants_grouped_by_patient(self.variants)
-            coordinator = (
-                PatientReportCoordinator(
-                    self.result, self.report_variants, self.existing_evidence
-                )
-                if self.result is not None
-                else None
-            )
             self.progress.emit(0, len(patients), "Preparing signed-in browser queue")
             original_patient_total = max(
                 self.patient_indexes.values(), default=len(patients)
@@ -576,8 +583,6 @@ class BrowserReviewWorker(QObject):
                     prefix,
                 )
                 _merge_evidence_results(all_evidence, patient_evidence)
-                if coordinator is not None:
-                    coordinator.merge(patient_evidence)
                 self.status.emit(f"{prefix}: browser sources complete")
                 self.progress.emit(patient_index, len(patients), f"Completed {patient_id}")
                 if patient_index < len(patients):
@@ -598,17 +603,11 @@ class BrowserReviewWorker(QObject):
                             chunk = min(0.25, remaining)
                             time.sleep(chunk)
                             remaining -= chunk
-            if coordinator is not None:
-                for outcome in coordinator.reconcile():
-                    self.report_outcome.emit(outcome)
             final_retry_evidence = self._final_failed_pass(all_evidence, patients)
             if final_retry_evidence:
                 _merge_evidence_results(all_evidence, final_retry_evidence)
                 _merge_evidence_results(self._pass_evidence, final_retry_evidence)
                 self.patient_finished.emit(final_retry_evidence)
-            if coordinator is not None:
-                for outcome in coordinator.reconcile():
-                    self.report_outcome.emit(outcome)
             self.finished.emit(all_evidence)
         except BrowserReviewCancelled:
             self.cancelled.emit()
@@ -852,6 +851,8 @@ class MainWindow(QMainWindow):
         self.report_outcomes: dict[str, PatientReportOutcome] = {}
         self.processing_thread: QThread | None = None
         self.workbook_load_thread: QThread | None = None
+        self.patient_report_thread: QThread | None = None
+        self.patient_report_worker: PatientReportWorker | None = None
         self.report_retry_thread: QThread | None = None
         self.database_thread: QThread | None = None
         self.browser_thread: QThread | None = None
@@ -942,6 +943,9 @@ class MainWindow(QMainWindow):
             *root.findChildren(QCheckBox),
         ]:
             control.setCursor(Qt.CursorShape.PointingHandCursor)
+        for button in root.findChildren(QPushButton):
+            if button.text() and button.objectName() != "SidebarButton":
+                button.setMinimumHeight(max(44, button.minimumHeight()))
 
         self.setCentralWidget(root)
         self.status_bar = QStatusBar()
@@ -1326,6 +1330,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(options)
 
         exports = QGroupBox("Reports")
+        exports.setObjectName("ReportsGroup")
         exports.setMinimumHeight(105)
         export_layout = QHBoxLayout(exports)
         export_help = QLabel(
@@ -1337,7 +1342,7 @@ class MainWindow(QMainWindow):
         self.rewrite_btn.setFixedWidth(185)
         self.rewrite_btn.setEnabled(False)
         self.rewrite_btn.clicked.connect(self._rewrite_workbook)
-        self.patient_excel_btn = QPushButton("Create Patient Workbooks")
+        self.patient_excel_btn = QPushButton("Generer VEDLEGG_APP")
         self.patient_excel_btn.setFixedWidth(190)
         self.patient_excel_btn.setObjectName("ReportButton")
         self.patient_excel_btn.setEnabled(False)
@@ -2123,13 +2128,15 @@ class MainWindow(QMainWindow):
     def _patient_report_outcome(self, outcome: PatientReportOutcome) -> None:
         self.report_outcomes[outcome.patient_id] = outcome
         self._refresh_operations_cockpit()
-        if outcome.status == "written":
+        if outcome.status in {"created", "updated"}:
             self._log(f"Patient workbook ready: {outcome.path}")
-        else:
+        elif outcome.status == "locked":
             self._log(
-                f"Patient workbook pending for {outcome.patient_id}; "
-                "close it in Excel and resume to retry."
+                f"Patient workbook locked for {outcome.patient_id}; "
+                "close it in Excel and retry."
             )
+        else:
+            self._log(f"Patient workbook failed for {outcome.patient_id}: {outcome.message}")
 
     def _merge_browser_evidence(self, browser_evidence: dict) -> None:
         _merge_evidence_results(self.evidence, browser_evidence)
@@ -2316,48 +2323,87 @@ class MainWindow(QMainWindow):
             self._set_search_complete_status(save_pending=False)
         QMessageBox.information(self, "Workbook Updated", f"Evidence written to:\n{self.result.output_path}")
 
-    def _export_patient_excels(self) -> None:
-        if not self.result:
-            return
-        default_parent = (
-            self.result.output_path.parent
-            if self.result.output_path
-            else Path(self.settings.default_output_dir)
-        )
-        selected = QFileDialog.getExistingDirectory(
-            self,
-            "Select folder for patient Excel reports",
-            str(default_parent),
-        )
-        if not selected:
-            return
-        output_stem = self.result.output_path.stem if self.result.output_path else "archer"
-        report_directory = Path(selected) / f"{output_stem}_patient_excel_reports"
-        try:
-            outputs = PatientExcelReportWriter().write_all(
-                self.result,
-                report_directory,
-                self.evidence,
-                variants=self._variants_for_search(),
+    def _selected_patient_ids(self) -> list[str]:
+        if self.result is None:
+            return []
+        selected_rows = {
+            index.row() for index in self.status_matrix.selectionModel().selectedIndexes()
+        }
+        if selected_rows:
+            return sorted(
+                {
+                    self.status_matrix.item(row, 0).text()
+                    for row in selected_rows
+                    if self.status_matrix.item(row, 0) is not None
+                }
             )
-        except Exception as exc:
-            QMessageBox.critical(self, "Patient Excel export failed", str(exc))
+        return sorted({variant.patient_id for variant in self.result.variants})
+
+    @staticmethod
+    def _report_outcome_summary(outcomes: list[PatientReportOutcome]) -> str:
+        counts = {
+            "created": 0,
+            "updated": 0,
+            "locked": 0,
+            "failed": 0,
+        }
+        for outcome in outcomes:
+            if outcome.status in counts:
+                counts[outcome.status] += 1
+        return (
+            f"Opprettet: {counts['created']} · Oppdatert: {counts['updated']} · "
+            f"Hoppet over/låst: {counts['locked']} · Feilet: {counts['failed']}"
+        )
+
+    def _export_patient_excels(self) -> None:
+        if not self.result or not self.result.output_path:
             return
-        if not outputs:
+        patient_ids = self._selected_patient_ids()
+        if not patient_ids:
             QMessageBox.warning(
                 self,
-                "No patient Excel reports created",
-                "No patients had variants with decision 'included'.",
+                "Ingen rapporter å generere",
+                "Ingen pasienter er tilgjengelige for rapportgenerering.",
             )
             return
-        self._log(
-            f"Created {len(outputs)} patient Excel report(s) in {report_directory}"
+        coordinator = PatientReportCoordinator(
+            self.result, self.result.variants, self.evidence
         )
-        QMessageBox.information(
-            self,
-            "Patient Excel reports created",
-            f"Created {len(outputs)} report(s):\n{report_directory}",
-        )
+        worker = PatientReportWorker(coordinator, patient_ids)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._patient_report_progress)
+        worker.finished.connect(self._patient_report_finished)
+        worker.failed.connect(self._patient_report_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self.patient_report_worker = worker
+        self.patient_report_thread = thread
+        self.patient_excel_btn.setEnabled(False)
+        self._log(f"Genererer VEDLEGG_APP for {len(patient_ids)} pasient(er)")
+        thread.start()
+
+    def _patient_report_progress(self, current: int, total: int, patient_id: str) -> None:
+        self._log(f"VEDLEGG_APP {current}/{total}: {patient_id}")
+
+    def _patient_report_finished(
+        self, outcomes: list[PatientReportOutcome]
+    ) -> None:
+        for outcome in outcomes:
+            self._patient_report_outcome(outcome)
+            if outcome.status in {"locked", "failed"}:
+                self._log(f"{outcome.status}: {outcome.path} — {outcome.message}")
+        self.patient_excel_btn.setEnabled(self.result is not None)
+        summary = self._report_outcome_summary(outcomes)
+        self._log(summary)
+        QMessageBox.information(self, "VEDLEGG_APP ferdig", summary)
+
+    def _patient_report_failed(self, message: str) -> None:
+        self.patient_excel_btn.setEnabled(self.result is not None)
+        self._worker_failed(message)
 
     def _write_evidence_workbook(self) -> None:
         if not self.result or not self.result.output_path:
@@ -2490,23 +2536,23 @@ class MainWindow(QMainWindow):
             )
         )
         self.retry_report_saves_button.setVisible(
-            any(outcome.status == "pending" for outcome in self.report_outcomes.values())
+            any(outcome.status == "locked" for outcome in self.report_outcomes.values())
         )
 
     def _retry_pending_report_saves(self) -> None:
         if self.result is None or self.result.output_path is None:
             return
-        pending = {
+        locked = {
             patient_id
             for patient_id, outcome in self.report_outcomes.items()
-            if outcome.status == "pending"
+            if outcome.status == "locked"
         }
-        if not pending:
+        if not locked:
             return
         coordinator = PatientReportCoordinator(
-            self.result, self._variants_for_search(), self.evidence
+            self.result, self.result.variants, self.evidence
         )
-        coordinator.pending = pending
+        coordinator.pending = locked
         worker = ReportRetryWorker(coordinator)
         thread = QThread(self)
         worker.moveToThread(thread)
@@ -2553,7 +2599,9 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem(value)
                 highlight = variant_highlight(variant)
                 if highlight == "artifact":
-                    item.setBackground(QColor(Palette.pale_orange))
+                    item.setBackground(QColor(Palette.artifact_orange))
+                elif highlight == "artifact_light":
+                    item.setBackground(QColor(Palette.artifact_light_orange))
                 elif highlight == "germline":
                     item.setBackground(QColor(Palette.strong_green))
                 elif highlight == "germline_low_af":

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import openpyxl
@@ -40,11 +41,16 @@ def test_production_rules_and_boundaries():
     assert by_sample["26OUM00005"].warnings
 
 
-def test_default_artifact_catalog_comes_from_fragmentation_v2_hgvsc_column():
+def test_default_artifact_catalog_includes_fragmentation_v1_and_v2_hgvsc_columns():
     rules = default_artifact_rules()
 
-    assert len(rules) == 36
-    assert len({entry["hgvsc"] for entry in rules}) == 36
+    assert len(rules) == 39
+    assert len({entry["hgvsc"] for entry in rules}) == 39
+    assert {
+        "NM_004364.4:c.288C>G",
+        "NM_004364.4:c.280G>C",
+        "NM_004364.4:c.296G>C",
+    } <= {entry["hgvsc"] for entry in rules}
     assert {entry["gene"] for entry in rules} >= {
         "ASXL1",
         "ATRX",
@@ -157,6 +163,55 @@ def test_excel_export_preserves_raw_columns_and_adds_database_columns(tmp_path):
     assert "CIViC Evidence" not in headers
 
 
+def test_review_workbook_sorts_each_patient_by_descending_numeric_percent_af(tmp_path):
+    output = tmp_path / "review.xlsx"
+    result = VariantProcessor().process(FIXTURE, "2026-09-03", output)
+    base = result.variants[3]
+
+    def same_patient_variant(source_row, hgvsc, af):
+        sample = f"26OUM00999_VPM_S{source_row}_R1_001"
+        raw = {**base.raw, "Sample": sample, "HGVSc": hgvsc, "AF": af}
+        return replace(
+            base,
+            source_row=source_row,
+            sample=sample,
+            hgvsc=hgvsc,
+            af=af,
+            raw=raw,
+            matched_rules=[],
+            decision="included",
+        )
+
+    low = same_patient_variant(101, "NM_000546.6:c.100A>G", 0.10)
+    missing = same_patient_variant(102, "NM_000546.6:c.200A>G", None)
+    high = same_patient_variant(103, "NM_000546.6:c.300A>G", 0.25)
+    result.variants = [low, missing, high]
+
+    ExcelReportWriter().write(result, output)
+
+    workbook = openpyxl.load_workbook(output)
+    try:
+        for sheet_name in ("With Artifacts", "Artifacts Removed"):
+            sheet = workbook[sheet_name]
+            headers = [cell.value for cell in sheet[1]]
+            hgvsc_col = headers.index("HGVSc") + 1
+            af_col = headers.index("AF") + 1
+            assert [sheet.cell(row, hgvsc_col).value for row in range(2, 5)] == [
+                high.hgvsc,
+                low.hgvsc,
+                missing.hgvsc,
+            ]
+            assert [sheet.cell(row, af_col).value for row in range(2, 5)] == [
+                0.25,
+                0.10,
+                None,
+            ]
+            assert sheet.cell(2, af_col).number_format == "0.00%"
+            assert sheet.cell(3, af_col).number_format == "0.00%"
+    finally:
+        workbook.close()
+
+
 def test_database_selection_sheet_round_trips_x_marks(tmp_path):
     output = tmp_path / "review.xlsx"
     result = VariantProcessor().process(FIXTURE, "2026-07-26", output)
@@ -245,6 +300,35 @@ def test_excel_export_keeps_row_coloring_on_raw_sheets(tmp_path):
     assert by_sample["26OUM00005_VPM_S5_R1_001"] == "00FFC000"
     assert removed_by_sample["26OUM00004_VPM_S4_R1_001"] != "00C6EFCE"
     assert "26OUM00005_VPM_S5_R1_001" not in removed_by_sample
+
+
+def test_excel_export_uses_light_orange_for_asxl1_five_to_five_point_five_percent(
+    tmp_path,
+):
+    output = tmp_path / "review.xlsx"
+    result = VariantProcessor().process(FIXTURE, "2026-09-03", output)
+    asxl1 = result.variants[1]
+    asxl1.af = 0.0525
+    FilterEngine().apply([asxl1])
+
+    ExcelReportWriter().write(result, output)
+
+    workbook = openpyxl.load_workbook(output)
+    try:
+        with_artifacts = workbook["With Artifacts"]
+        row = next(
+            item
+            for item in with_artifacts.iter_rows(min_row=2)
+            if item[1].value == asxl1.sample
+        )
+        assert row[1].fill.fgColor.rgb == "00F4B183"
+        removed_samples = {
+            item[0].value
+            for item in workbook["Artifacts Removed"].iter_rows(min_row=2)
+        }
+        assert asxl1.sample not in removed_samples
+    finally:
+        workbook.close()
 
 
 def test_excel_review_layout_hides_reference_columns_and_keeps_evidence_compact(tmp_path):

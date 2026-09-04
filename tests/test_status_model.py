@@ -64,7 +64,7 @@ def test_patient_rows_combine_source_and_report_state():
             ]
         },
         skipped_keys=set(),
-        report_outcomes={"SYNTHETIC01": "pending"},
+        report_outcomes={"SYNTHETIC01": "locked"},
         active=("SYNTHETIC01", "Franklin"),
     )
 

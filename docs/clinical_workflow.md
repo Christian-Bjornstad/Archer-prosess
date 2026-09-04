@@ -14,10 +14,19 @@ Core workflow:
 
 Initial production rules:
 
-- Exclude configured artifact variants. The default artifact list contains `NM_004119.2:c.1419-4dup`, `NM_004119.2:c.1419-4del`, `NM_004972.3:c.3291+16dup`, and `NM_004972.3:c.3291+16del`.
-- Exclude `NM_015338.5:c.1934dup` as an artifact through 5.5% AF; retain it above 5.5%.
+- Exclude configured artifact variants. The default catalog combines DNA
+  Fragmentering v2 with the v1-only CEBPA entries `NM_004364.4:c.288C>G`,
+  `NM_004364.4:c.280G>C`, and `NM_004364.4:c.296G>C`.
+- Exclude `NM_015338.5:c.1934dup` through 5.5% AF. Display it strong orange at
+  AF `<=5.0%`, light orange at AF `>5.0%` and `<=5.5%`, and retain it above
+  5.5%.
 
 The artifact list can be reviewed and edited in Settings. Use Reset Defaults to restore the current default artifact list.
+
+The review workbook keeps AF numeric, displays it as a percentage, and sorts
+variants by descending AF within each patient, with missing AF last. Patient
+overview regeneration preserves the manual `Kommentar` cell and the manual
+`HSMD -` line by patient and variant identity rather than row number.
 
 Special review flags from the current clinical notes:
 
@@ -36,7 +45,15 @@ Database evidence sources:
 - OncoKB is reviewed in the signed-in web interface; cookie overlays are rejected before capture.
 - Franklin uses the signed-in web interface with explicit hg19 and Somatic selection. It tries transcript HGVSc first, then the exact `chr-position REF>ALT` genomic form only when needed and verifies the returned variant identity.
 - Franklin captures Computed Classification (ACMG and Oncology cards), Predictions, and Population Frequencies. Dynamic panels are validated and receive a one-time five-second incident retry when incomplete.
-- MTBP submits one pseudonymous variant per report, records no personal report link, and retries a detached/hidden screenshot target once after rediscovering the exact report row. After verified local evidence is saved, the exact `ARCHER-` report is deleted from the portal. Before a new submission, remaining app-generated `ARCHER-` reports are cleared so they cannot fill the five-report limit; manually named reports are left untouched.
+- MTBP submits one pseudonymous combined report per patient. Transcript-qualified
+  HGVSc is tried first; only entries explicitly rejected by MTBP are replaced by
+  GRCh37 genomic notation before the complete patient batch is resubmitted. The
+  full report is captured once for `Vedlegg`, while exact variant rows/cards are
+  cropped locally for their variant sheets without additional portal searches.
+  No personal report link is recorded. After verified local evidence is saved,
+  the exact `ARCHER-` report is deleted from the portal. Before a new submission,
+  remaining app-generated `ARCHER-` reports are cleared so they cannot fill the
+  five-report limit; manually named reports are left untouched.
 - Evidence must be presented as support for human interpretation, not as automatic final classification.
 
 The processed workbook includes a **Database Selection** sheet containing every
@@ -54,9 +71,16 @@ Search and recovery behavior:
 - Recent-analysis recovery is local and passive: startup can offer the last
   workbook, but it never opens Edge or contacts a provider until the operator
   explicitly starts or resumes evidence collection.
-- **Retry Pending Saves** retries report writing only; it does not restart an
-  evidence provider.
+- Evidence searches never generate patient reports. Select one or more rows in
+  **Patient progress**, or leave the table unselected to include every patient,
+  then click **Generer VEDLEGG_APP**.
+- Reports are written beside the processed workbook in `VEDLEGG_APP` with the
+  exact filename `<DIT>_VPM_Tolkning.xlsx`. Existing reports are atomically
+  replaced through a temporary file, so a failed write leaves the prior report
+  intact. A report open in Excel is classified as locked, listed in the operator
+  summary, and can be retried after closing it.
+- **Retry Pending Saves** retries locked report writing only; it does not restart
+  an evidence provider.
 - Completed source results are restored from one indexed audit-directory scan.
 - Errors, timeouts, identity mismatches, partial captures, and unverified legacy ClinVar results remain resumable.
-- Patient workbooks are written beside the processed workbook during final reconciliation; an Excel file lock is nonfatal and can be retried.
 - Priority colouring uses artifact precedence and strong/weak green only for `Germ > 10` at AF `>=35%` / `<35%` respectively. Tier I and Tier II do not affect row colour.

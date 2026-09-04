@@ -162,8 +162,10 @@ def build_patient_status_rows(
             cells[database] = StatusCell(state, STATE_LABELS[state])
 
         report_state = {
-            "written": CellState.REPORT_SAVED,
-            "pending": CellState.SAVE_PENDING,
+            "created": CellState.REPORT_SAVED,
+            "updated": CellState.REPORT_SAVED,
+            "locked": CellState.SAVE_PENDING,
+            "failed": CellState.RETRY,
         }.get(report_outcomes.get(patient_id, ""), CellState.NOT_READY)
         cells["Report"] = StatusCell(report_state, STATE_LABELS[report_state])
         rows.append(PatientStatusRow(patient_id, len(patient_variants), cells))

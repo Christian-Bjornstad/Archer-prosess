@@ -2,6 +2,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import openpyxl
+from openpyxl import Workbook
 from PIL import Image
 
 from archer_processor.core import DatabaseEvidence, VariantProcessor
@@ -38,6 +39,152 @@ def test_patient_overview_uses_light_blue_and_white_banding(tmp_path):
         # Light blue / white banding replaces the old green template.
         assert overview["A11"].fill.fgColor.rgb == "00EAF3FA"
         assert overview["A12"].fill.fgColor.rgb == "00FFFFFF"
+    finally:
+        workbook.close()
+
+
+def test_patient_overview_uses_light_orange_for_asxl1_transition_band(tmp_path):
+    result = VariantProcessor().process(
+        FIXTURE, "2026-09-03", tmp_path / "review.xlsx"
+    )
+    asxl1 = result.variants[1]
+    asxl1.af = 0.0525
+    asxl1.matched_rules = ["asxl1_1934dup_artifact"]
+    asxl1.decision = "excluded"
+    output = tmp_path / "patient.xlsx"
+
+    PatientExcelReportWriter().write_patient(
+        result, asxl1.patient_id, [asxl1], output, {}
+    )
+
+    workbook = openpyxl.load_workbook(output)
+    try:
+        assert workbook["Oversikt"]["A11"].fill.fgColor.rgb == "00F4B183"
+    finally:
+        workbook.close()
+
+
+def test_patient_overview_sorts_variants_by_descending_af_with_missing_last(tmp_path):
+    result = VariantProcessor().process(
+        FIXTURE, "2026-09-03", tmp_path / "review.xlsx"
+    )
+    base = result.variants[3]
+    low = replace(base, source_row=101, hgvsc="NM_000546.6:c.100A>G", af=0.10)
+    missing = replace(base, source_row=102, hgvsc="NM_000546.6:c.200A>G", af=None)
+    high = replace(base, source_row=103, hgvsc="NM_000546.6:c.300A>G", af=0.25)
+    output = tmp_path / "patient.xlsx"
+
+    PatientExcelReportWriter().write_patient(
+        result, base.patient_id, [low, missing, high], output, {}
+    )
+
+    workbook = openpyxl.load_workbook(output)
+    try:
+        overview = workbook["Oversikt"]
+        assert [overview.cell(row, 2).value for row in range(11, 14)] == [
+            high.hgvsc,
+            low.hgvsc,
+            missing.hgvsc,
+        ]
+    finally:
+        workbook.close()
+
+
+def test_patient_overview_preserves_manual_comment_and_hsmd_after_af_reordering(
+    tmp_path,
+):
+    result = VariantProcessor().process(
+        FIXTURE, "2026-09-03", tmp_path / "review.xlsx"
+    )
+    base = result.variants[3]
+    first = replace(base, source_row=101, hgvsc="NM_000546.6:c.100A>G", af=0.30)
+    second = replace(base, source_row=102, hgvsc="NM_000546.6:c.200A>G", af=0.10)
+    output = tmp_path / "patient.xlsx"
+    writer = PatientExcelReportWriter()
+
+    writer.write_patient(result, base.patient_id, [first, second], output, {})
+    workbook = openpyxl.load_workbook(output)
+    try:
+        overview = workbook["Oversikt"]
+        headers = [overview.cell(10, column).value for column in range(1, 11)]
+        assert headers == [
+            "Gen",
+            "HGVSc",
+            "HGVSp",
+            "Kort evidens",
+            "Kommentar",
+            "MTBP",
+            "Franklin",
+            "ClinVar",
+            "OncoKB",
+            "COSMIC",
+        ]
+        second_row = next(
+            row
+            for row in range(11, overview.max_row + 1)
+            if overview.cell(row, 2).value == second.hgvsc
+        )
+        overview.cell(second_row, 4, "MTBP - gammelt\nHSMD - intern klassifikasjon")
+        overview.cell(second_row, 5, "Vurdert manuelt")
+        workbook.save(output)
+    finally:
+        workbook.close()
+
+    first.af = 0.05
+    second.af = 0.40
+    writer.write_patient(result, base.patient_id, [first, second], output, {})
+
+    regenerated = openpyxl.load_workbook(output)
+    try:
+        overview = regenerated["Oversikt"]
+        second_row = next(
+            row
+            for row in range(11, overview.max_row + 1)
+            if overview.cell(row, 2).value == second.hgvsc
+        )
+        assert second_row == 11
+        assert overview.cell(second_row, 5).value == "Vurdert manuelt"
+        assert "HSMD - intern klassifikasjon" in overview.cell(second_row, 4).value
+        assert "MTBP - gammelt" not in overview.cell(second_row, 4).value
+    finally:
+        regenerated.close()
+
+
+def test_patient_attachment_contains_combined_mtbp_report_only_once(tmp_path):
+    result = VariantProcessor().process(
+        FIXTURE, "2026-09-03", tmp_path / "review.xlsx"
+    )
+    first = result.variants[3]
+    second = replace(
+        first,
+        source_row=first.source_row + 1,
+        hgvsc="NM_000546.6:c.743G>A",
+        hgvsp="p.R248Q",
+    )
+    screenshot = tmp_path / "mtbp-full-report.png"
+    Image.new("RGB", (1200, 800), "white").save(screenshot)
+    evidence = {
+        DatabaseSearchService().variant_key(variant): [
+            DatabaseEvidence(
+                "MTBP",
+                "found",
+                "matched",
+                raw={"patient_report_screenshot": str(screenshot)},
+            )
+        ]
+        for variant in (first, second)
+    }
+    output = tmp_path / "patient.xlsx"
+
+    PatientExcelReportWriter().write_patient(
+        result, first.patient_id, [first, second], output, evidence
+    )
+
+    workbook = openpyxl.load_workbook(output)
+    try:
+        attachment = workbook["Vedlegg"]
+        assert len(attachment._images) == 1
+        assert attachment["A3"].value == "MTBP – samlet pasientrapport"
     finally:
         workbook.close()
 
@@ -83,8 +230,13 @@ def test_patient_data_sheet_includes_artifacts_without_skip_column(tmp_path):
         ]
         assert data.max_row == 3
         assert data.sheet_properties.tabColor.rgb == "004F8A5B"
-        assert data["A2"].fill.fgColor.rgb == "00C6EFCE"
-        assert data["A3"].fill.fgColor.rgb == "00FFC000"
+        hgvsc_column = headers.index("HGVSc") + 1
+        colors_by_hgvsc = {
+            data.cell(row, hgvsc_column).value: data.cell(row, 1).fill.fgColor.rgb
+            for row in range(2, data.max_row + 1)
+        }
+        assert colors_by_hgvsc[strong.hgvsc] == "00C6EFCE"
+        assert colors_by_hgvsc[artifact.hgvsc] == "00FFC000"
         report_column = headers.index("Report") + 1
         assert data.column_dimensions[
             openpyxl.utils.get_column_letter(report_column)
@@ -235,14 +387,15 @@ def test_patient_excel_report_uses_requested_sheet_layout_and_image_order(tmp_pa
     overview = workbook["Oversikt"]
     assert overview["A1"].value == "VPM-tolkning – 26OUM00004"
     assert overview["A3"].value is None
-    assert [overview.cell(10, column).value for column in range(1, 10)] == [
+    assert [overview.cell(10, column).value for column in range(1, 11)] == [
         "Gen", "HGVSc", "HGVSp", "Kort evidens",
-        "MTBP", "Franklin", "ClinVar", "OncoKB", "COSMIC",
+        "Kommentar", "MTBP", "Franklin", "ClinVar", "OncoKB", "COSMIC",
     ]
     assert "ClinVar - Pathogenic" in overview["D11"].value
-    assert overview["G11"].value == "Pathogenic"
-    assert overview["G11"].hyperlink.target.endswith("/12345/")
-    assert overview["E11"].hyperlink is None
+    assert "HSMD -" in overview["D11"].value
+    assert overview["H11"].value == "Pathogenic"
+    assert overview["H11"].hyperlink.target.endswith("/12345/")
+    assert overview["F11"].hyperlink is None
     assert workbook["Vedlegg"]["A1"].value == "26OUM00004"
     variant_sheet = workbook["TP53"]
     assert variant_sheet["A6"].hyperlink is None
@@ -296,4 +449,58 @@ def test_patient_excel_filename_is_dit_vpm_tolkning(tmp_path):
 
     outputs = PatientExcelReportWriter().write_all(result, tmp_path / "patients", {})
 
-    assert outputs[0].name.endswith("_Myolid_Tolkning_APP.xlsx")
+    assert outputs[0].name.endswith("_VPM_Tolkning_APP.xlsx")
+
+
+def test_write_patient_saves_via_temporary_file_then_replaces(tmp_path, monkeypatch):
+    result = VariantProcessor().process(
+        FIXTURE, "2026-09-03", tmp_path / "review.xlsx"
+    )
+    variant = result.variants[0]
+    output = tmp_path / "VEDLEGG_APP" / f"{variant.patient_id}_VPM_Tolkning_APP.xlsx"
+    saved_paths = []
+    real_save = Workbook.save
+
+    def recording_save(workbook_self, filename):
+        saved_paths.append(Path(filename))
+        return real_save(workbook_self, filename)
+
+    monkeypatch.setattr(Workbook, "save", recording_save)
+
+    PatientExcelReportWriter().write_patient(
+        result, variant.patient_id, [variant], output, {}
+    )
+
+    assert len(saved_paths) == 1
+    assert saved_paths[0] != output
+    assert saved_paths[0].name.endswith(".tmp.xlsx")
+    assert saved_paths[0].parent == output.parent
+    assert output.exists()
+    assert [entry for entry in output.parent.iterdir()] == [output]
+
+
+def test_failed_save_keeps_existing_workbook_and_removes_temporary_file(
+    tmp_path, monkeypatch
+):
+    result = VariantProcessor().process(
+        FIXTURE, "2026-09-03", tmp_path / "review.xlsx"
+    )
+    variant = result.variants[0]
+    output = tmp_path / f"{variant.patient_id}_VPM_Tolkning_APP.xlsx"
+    writer = PatientExcelReportWriter()
+    writer.write_patient(result, variant.patient_id, [variant], output, {})
+    before = output.read_bytes()
+
+    def exploding_save(workbook_self, filename):
+        Path(filename).write_bytes(b"partial bytes")
+        raise RuntimeError("save exploded")
+
+    monkeypatch.setattr(Workbook, "save", exploding_save)
+
+    try:
+        writer.write_patient(result, variant.patient_id, [variant], output, {})
+    except RuntimeError:
+        pass
+
+    assert output.read_bytes() == before
+    assert [entry for entry in output.parent.iterdir()] == [output]
