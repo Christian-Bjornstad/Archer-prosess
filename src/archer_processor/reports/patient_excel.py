@@ -14,7 +14,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from PIL import Image as PillowImage
 
-from archer_processor.core.highlights import variant_highlight
+from archer_processor.core.highlights import is_report_artifact, variant_highlight
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
 from archer_processor.core.sorting import variant_sort_key
 from archer_processor.reports.excel_report import ExcelReportWriter
@@ -132,6 +132,13 @@ class PatientExcelReportWriter:
     ) -> Path:
         variants = sorted(variants, key=variant_sort_key)
         manual_fields = read_manual_fields(output_path, patient_id)
+        # Artifacts remain in the hidden Data sheet for traceability but are
+        # kept out of every interpretation sheet (Oversikt, Vedlegg, the
+        # per-variant sheets).  Callers that hand us the full result list
+        # still get them preserved below via result.variants.
+        variants = [
+            variant for variant in variants if not is_report_artifact(variant)
+        ]
         workbook = Workbook()
         placeholder = workbook.active
         self._overview_sheet(
@@ -278,6 +285,12 @@ class PatientExcelReportWriter:
         evidence: dict[str, list[DatabaseEvidence]],
         manual_fields: dict[str, ManualVariantFields],
     ) -> None:
+        # Artifacts stay in the hidden Data sheet for traceability, but never
+        # appear in the interpretation overview the patient report shows.
+        variants = [
+            variant for variant in variants if not is_report_artifact(variant)
+        ]
+
         ws = workbook.create_sheet("Oversikt")
         self._base_sheet(ws)
         ws.sheet_properties.tabColor = self.colors["navy"]
@@ -358,7 +371,8 @@ class PatientExcelReportWriter:
                     ws.cell(row, column).fill = PatternFill(
                         "solid", fgColor=fill_color
                     )
-            ws.row_dimensions[row].height = 76
+            evidence_lines = str(values[3] or "").count("\n") + 1
+            ws.row_dimensions[row].height = max(30, evidence_lines * 15)
         ws.column_dimensions["A"].width = 14
         ws.column_dimensions["B"].width = 31
         ws.column_dimensions["C"].width = 25

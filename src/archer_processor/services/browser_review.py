@@ -46,6 +46,10 @@ LOGIN_URLS = {
 
 FRANKLIN_HOME_URL = "https://franklin.genoox.com/clinical-db/home"
 PROVIDER_SWITCH_DELAY_MS = 3_000
+# COSMIC uses its own short buffer between variant lookups: queries resolve
+# fast and the site has no per-query throttle at this cadence.
+COSMIC_REQUEST_DELAY_MS = 3_000
+COSMIC_REQUEST_DELAY_MAX_MS = 8_000
 
 _AMINO_ACID_3_TO_1 = {
     "Ala": "A", "Arg": "R", "Asn": "N", "Asp": "D", "Cys": "C",
@@ -504,6 +508,17 @@ class BrowserReviewService:
         progress: Callable[[str], None] | None,
     ) -> DatabaseEvidence:
         identifiers = _cosmic_identifiers(variant.cosmic_id)
+        if not identifiers:
+            return DatabaseEvidence(
+                "COSMIC",
+                "not_applicable",
+                "ingen COSMIC-ID",
+                accession=variant.cosmic_id,
+                raw={
+                    "failure_kind": ProviderFailureKind.NOT_FOUND.value,
+                    "query_attempts": [],
+                },
+            )
         attempts: list[str] = []
         attempt_results: list[dict[str, str]] = []
         last_result: DatabaseEvidence | None = None
@@ -1104,21 +1119,45 @@ class BrowserReviewService:
                             for variant in variants
                         }
 
-                for index, variant in enumerate(variants, start=1):
-                    self._check_cancelled()
-                    key = self.variant_key(variant)
-                    if progress:
-                        progress(
-                            f"Franklin browser lookup {index}/{len(variants)}: "
-                            f"{_franklin_search_query(variant)}"
+                pending = list(variants)
+                retryable_statuses = {
+                    "identity_mismatch",
+                    "timeout",
+                    "not_found",
+                    "error",
+                }
+                for pass_index in range(1, self.franklin_attempts + 1):
+                    retry_variants: list[VariantRecord] = []
+                    for index, variant in enumerate(pending, start=1):
+                        self._check_cancelled()
+                        key = self.variant_key(variant)
+                        if progress:
+                            pass_label = (
+                                "Franklin browser retry"
+                                if pass_index > 1
+                                else "Franklin browser lookup"
+                            )
+                            progress(
+                                f"{pass_label} {index}/{len(pending)}: "
+                                f"{_franklin_search_query(variant)}"
+                            )
+                        evidence = self._resolve_franklin_queries(
+                            page,
+                            variant,
+                            artifact_directory,
+                            progress=progress,
                         )
-                    results[key] = self._resolve_franklin_queries(
-                        page,
-                        variant,
-                        artifact_directory,
-                        progress=progress,
-                    )
-                    if index < len(variants):
+                        results[key] = evidence
+                        if evidence.status in retryable_statuses:
+                            retry_variants.append(variant)
+                        if index < len(pending):
+                            self._wait_between_queries(
+                                page, "Franklin", progress=progress
+                            )
+                    pending = retry_variants
+                    if not pending:
+                        break
+                    if pass_index < self.franklin_attempts:
                         self._wait_between_queries(
                             page, "Franklin", progress=progress
                         )
@@ -1188,83 +1227,74 @@ class BrowserReviewService:
     ) -> DatabaseEvidence:
         _, _, browser_timeout = self._browser_api()
         last_text = ""
-        last_error = ""
-        last_status = "error"
-        for attempt in range(1, self.franklin_attempts + 1):
-            try:
-                page.goto(
-                    FRANKLIN_HOME_URL,
-                    wait_until="domcontentloaded",
-                    timeout=self.navigation_timeout_ms,
+        try:
+            page.goto(
+                FRANKLIN_HOME_URL,
+                wait_until="domcontentloaded",
+                timeout=self.navigation_timeout_ms,
+            )
+            dismiss_known_overlays(page)
+            search = page.locator(
+                "input[placeholder='Enter variant, gene or select an example above']"
+            )
+            search.wait_for(state="visible", timeout=self.navigation_timeout_ms)
+            self._select_franklin_search_mode(page)
+            search.fill(query)
+            search.press("Enter")
+            self._open_franklin_resolved_variant(page, variant)
+            for _ in range(60):
+                self._check_cancelled()
+                last_text = page.locator("body").inner_text()
+                if (
+                    self._franklin_result_ready(page, last_text)
+                    or "Something went wrong" in last_text
+                    or _franklin_quota_message(last_text)
+                ):
+                    break
+                page.wait_for_timeout(1_000)
+            if self._franklin_result_ready(page, last_text):
+                evidence = self._capture_result(
+                    "Franklin", variant, page, artifact_directory
                 )
-                dismiss_known_overlays(page)
-                search = page.locator(
-                    "input[placeholder='Enter variant, gene or select an example above']"
-                )
-                search.wait_for(state="visible", timeout=self.navigation_timeout_ms)
-                self._select_franklin_search_mode(page)
-                search.fill(query)
-                search.press("Enter")
-                self._open_franklin_resolved_variant(page, variant)
-                for _ in range(60):
-                    self._check_cancelled()
-                    last_text = page.locator("body").inner_text()
-                    if (
-                        self._franklin_result_ready(page, last_text)
-                        or "Something went wrong" in last_text
-                        or _franklin_quota_message(last_text)
-                    ):
-                        break
-                    page.wait_for_timeout(1_000)
-                if self._franklin_result_ready(page, last_text):
-                    evidence = self._capture_result(
-                        "Franklin", variant, page, artifact_directory
-                    )
-                    evidence.accession = query
-                    if evidence.status != "found":
-                        return evidence
-                    try:
-                        assessment = self._capture_franklin_assessment(
-                            page, variant, artifact_directory
-                        )
-                        evidence.raw.setdefault("screenshots", []).extend(assessment)
-                    except Exception as exc:
-                        evidence.raw["screenshot_warning"] = (
-                            "Franklin assessment-tools screenshot could not be captured: "
-                            f"{exc}"
-                        )
-                        evidence.status = "partial_capture"
-                        evidence.summary = (
-                            f"{evidence.summary} Franklin screenshots require retry."
-                        ).strip()
+                evidence.accession = query
+                if evidence.status != "found":
                     return evidence
-                quota = _franklin_quota_message(last_text)
-                if quota:
-                    return DatabaseEvidence(
-                        "Franklin",
-                        "quota_exhausted",
-                        quota,
-                        accession=query,
-                        url=page.url,
+                try:
+                    assessment = self._capture_franklin_assessment(
+                        page, variant, artifact_directory
                     )
-                last_error = "Franklin returned 'Something went wrong'."
-            except browser_timeout:
-                last_status = "timeout"
-                last_error = "Franklin timed out while resolving the variant."
-            except Exception as exc:
-                last_status = "error"
-                last_error = str(exc)
-            if attempt < self.franklin_attempts:
-                if progress:
-                    progress(
-                        f"Franklin: retrying {query} "
-                        f"({attempt + 1}/{self.franklin_attempts})"
+                    evidence.raw.setdefault("screenshots", []).extend(assessment)
+                except Exception as exc:
+                    evidence.raw["screenshot_warning"] = (
+                        "Franklin assessment-tools screenshot could not be captured: "
+                        f"{exc}"
                     )
-                page.wait_for_timeout(2_000 * attempt)
+                    evidence.status = "partial_capture"
+                    evidence.summary = (
+                        f"{evidence.summary} Franklin screenshots require retry."
+                    ).strip()
+                return evidence
+            quota = _franklin_quota_message(last_text)
+            if quota:
+                return DatabaseEvidence(
+                    "Franklin",
+                    "quota_exhausted",
+                    quota,
+                    accession=query,
+                    url=page.url,
+                )
+            status = "error"
+            error = "Franklin returned 'Something went wrong'."
+        except browser_timeout:
+            status = "timeout"
+            error = "Franklin timed out while resolving the variant."
+        except Exception as exc:
+            status = "error"
+            error = str(exc)
         return DatabaseEvidence(
             "Franklin",
-            last_status,
-            last_error or "Franklin did not return a classification.",
+            status,
+            error or "Franklin did not return a classification.",
             accession=query,
             url=page.url,
             raw={"visible_text_preview": last_text[:12_000]},
@@ -2730,7 +2760,11 @@ class BrowserReviewService:
             )
         except (AttributeError, TypeError):
             document_box = None
-        if not isinstance(document_box, dict):
+        if (
+            not isinstance(document_box, dict)
+            or "width" not in document_box
+            or "height" not in document_box
+        ):
             document_box = {
                 "x": 0,
                 "y": 0,
@@ -3168,10 +3202,14 @@ class BrowserReviewService:
             return "Franklin classification and ACMG evidence"
         return "Provider evidence"
 
-    def _next_request_delay_ms(self) -> int:
-        if self.request_delay_max_ms <= 0:
-            return 0
-        return random.randint(self.request_delay_ms, self.request_delay_max_ms)
+    def _next_request_delay_ms(self, database: str) -> int:
+        if database == "COSMIC":
+            low, high = COSMIC_REQUEST_DELAY_MS, COSMIC_REQUEST_DELAY_MAX_MS
+        else:
+            low, high = self.request_delay_ms, self.request_delay_max_ms
+        if high <= 0 or high <= low:
+            return max(0, low)
+        return random.randint(low, high)
 
     def _wait_between_queries(
         self,
@@ -3180,7 +3218,7 @@ class BrowserReviewService:
         *,
         progress: Callable[[str], None] | None,
     ) -> None:
-        delay_ms = self._next_request_delay_ms()
+        delay_ms = self._next_request_delay_ms(database)
         if delay_ms <= 0:
             return
         if progress:

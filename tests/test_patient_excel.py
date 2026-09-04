@@ -43,23 +43,51 @@ def test_patient_overview_uses_light_blue_and_white_banding(tmp_path):
         workbook.close()
 
 
-def test_patient_overview_uses_light_orange_for_asxl1_transition_band(tmp_path):
+def test_patient_report_excludes_artifacts_but_keeps_them_in_data(tmp_path):
     result = VariantProcessor().process(
         FIXTURE, "2026-09-03", tmp_path / "review.xlsx"
     )
-    asxl1 = result.variants[1]
-    asxl1.af = 0.0525
-    asxl1.matched_rules = ["asxl1_1934dup_artifact"]
-    asxl1.decision = "excluded"
+    included = result.variants[3]
+    artifact = replace(
+        included,
+        source_row=included.source_row + 100,
+        hgvsc="NM_000546.6:c.525dup",
+        raw={**included.raw, "HGVSc": "NM_000546.6:c.525dup"},
+        matched_rules=["known_artifact"],
+        decision="excluded",
+    )
+    result.variants = [included, artifact]
     output = tmp_path / "patient.xlsx"
 
     PatientExcelReportWriter().write_patient(
-        result, asxl1.patient_id, [asxl1], output, {}
+        result, included.patient_id, [included, artifact], output, {}
     )
 
     workbook = openpyxl.load_workbook(output)
     try:
-        assert workbook["Oversikt"]["A11"].fill.fgColor.rgb == "00F4B183"
+        overview = workbook["Oversikt"]
+        overview_hgvsc = [
+            overview.cell(row, 2).value for row in range(11, overview.max_row + 1)
+        ]
+        assert included.hgvsc in overview_hgvsc
+        assert artifact.hgvsc not in overview_hgvsc
+
+        data = workbook["Data"]
+        headers = [cell.value for cell in data[1]]
+        hgvsc_column = headers.index("HGVSc") + 1
+        data_hgvsc = [
+            data.cell(row, hgvsc_column).value for row in range(2, data.max_row + 1)
+        ]
+        assert artifact.hgvsc in data_hgvsc
+
+        report_text = " ".join(
+            str(cell.value or "")
+            for sheet in workbook.worksheets
+            if sheet.title != "Data"
+            for row in sheet.iter_rows()
+            for cell in row
+        )
+        assert artifact.hgvsc not in report_text
     finally:
         workbook.close()
 
@@ -86,6 +114,37 @@ def test_patient_overview_sorts_variants_by_descending_af_with_missing_last(tmp_
             low.hgvsc,
             missing.hgvsc,
         ]
+    finally:
+        workbook.close()
+
+
+def test_patient_overview_row_height_follows_short_evidence_line_count(tmp_path):
+    result = VariantProcessor().process(
+        FIXTURE, "2026-09-03", tmp_path / "review.xlsx"
+    )
+    variant = result.variants[3]
+    output = tmp_path / "patient.xlsx"
+    evidence = {
+        f"{variant.sample}|{variant.hgvsc}": [
+            DatabaseEvidence(
+                "ClinVar",
+                "found",
+                "Pathogenic",
+                clinical_significance="Pathogenic",
+            )
+        ]
+    }
+
+    PatientExcelReportWriter().write_patient(
+        result, variant.patient_id, [variant], output, evidence
+    )
+
+    workbook = openpyxl.load_workbook(output)
+    try:
+        overview = workbook["Oversikt"]
+        expected_lines = str(overview["D11"].value).count("\n") + 1
+        assert expected_lines == 6
+        assert overview.row_dimensions[11].height == max(30, expected_lines * 15)
     finally:
         workbook.close()
 
