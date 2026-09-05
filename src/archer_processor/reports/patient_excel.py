@@ -305,8 +305,6 @@ class PatientExcelReportWriter:
         self._info_row(ws, 5, "DIT/pasientnummer", patient_id, end_column=4)
         self._info_row(ws, 6, "Rapportdato", result.run_date, end_column=4)
         self._info_row(ws, 7, "Antall varianter", len(variants), end_column=4)
-        ws["E3"] = "Kommentar / vurdering (skriv i feltet under)"
-        ws["E3"].font = Font(bold=True, color=self.colors["navy"])
         ws.merge_cells("E4:J7")
         ws["E4"] = patient_comment
         ws["E4"].alignment = Alignment(vertical="top", wrap_text=True)

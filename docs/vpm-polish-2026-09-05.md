@@ -38,3 +38,28 @@ and request delays for this release. A future bounded concurrency change should
 run at most two different providers, one worker/session per provider, with a
 single writer for checkpoints and explicit pause/cancel/recovery tests. Actual
 runtime improvement must be measured on the four-patient trial after rollout.
+
+## Follow-up: observed Citrix failures
+
+The second Citrix inspection confirmed a nested MTBP scrolling panel and
+ClinVar's `self-signed certificate in certificate chain` failure. Further
+real-Edge testing exposed an adapter bug: `page.evaluate` returned JavaScript
+function objects rather than invoking them, so report geometry became `{}`.
+
+- Invoke function expressions, including async functions, while retaining normal
+  expression/statement evaluation. Local Edge exercises all three forms.
+- Temporarily expand nested scrolling ancestors during MTBP parsing/capture and
+  both Franklin classification overviews. Restore original styles and scrolling
+  afterward. Include visible text separators in MTBP variant identities.
+- Retry NCBI certificate failures with the Windows/system trust store. Continue
+  verifying certificates and hostnames; a genuinely untrusted chain still fails.
+- Remove the instruction label above E4:J7. Preserve the comment field itself.
+- Keep search controls outside the content scroller. Add a resizable activity/
+  full-log panel, readable disabled buttons, wrapped activity messages, and a
+  read-only evidence detail window on double-click.
+
+Real-Edge local fixtures confirm complete nested-scroll capture, exact second-row
+MTBP cropping, Franklin's gene header after horizontal scrolling, and restoration
+of the original scroll position. Citrix's installed build and actual NCBI trust
+chain require verification after updating to this commit; existing captures are
+not repaired by merely regenerating Excel.

@@ -23,6 +23,7 @@ def test_patient_comment_and_long_hsmd_survive_regeneration(tmp_path):
     workbook = openpyxl.load_workbook(output)
     sheet = workbook["Oversikt"]
     assert "E4:J7" in {str(area) for area in sheet.merged_cells.ranges}
+    assert sheet["E3"].value is None
     assert sheet["E4"].fill.fgColor.rgb == "00FFF3E8"
     sheet["E4"] = "Manuell vurdering\nBevares ved ny generering"
     sheet["D11"] = sheet["D11"].value.replace("HSMD -", "HSMD - " + "manuelt funn " * 20)

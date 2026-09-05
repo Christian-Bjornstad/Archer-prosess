@@ -518,7 +518,12 @@ class EdgeCdpPage:
         return EdgeCdpLocator(self, _text_expression(text, exact))
 
     def evaluate(self, script: str) -> Any:
-        return self._evaluate_value(script)
+        # Match the page API contract: function expressions are called, while
+        # ordinary expressions/statements return their evaluated value.
+        return self._evaluate_value(
+            "(() => { const value = (0, eval)(" + json.dumps(script) + "); "
+            "return typeof value === 'function' ? value() : value; })()"
+        )
 
     def once(self, event: str, handler: Callable[[_Dialog], None]) -> None:
         if event != "dialog":

@@ -1676,9 +1676,9 @@ def test_franklin_overview_ignores_incomplete_document_dimensions(tmp_path):
     )
 
     assert captures[0]["clip"] == {
-        "x": 68.0,
+        "x": 0.0,
         "y": 0.0,
-        "width": 964.0,
+        "width": 1032.0,
         "height": 360.0,
     }
 

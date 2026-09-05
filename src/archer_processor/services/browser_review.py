@@ -16,6 +16,7 @@ from PIL import Image
 
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
 from archer_processor.services.genomic_notation import format_mtbp_grch37
+from archer_processor.services.capture_layout import expanded_capture_layout
 from archer_processor.services.provider_failures import (
     ProviderFailureKind,
     ProviderLookupError,
@@ -2376,6 +2377,11 @@ class BrowserReviewService:
 
     @staticmethod
     def _extract_mtbp_rows(page: Any) -> list[dict[str, Any]]:
+        with expanded_capture_layout(page, "table"):
+            return BrowserReviewService._extract_expanded_mtbp_rows(page)
+
+    @staticmethod
+    def _extract_expanded_mtbp_rows(page: Any) -> list[dict[str, Any]]:
         """Read only the visible alteration-centric report tables."""
         return page.locator("table").evaluate_all(
             """
@@ -2398,7 +2404,7 @@ class BrowserReviewService:
                     gene_text: geneText,
                     gene_info: cells[1]?.innerText.trim() || '',
                     alteration: cells[2]?.innerText.trim() || '',
-                    identity_text: cells[2]?.textContent?.trim() || '',
+                    identity_text: (cells[2]?.innerText || '') + '\\n' + (cells[2]?.textContent || ''),
                     functional_evidence: cells[3]?.innerText.trim() || '',
                     biomarkers: cells[4]?.innerText.trim() || '',
                     source_links: [...row.querySelectorAll('a[href]')].map(a => a.href)
@@ -2743,6 +2749,15 @@ class BrowserReviewService:
         return screenshots
 
     def _capture_franklin_classification_overview(
+        self, page: Any, panel: Any, first_category: Any, screenshot_path: Path,
+        *, gene_symbol: str = "",
+    ) -> None:
+        with expanded_capture_layout(page, "gnx-result-page, gnx-oncogenic-classification-app"):
+            self._capture_franklin_expanded_overview(
+                page, panel, first_category, screenshot_path, gene_symbol=gene_symbol
+            )
+
+    def _capture_franklin_expanded_overview(
         self,
         page: Any,
         panel: Any,
@@ -2767,8 +2782,8 @@ class BrowserReviewService:
             page, gene_symbol, panel_y, float(category_box["y"])
         )
         if header_box is None:
-            target_left = panel_x
-            target_top = max(0, panel_y - 220)
+            target_left = 0
+            target_top = 0
             target_right = panel_right
         else:
             header_x = float(header_box["x"])
@@ -3219,7 +3234,7 @@ class BrowserReviewService:
                         || header.cells[2]?.innerText.trim() !== 'Alteration') return [];
                     return [...table.rows].slice(1).filter(row => row.getBoundingClientRect().height > 0)
                         .map(row => ({gene:row.cells[0]?.innerText || '',
-                            identity:row.cells[2]?.textContent || '',
+                        identity:(row.cells[2]?.innerText || '') + '\\n' + (row.cells[2]?.textContent || ''),
                             header:rect(header), row:rect(row)}));
                 });
                 return {width:document.documentElement.scrollWidth,
@@ -3230,7 +3245,8 @@ class BrowserReviewService:
                 json.dumps(geometry), encoding="utf-8"
             )
 
-        self._capture_with_incident_retry(page, screenshot_path, capture)
+        with expanded_capture_layout(page, "table"):
+            self._capture_with_incident_retry(page, screenshot_path, capture)
         return screenshot_path
 
     def _locate_mtbp_screenshot_target(

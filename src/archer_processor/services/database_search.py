@@ -15,6 +15,7 @@ import requests
 
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
 from archer_processor.services.settings import AppSettings
+from archer_processor.services.system_trust import system_trust_session
 from archer_processor.services.variant_identity import genomic_identity
 
 
@@ -86,6 +87,7 @@ class DatabaseSearchService:
     def __init__(self, settings: AppSettings | None = None, timeout: int = 12) -> None:
         self.settings = settings or AppSettings.load()
         self.timeout = timeout
+        self._eutils_system_session = None
         self._clinvar_cache: dict[str, DatabaseEvidence] = {}
         self._gnomad_cache: dict[str, DatabaseEvidence] = {}
         self._oncokb_info_cache: dict | None = None
@@ -348,7 +350,14 @@ class DatabaseSearchService:
     def _eutils_get(self, url: str, params: dict) -> requests.Response:
         for attempt in range(4):
             self._wait_for_eutils_slot()
-            response = requests.get(url, params=params, timeout=self.timeout)
+            try:
+                client = self._eutils_system_session or requests
+                response = client.get(url, params=params, timeout=self.timeout)
+            except requests.exceptions.SSLError:
+                if self._eutils_system_session is not None:
+                    raise
+                self._eutils_system_session = system_trust_session()
+                response = self._eutils_system_session.get(url, params=params, timeout=self.timeout)
             if response.status_code != 429:
                 return response
             retry_after = response.headers.get("Retry-After")

@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
     QButtonGroup,
     QComboBox,
     QDateEdit,
+    QDialog,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -32,6 +33,8 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QSplitter,
+    QTabWidget,
     QStatusBar,
     QTableWidget,
     QTableWidgetItem,
@@ -1156,7 +1159,7 @@ class MainWindow(QMainWindow):
 
         command = QFrame()
         command.setObjectName("EvidenceCommand")
-        command_layout = QHBoxLayout(command)
+        command_layout = QGridLayout(command)
         command_layout.setContentsMargins(16, 13, 16, 13)
         command_copy = QVBoxLayout()
         command_title = QLabel("Research queue")
@@ -1170,17 +1173,17 @@ class MainWindow(QMainWindow):
         )
         command_copy.addWidget(command_title)
         command_copy.addWidget(self.evidence_summary)
-        command_layout.addLayout(command_copy, 1)
+        command_layout.addLayout(command_copy, 0, 0, 1, 3)
         self.search_btn = QPushButton("Run Evidence Search")
         self.search_btn.setObjectName("PrimaryButton")
-        self.search_btn.setFixedWidth(190)
+        self.search_btn.setMinimumWidth(190)
         self.search_btn.setMinimumHeight(44)
         self.search_btn.setEnabled(False)
         self.search_btn.clicked.connect(self._start_database_search)
-        command_layout.addWidget(self.search_btn)
+        command_layout.addWidget(self.search_btn, 1, 0)
         self.pause_search_btn = QPushButton("Pause Search")
         self.pause_search_btn.setObjectName("PauseButton")
-        self.pause_search_btn.setFixedWidth(124)
+        self.pause_search_btn.setMinimumWidth(124)
         self.pause_search_btn.setMinimumHeight(44)
         self.pause_search_btn.setEnabled(False)
         self.pause_search_btn.setAccessibleName("Pause or resume evidence search")
@@ -1188,10 +1191,10 @@ class MainWindow(QMainWindow):
             "Pause at the next safe checkpoint, then resume the same queue without repeating completed work."
         )
         self.pause_search_btn.clicked.connect(self._toggle_search_pause)
-        command_layout.addWidget(self.pause_search_btn)
+        command_layout.addWidget(self.pause_search_btn, 1, 1)
         self.stop_search_btn = QPushButton("Stop Search")
         self.stop_search_btn.setObjectName("StopButton")
-        self.stop_search_btn.setFixedWidth(118)
+        self.stop_search_btn.setMinimumWidth(118)
         self.stop_search_btn.setMinimumHeight(44)
         self.stop_search_btn.setEnabled(False)
         self.stop_search_btn.setAccessibleName("Stop evidence search")
@@ -1199,8 +1202,8 @@ class MainWindow(QMainWindow):
             "Safely stop after the current browser action. Evidence already collected is kept."
         )
         self.stop_search_btn.clicked.connect(self._stop_evidence_search)
-        command_layout.addWidget(self.stop_search_btn)
-        layout.addWidget(command)
+        command_layout.addWidget(self.stop_search_btn, 1, 2)
+        page_layout.addWidget(command)
 
         self.current_activity = CurrentActivityPanel()
         layout.addWidget(self.current_activity)
@@ -1240,12 +1243,14 @@ class MainWindow(QMainWindow):
         status_layout.addWidget(self.status_matrix)
         layout.addWidget(status_group)
 
-        timeline_group = QGroupBox("Activity timeline")
-        timeline_layout = QVBoxLayout(timeline_group)
+        timeline_group = QTabWidget()
+        timeline_group.setMinimumHeight(150)
         self.activity_timeline = ActivityTimeline()
-        self.activity_timeline.setMinimumHeight(160)
-        timeline_layout.addWidget(self.activity_timeline)
-        layout.addWidget(timeline_group)
+        timeline_group.addTab(self.activity_timeline, "Aktivitet")
+        self.evidence_log = QPlainTextEdit()
+        self.evidence_log.setReadOnly(True)
+        self.evidence_log.setDocument(self.log.document())
+        timeline_group.addTab(self.evidence_log, "Full logg · marker og kopier")
 
         options = QGroupBox("Search scope and browser session")
         options_grid = QGridLayout(options)
@@ -1383,12 +1388,19 @@ class MainWindow(QMainWindow):
             self.evidence_table.setColumnWidth(column, 210)
         self.evidence_table.verticalHeader().setDefaultSectionSize(70)
         self.evidence_table.setAlternatingRowColors(True)
+        self.evidence_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.evidence_table.cellDoubleClicked.connect(self._show_evidence_detail)
         self.evidence_table.setWordWrap(True)
         self.evidence_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         evidence_layout.addWidget(self.evidence_table)
         layout.addWidget(evidence_group)
         self.database_scroll.setWidget(database_content)
-        page_layout.addWidget(self.database_scroll)
+        self.evidence_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.evidence_splitter.setChildrenCollapsible(False)
+        self.evidence_splitter.addWidget(self.database_scroll)
+        self.evidence_splitter.addWidget(timeline_group)
+        self.evidence_splitter.setSizes([500, 190])
+        page_layout.addWidget(self.evidence_splitter, 1)
         self._update_evidence_summary()
         return page
 
@@ -2850,6 +2862,24 @@ class MainWindow(QMainWindow):
     def _database_cell(self, evidence_items: list) -> str:
         return "\n".join(f"[{item.status}] {item.summary}".strip() for item in evidence_items)
 
+    def _show_evidence_detail(self, row: int, column: int) -> None:
+        item = self.evidence_table.item(row, column)
+        if item is None:
+            return
+        dialog = QDialog(self)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.setWindowTitle("Evidensdetaljer")
+        dialog.resize(800, 420)
+        layout = QVBoxLayout(dialog)
+        details = QPlainTextEdit()
+        details.setReadOnly(True)
+        details.setPlainText(item.text())
+        layout.addWidget(details)
+        close = QPushButton("Lukk")
+        close.clicked.connect(dialog.close)
+        layout.addWidget(close)
+        dialog.show()
+
     def _apply_style(self) -> None:
         self.setStyleSheet(
             application_stylesheet()
@@ -3016,6 +3046,16 @@ class MainWindow(QMainWindow):
             QPushButton#ReportButton:hover {{
                 background: #3F724A;
             }}
+            QPushButton#PrimaryButton:disabled, QPushButton#ReportButton:disabled,
+            QPushButton#OutlineButton:disabled, QPushButton#PauseButton:disabled,
+            QPushButton#StopButton:disabled {{
+                background: #E7EEF2;
+                color: #536977;
+                border: 1px solid #C6D3DB;
+            }}
+            QSplitter::handle {{ background: #D3E0E6; height: 7px; }}
+            QTabBar::tab {{ padding: 8px 12px; background: #E7EEF2; color: #163445; }}
+            QTabBar::tab:selected {{ background: white; border-top: 2px solid #087EA4; }}
             QFrame#MetricCard {{
                 background: {Palette.panel};
                 border: 1px solid {Palette.border};

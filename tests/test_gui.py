@@ -45,19 +45,37 @@ def test_primary_and_secondary_text_actions_are_at_least_44px(qt_app):
 
 def test_evidence_actions_fit_target_window_sizes(qt_app):
     window = MainWindow()
+    window._switch_page(2)
     window.show()
     for width, height in [(1120, 720), (1440, 900)]:
         window.resize(width, height)
         qt_app.processEvents()
         viewport = window.database_scroll.viewport().rect()
         for button in [
-            window.search_btn,
             window.rewrite_btn,
             window.patient_excel_btn,
         ]:
             point = button.mapTo(window.database_scroll.viewport(), button.rect().topLeft())
             assert point.x() >= 0
             assert point.x() + button.width() <= viewport.width()
+
+
+def test_search_controls_and_log_stay_available_when_content_scrolls(qt_app):
+    window = MainWindow()
+    window._switch_page(2)
+    window.resize(1120, 720)
+    window.show()
+    qt_app.processEvents()
+    before = window.search_btn.mapTo(window, window.search_btn.rect().topLeft())
+    window.database_scroll.verticalScrollBar().setValue(window.database_scroll.verticalScrollBar().maximum())
+    qt_app.processEvents()
+    after = window.search_btn.mapTo(window, window.search_btn.rect().topLeft())
+    assert before == after
+    assert before.x() >= 0 and before.x() + window.search_btn.width() <= window.width()
+    assert window.activity_timeline.isVisible()
+    window._log('Test log message')
+    assert 'Test log message' in window.evidence_log.toPlainText()
+    window.close()
 
 
 def test_database_tab_contains_current_sources(qt_app):
