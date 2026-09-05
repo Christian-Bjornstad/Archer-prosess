@@ -865,7 +865,7 @@ class MainWindow(QMainWindow):
         self._search_started_at: float | None = None
         self.workbook_write_pending = False
         self._workbook_lock_warning_shown = False
-        self.setWindowTitle("Myolid Tolkning")
+        self.setWindowTitle("VPM Tolkning")
         self.app_icon_path = (
             Path(__file__).resolve().parents[1] / "assets" / "vpm-tolkning-icon.png"
         )
@@ -1071,7 +1071,7 @@ class MainWindow(QMainWindow):
         self.resume_btn.setObjectName("OutlineButton")
         self.resume_btn.setMinimumHeight(44)
         self.resume_btn.setToolTip(
-            "Resume a workbook created by Myolid Tolkning without reprocessing the TSV."
+            "Resume a workbook created by VPM Tolkning without reprocessing the TSV."
         )
         self.resume_btn.clicked.connect(self._browse_processed_workbook)
         resume_row.addWidget(self.resume_edit, 1)
@@ -2107,7 +2107,7 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(
             self,
             "Processed workbook could not be loaded",
-            f"{message}\n\nChoose a workbook created by the current Myolid Tolkning review workflow.",
+            f"{message}\n\nChoose a workbook created by the current VPM Tolkning review workflow.",
         )
 
     def _browser_review_finished(self, browser_evidence: dict) -> None:

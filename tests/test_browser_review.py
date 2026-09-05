@@ -1939,7 +1939,7 @@ def test_mtbp_screenshot_rediscovers_target_after_hidden_incident(tmp_path):
             image.paste("navy", (20, 20, 780, 300))
             image.save(path)
 
-    class Row:
+    class Row(Accordion):
         def locator(self, selector):
             return Cells() if selector == "td" else Accordion()
 
@@ -1979,6 +1979,9 @@ def test_mtbp_full_patient_report_is_captured_once(tmp_path):
     calls = []
 
     class Page:
+        def evaluate(self, script):
+            return {"width": 1200, "height": 800, "rows": []}
+
         def screenshot(self, *, path, full_page):
             calls.append((Path(path), full_page))
             Image.new("RGB", (1200, 800), "white").save(path)
@@ -2496,7 +2499,10 @@ def test_mtbp_late_recovery_failure_keeps_original_timeout(tmp_path, monkeypatch
 def test_mtbp_late_recovery_opens_existing_report_without_form_submission(
     tmp_path, monkeypatch
 ):
+    from dataclasses import replace
+
     variant = ArcherTsvReader().read(FIXTURE)[3]
+    second = replace(variant, sample=variant.sample + "-replicate")
     service = BrowserReviewService(profile_root=tmp_path, navigation_timeout_ms=100)
     analysis_id = "ARCHER-late"
 
@@ -2594,14 +2600,16 @@ def test_mtbp_late_recovery_opens_existing_report_without_form_submission(
         ],
     )
     screenshot = tmp_path / "mtbp" / "capture.png"
+    captured = []
     monkeypatch.setattr(
         service,
         "_capture_mtbp_variant_screenshot",
-        lambda page, variant, directory: screenshot,
+        lambda page, variant, directory: (captured.append(variant), screenshot)[1],
     )
     deleted = []
 
     def delete_after_local_persistence(page, candidate_analysis_id):
+        assert captured == [variant, second]
         audit_path = service._screenshot_path(
             tmp_path / "mtbp", "MTBP", variant
         ).with_suffix(".audit.json")
@@ -2621,10 +2629,12 @@ def test_mtbp_late_recovery_opens_existing_report_without_form_submission(
     )
 
     recovered = service._recover_mtbp_timeouts(
-        [(variant, timeout)], tmp_path / "mtbp", progress=None
+        [(variant, timeout), (second, replace(timeout, raw=dict(timeout.raw)))],
+        tmp_path / "mtbp", progress=None
     )
 
     assert recovered[service.variant_key(variant)].status == "found"
+    assert recovered[service.variant_key(second)].status == "found"
     assert recovered[service.variant_key(variant)].raw["late_report_recovered"] is True
     assert recovered[service.variant_key(variant)].raw["remote_report_cleanup"]["status"] == "deleted"
     assert deleted == [analysis_id]

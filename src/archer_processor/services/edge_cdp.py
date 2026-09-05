@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import io
+import math
 import json
 import os
 import re
@@ -15,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 import websocket
+from PIL import Image
 
 
 class EdgeCdpError(RuntimeError):
@@ -534,7 +537,7 @@ class EdgeCdpPage:
             "captureBeyondViewport": bool(full_page or clip),
             "fromSurface": True,
         }
-        if full_page:
+        if full_page or clip:
             metrics = self._connection.call("Page.getLayoutMetrics")
             size = metrics.get("cssContentSize") or metrics.get("contentSize") or {}
             params["clip"] = {
@@ -544,11 +547,11 @@ class EdgeCdpPage:
                 "height": max(1, float(size.get("height", 1))),
                 "scale": 1,
             }
-        elif clip:
+        if clip:
             scroll = self._evaluate_value(
                 "({x: window.scrollX, y: window.scrollY})"
             ) or {"x": 0, "y": 0}
-            params["clip"] = {
+            crop_box = {
                 "x": float(clip["x"]) + float(scroll.get("x", 0)),
                 "y": float(clip["y"]) + float(scroll.get("y", 0)),
                 "width": max(1, float(clip["width"])),
@@ -558,7 +561,22 @@ class EdgeCdpPage:
         result = self._connection.call("Page.captureScreenshot", params)
         output = Path(path)
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(base64.b64decode(result["data"]))
+        data = base64.b64decode(result["data"])
+        if clip:
+            # Keep the browser capture at document origin, then account for
+            # browser zoom / device scaling using actual image dimensions.
+            with Image.open(io.BytesIO(data)) as source:
+                sx = source.width / params["clip"]["width"]
+                sy = source.height / params["clip"]["height"]
+                left = max(0, math.floor(crop_box["x"] * sx))
+                top = max(0, math.floor(crop_box["y"] * sy))
+                right = min(source.width, math.ceil((crop_box["x"] + crop_box["width"]) * sx))
+                bottom = min(source.height, math.ceil((crop_box["y"] + crop_box["height"]) * sy))
+                if right <= left or bottom <= top:
+                    raise EdgeCdpError("Screenshot target lies outside the document.")
+                source.crop((left, top, right, bottom)).save(output)
+        else:
+            output.write_bytes(data)
 
     def _evaluate_value(self, expression: str, *, timeout_ms: int = 30_000) -> Any:
         result = self._connection.call(

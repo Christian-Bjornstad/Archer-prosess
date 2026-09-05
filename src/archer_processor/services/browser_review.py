@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from PIL import Image
+
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
 from archer_processor.services.genomic_notation import format_mtbp_grch37
 from archer_processor.services.provider_failures import (
@@ -1528,6 +1530,8 @@ class BrowserReviewService:
         """Capture reports that appeared after their deadline without a new submission."""
         sync_browser, browser_error, browser_timeout = self._browser_api()
         recovered: dict[str, DatabaseEvidence] = {}
+        report_captures: dict[str, Path | None] = {}
+        report_audits: dict[str, list[tuple[Path, DatabaseEvidence]]] = {}
         with sync_browser() as runtime:
             context = runtime.chromium.launch_persistent_context(
                 str(self.profile_directory("MTBP")),
@@ -1553,6 +1557,14 @@ class BrowserReviewService:
                     )
                     report_count = report_link.count()
                     if timed_out.status == "found":
+                        if any(str(item.raw.get("analysis_id") or "") == analysis_id
+                               and item.status != "found" for _, item in pending):
+                            report_audits.setdefault(analysis_id, []).append((
+                                self._screenshot_path(artifact_directory, "MTBP", variant).with_suffix(".audit.json"),
+                                timed_out,
+                            ))
+                            recovered[self.variant_key(variant)] = timed_out
+                            continue
                         if report_count == 0:
                             cleanup = {
                                 "status": "already_absent",
@@ -1618,11 +1630,18 @@ class BrowserReviewService:
                     )[self.variant_key(variant)]
                     evidence.accession = timed_out.accession
                     screenshot_path = None
+                    if analysis_id not in report_captures:
+                        try:
+                            report_captures[analysis_id] = self._capture_mtbp_full_report(page, artifact_directory, analysis_id)
+                        except Exception:
+                            report_captures[analysis_id] = None
+                    full_report_path = report_captures[analysis_id]
                     if evidence.status == "found":
                         try:
-                            screenshot_path = self._capture_mtbp_variant_screenshot(
-                                page, variant, artifact_directory
-                            )
+                            if full_report_path is not None:
+                                screenshot_path = self._crop_mtbp_variant_from_report(page, variant, artifact_directory, full_report_path)
+                            else:
+                                screenshot_path = self._capture_mtbp_variant_screenshot(page, variant, artifact_directory)
                         except IncompleteCaptureError as exc:
                             evidence.status = "partial_capture"
                             evidence.summary = (
@@ -1655,23 +1674,25 @@ class BrowserReviewService:
                             "screenshots": screenshots,
                             "visible_text_preview": body_text[:12_000],
                             "late_report_recovered": True,
+                            "patient_report_screenshot": str(full_report_path or ""),
                         }
                     )
-                    self._finalize_mtbp_report(
-                        page,
-                        analysis_id,
-                        [
-                            (
-                                self._screenshot_path(
-                                    artifact_directory, "MTBP", variant
-                                ).with_suffix(".audit.json"),
-                                evidence,
-                            )
-                        ],
-                    )
+                    report_audits.setdefault(analysis_id, []).append((
+                        self._screenshot_path(artifact_directory, "MTBP", variant).with_suffix(".audit.json"),
+                        evidence,
+                    ))
                     recovered[self.variant_key(variant)] = evidence
                     if progress:
                         progress(f"MTBP: recovered late report ({analysis_id})")
+                # A patient report is shared: never delete it after capturing
+                # just the first variant in a resumed batch.
+                for analysis_id, audit_records in report_audits.items():
+                    if len(audit_records) != sum(
+                        str(item.raw.get("analysis_id") or "") == analysis_id
+                        for _, item in pending
+                    ):
+                        continue
+                    self._finalize_mtbp_report(page, analysis_id, audit_records)
             except browser_timeout:
                 return recovered
             finally:
@@ -1920,9 +1941,14 @@ class BrowserReviewService:
                     screenshot_path = None
                     if evidence.status == "found":
                         try:
-                            screenshot_path = self._capture_mtbp_variant_screenshot(
-                                page, variant, artifact_directory
-                            )
+                            if full_report_path is not None:
+                                screenshot_path = self._crop_mtbp_variant_from_report(
+                                    page, variant, artifact_directory, full_report_path
+                                )
+                            else:
+                                screenshot_path = self._capture_mtbp_variant_screenshot(
+                                    page, variant, artifact_directory
+                                )
                         except IncompleteCaptureError as exc:
                             evidence.status = "partial_capture"
                             evidence.summary = (
@@ -3128,6 +3154,49 @@ class BrowserReviewService:
             )
         )
 
+    def _crop_mtbp_variant_from_report(
+        self, page: Any, variant: VariantRecord, artifact_directory: Path,
+        full_report_path: Path,
+    ) -> Path:
+        """Reuse the patient capture with its table heading and exact variant row."""
+        try:
+            geometry = json.loads(full_report_path.with_suffix(".geometry.json").read_text(encoding="utf-8"))
+            matches = [entry for entry in geometry["rows"]
+                       if _mtbp_screenshot_row_matches(entry["gene"] + " " + entry["identity"], variant)
+                       and _mtbp_gene_symbol(entry["gene"]).casefold() == variant.symbol.casefold()]
+            if len(matches) != 1:
+                raise ValueError("MTBP capture has no unique exact variant row")
+            entry = matches[0]
+            path = self._screenshot_path(artifact_directory, "MTBP", variant)
+            with Image.open(full_report_path) as source:
+                sx, sy = source.width / geometry["width"], source.height / geometry["height"]
+                pieces = []
+                for box in (entry.get("header"), entry["row"]):
+                    if not box:
+                        continue
+                    bounds = (round(box["x"] * sx), round(box["y"] * sy),
+                              round((box["x"] + box["width"]) * sx),
+                              round((box["y"] + box["height"]) * sy))
+                    if (bounds[0] < 0 or bounds[1] < 0 or bounds[2] > source.width
+                            or bounds[3] > source.height or bounds[2] <= bounds[0]
+                            or bounds[3] <= bounds[1]):
+                        raise ValueError("MTBP row outside captured report")
+                    pieces.append(source.crop(bounds).convert("RGB"))
+                combined = Image.new("RGB", (max(p.width for p in pieces), sum(p.height for p in pieces)), "white")
+                y = 0
+                for piece in pieces:
+                    combined.paste(piece, (0, y))
+                    y += piece.height
+                combined.save(path)
+            validation = self.capture_validator(path)
+            if not validation.valid:
+                raise IncompleteCaptureError(validation)
+            return path
+        except IncompleteCaptureError:
+            raise
+        except Exception as exc:
+            raise IncompleteCaptureError(CaptureValidation(False, f"mtbp_crop:{exc}", 0, 0, 0.0)) from exc
+
     def _capture_mtbp_full_report(
         self,
         page: Any,
@@ -3139,7 +3208,27 @@ class BrowserReviewService:
         screenshot_path = artifact_directory / f"{safe_analysis_id}-full-report.png"
 
         def capture() -> None:
+            # Freeze geometry with the capture, so later scrolling/accordion
+            # changes cannot assign another variant's pixels to this variant.
+            geometry = page.evaluate("""() => {
+                const rect = node => {const r=node.getBoundingClientRect();
+                    return {x:r.x+scrollX,y:r.y+scrollY,width:r.width,height:r.height};};
+                const rows = [...document.querySelectorAll('table')].flatMap(table => {
+                    const header=table.rows[0];
+                    if (!header || header.cells[0]?.innerText.trim() !== 'Gene'
+                        || header.cells[2]?.innerText.trim() !== 'Alteration') return [];
+                    return [...table.rows].slice(1).filter(row => row.getBoundingClientRect().height > 0)
+                        .map(row => ({gene:row.cells[0]?.innerText || '',
+                            identity:row.cells[2]?.textContent || '',
+                            header:rect(header), row:rect(row)}));
+                });
+                return {width:document.documentElement.scrollWidth,
+                    height:document.documentElement.scrollHeight, rows};
+            }""")
             page.screenshot(path=str(screenshot_path), full_page=True)
+            screenshot_path.with_suffix(".geometry.json").write_text(
+                json.dumps(geometry), encoding="utf-8"
+            )
 
         self._capture_with_incident_retry(page, screenshot_path, capture)
         return screenshot_path
@@ -3153,7 +3242,7 @@ class BrowserReviewService:
         for index, text in enumerate(row_texts):
             cells = rows.nth(index).locator("td")
             alteration_texts.append(
-                cells.nth(2).inner_text() if cells.count() > 2 else text
+                cells.nth(0).inner_text() + " " + cells.nth(2).inner_text() if cells.count() > 2 else text
             )
         matches = [
             index
@@ -3165,18 +3254,6 @@ class BrowserReviewService:
         ]
         if len(visible_matches) == 1:
             matches = visible_matches
-        if len(matches) != 1:
-            gene = (variant.symbol or "").casefold()
-            matches = [
-                index
-                for index, text in enumerate(row_texts)
-                if gene and _mtbp_gene_symbol(text).casefold() == gene
-            ]
-            visible_matches = [
-                index for index in matches if rows.nth(index).is_visible()
-            ]
-            if len(visible_matches) == 1:
-                matches = visible_matches
         if len(matches) != 1:
             raise RuntimeError(
                 "MTBP could not identify one unique evidence row for the screenshot."
@@ -3191,8 +3268,7 @@ class BrowserReviewService:
             if toggle.count() >= 1:
                 toggle.first.click()
         row.wait_for(state="visible", timeout=self.navigation_timeout_ms)
-        target = accordion if accordion.count() == 1 and accordion.is_visible() else row
-        return row, target
+        return row, row
 
     @staticmethod
     def _screenshot_label(database: str) -> str:
@@ -4034,11 +4110,14 @@ def _mtbp_screenshot_row_matches(text: str, variant: VariantRecord) -> bool:
     compact = re.sub(r"\s+", "", text or "").casefold()
     if not variant.symbol or variant.symbol.casefold() not in compact:
         return False
+    expected_cdna = _cdna_change(variant.hgvsc).casefold()
+    cdna_tokens = re.findall(r"c\.[-+*0-9a-z_>]+", (text or "").casefold())
+    if cdna_tokens and expected_cdna:
+        return expected_cdna in cdna_tokens
     expected_protein = _mtbp_normalized_protein(_protein_change(variant.hgvsp))
     if expected_protein:
         return expected_protein in _mtbp_proteins(text)
-    expected_cdna = _cdna_change(variant.hgvsc).casefold()
-    return bool(expected_cdna and expected_cdna in compact)
+    return False
 
 
 def _review_query(variant: VariantRecord) -> str:
