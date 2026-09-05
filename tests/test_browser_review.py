@@ -204,6 +204,30 @@ def test_cosmic_lookup_tries_each_identifier_until_verified_match(
     assert evidence.raw["query_attempts"] == ["COSM111", "COSV222"]
 
 
+def test_cosmic_without_identifier_does_not_use_genomic_fallback(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    variant.cosmic_id = ""
+    service = BrowserReviewService(profile_root=tmp_path)
+
+    def unexpected_lookup(*args, **kwargs):
+        raise AssertionError("COSMIC lookup must not run without a COSMIC-ID")
+
+    monkeypatch.setattr(service, "_lookup_cosmic_with_retry", unexpected_lookup)
+    monkeypatch.setattr(
+        service, "_lookup_cosmic_genomic_with_retry", unexpected_lookup
+    )
+
+    evidence = service._lookup_cosmic_variant(
+        object(), variant, tmp_path / "cosmic", progress=None
+    )
+
+    assert evidence.status == "not_applicable"
+    assert evidence.summary == "ingen COSMIC-ID"
+    assert evidence.raw["query_attempts"] == []
+
+
 def test_cosmic_uses_genomic_fallback_after_all_identifiers_miss(
     tmp_path, monkeypatch
 ):
@@ -704,6 +728,40 @@ def test_browser_safety_buffer_randomizes_queries_and_provider_switches(
     assert "3.0s between OncoKB and Franklin" in progress[1]
 
 
+def test_cosmic_buffer_uses_shorter_delay_than_global_setting(
+    tmp_path, monkeypatch
+):
+    service = BrowserReviewService(
+        profile_root=tmp_path,
+        request_delay_ms=15_000,
+        request_delay_max_ms=30_000,
+    )
+    random_bounds = []
+    monkeypatch.setattr(
+        "archer_processor.services.browser_review.random.randint",
+        lambda lower, upper: random_bounds.append((lower, upper)) or 3_400,
+    )
+    waits = []
+    monkeypatch.setattr(
+        "archer_processor.services.browser_review.time.sleep",
+        lambda seconds: waits.append(seconds),
+    )
+
+    class Page:
+        def wait_for_timeout(self, milliseconds):
+            pass
+
+    page = Page()
+    progress = []
+    service._wait_between_queries(page, "COSMIC", progress=progress.append)
+    service._wait_between_queries(page, "OncoKB", progress=progress.append)
+
+    assert random_bounds[0] == (3_000, 8_000)
+    assert random_bounds[1] == (15_000, 30_000)
+    assert "COSMIC: safety buffer" in progress[0]
+    assert "OncoKB: safety buffer" in progress[1]
+
+
 def test_oncokb_visible_page_parser_extracts_core_evidence():
     variant = ArcherTsvReader().read(FIXTURE)[3]
     body = """
@@ -969,6 +1027,124 @@ def test_franklin_skips_fallback_after_verified_primary_result(tmp_path, monkeyp
 
     assert evidence.status == "found"
     assert calls == ["LUC7L2:c.784dup"]
+
+
+def test_franklin_query_is_attempted_once_before_outer_retry(tmp_path, monkeypatch):
+    variant = VariantRecord(
+        source_file=Path("synthetic.tsv"),
+        source_row=1,
+        sample="PATIENT_A",
+        symbol="LUC7L2",
+        hgvsc="NM_016019.4:c.784dup",
+        genomic_location="chr7:139097298",
+        ref_allele="T",
+        alt_allele="TC",
+    )
+    service = BrowserReviewService(
+        profile_root=tmp_path,
+        franklin_attempts=2,
+        navigation_timeout_ms=1,
+    )
+    gotos = []
+
+    class Search:
+        def wait_for(self, **kwargs):
+            pass
+
+        def fill(self, query):
+            pass
+
+        def press(self, key):
+            pass
+
+    class Body:
+        def inner_text(self):
+            return "Something went wrong"
+
+    class Page:
+        url = "https://franklin.genoox.com/clinical-db/home"
+
+        def goto(self, url, **kwargs):
+            gotos.append(url)
+
+        def locator(self, selector):
+            if selector == "body":
+                return Body()
+            return Search()
+
+        def wait_for_timeout(self, milliseconds):
+            pass
+
+    monkeypatch.setattr(service, "_select_franklin_search_mode", lambda page: None)
+    monkeypatch.setattr(service, "_open_franklin_resolved_variant", lambda *args: None)
+    monkeypatch.setattr(
+        "archer_processor.services.browser_review.dismiss_known_overlays",
+        lambda page: None,
+    )
+
+    evidence = service._search_franklin_query(
+        Page(), variant, "LUC7L2:c.784dup", tmp_path, progress=None
+    )
+
+    assert evidence.status == "error"
+    assert len(gotos) == 1
+
+
+def test_franklin_retries_failed_patients_only_after_first_pass(tmp_path, monkeypatch):
+    variants = [
+        VariantRecord(
+            source_file=Path("synthetic.tsv"),
+            source_row=index,
+            sample=sample,
+            symbol="LUC7L2",
+            hgvsc=f"NM_016019.4:c.{783 + index}dup",
+            genomic_location=f"chr7:{139097297 + index}",
+            ref_allele="T",
+            alt_allele="TC",
+        )
+        for index, sample in enumerate(("PATIENT_A", "PATIENT_B"), start=1)
+    ]
+    service = BrowserReviewService(profile_root=tmp_path, franklin_attempts=2)
+    calls = []
+
+    class Context:
+        pages = [object()]
+
+        def close(self):
+            pass
+
+    class Runtime:
+        chromium = None
+
+        def __init__(self):
+            self.chromium = self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def launch_persistent_context(self, *args, **kwargs):
+            return Context()
+
+    def resolve(page, variant, artifact_directory, *, progress):
+        calls.append(variant.sample)
+        status = "found" if calls.count(variant.sample) == 2 else "error"
+        return DatabaseEvidence("Franklin", status, variant.hgvsc)
+
+    monkeypatch.setattr(
+        service, "_browser_api", lambda: (lambda: Runtime(), Exception, TimeoutError)
+    )
+    monkeypatch.setattr(service, "_resolve_franklin_queries", resolve)
+    monkeypatch.setattr(service, "_wait_between_queries", lambda *args, **kwargs: None)
+
+    results = service._search_franklin(
+        variants, tmp_path / "franklin", progress=None
+    )
+
+    assert calls == ["PATIENT_A", "PATIENT_B", "PATIENT_A", "PATIENT_B"]
+    assert all(evidence.status == "found" for evidence in results.values())
 
 
 def test_franklin_category_titles_wait_for_nonempty_de_novo(tmp_path):
@@ -1458,6 +1634,52 @@ def test_franklin_overview_starts_above_visible_gene_header(tmp_path):
         "y": 66,
         "width": 994,
         "height": 294,
+    }
+
+
+def test_franklin_overview_ignores_incomplete_document_dimensions(tmp_path):
+    service = BrowserReviewService(
+        profile_root=tmp_path, capture_validator=VALID_CAPTURE
+    )
+    captures = []
+
+    class Element:
+        def __init__(self, box):
+            self.box = box
+
+        def bounding_box(self):
+            return self.box
+
+    class Page:
+        def evaluate(self, script):
+            if "document.documentElement" in script:
+                return {"x": 0, "y": 0, "height": 900}
+
+        def wait_for_timeout(self, milliseconds):
+            assert milliseconds == 200
+
+        def get_by_text(self, text, *, exact):
+            raise AttributeError
+
+        def screenshot(self, **kwargs):
+            captures.append(kwargs)
+
+    class Panel(Element):
+        def evaluate(self, script):
+            pass
+
+    service._capture_franklin_classification_overview(
+        Page(),
+        Panel({"x": 100, "y": 150, "width": 900, "height": 600}),
+        Element({"x": 100, "y": 360, "width": 900, "height": 100}),
+        tmp_path / "overview.png",
+    )
+
+    assert captures[0]["clip"] == {
+        "x": 68.0,
+        "y": 0.0,
+        "width": 964.0,
+        "height": 360.0,
     }
 
 

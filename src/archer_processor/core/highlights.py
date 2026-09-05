@@ -31,6 +31,13 @@ def _is_artifact(variant: VariantRecord) -> bool:
     return any("artifact" in rule.lower() for rule in variant.matched_rules)
 
 
+def is_report_artifact(variant: VariantRecord) -> bool:
+    """True for variants the patient report should omit from all interpretation
+    sheets (Oversikt, Vedlegg, per-variant pages).  Artifacts stay in the
+    hidden Data sheet for traceability."""
+    return _is_artifact(variant) and variant.decision == "excluded"
+
+
 def _variant_sum(variant: VariantRecord, *columns: str) -> float:
     """Sum priority counts supplied directly by the Archer TSV."""
     return sum(_number(variant.raw.get(column)) for column in columns)
