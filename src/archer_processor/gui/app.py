@@ -972,11 +972,22 @@ class MainWindow(QMainWindow):
 
     def _processing_tab(self) -> QWidget:
         page = QWidget()
-        layout = QVBoxLayout(page)
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        self.import_scroll = QScrollArea()
+        self.import_scroll.setWidgetResizable(True)
+        self.import_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        layout = QVBoxLayout(content)
         layout.setSpacing(14)
 
         files = QGroupBox("Analysis input")
         grid = QGridLayout(files)
+        grid.setContentsMargins(16, 24, 16, 16)
+        grid.setVerticalSpacing(12)
+        grid.setHorizontalSpacing(12)
+        for row in range(3):
+            grid.setRowMinimumHeight(row, 44)
         grid.setColumnStretch(1, 1)
         self.input_edit = QLineEdit()
         self.input_edit.setPlaceholderText("Select the filtered variant TSV")
@@ -992,6 +1003,8 @@ class MainWindow(QMainWindow):
         self.run_date.setCalendarPopup(True)
         self.run_date.setDisplayFormat("yyyy-MM-dd")
         self.run_date.setDate(QDate.currentDate())
+        for control in (self.input_edit, self.output_edit, self.run_date, input_btn, output_btn):
+            control.setMinimumHeight(44)
         self.hide_excluded = QCheckBox("Hide excluded rows in workbook")
         self.hide_excluded.setChecked(False)
         grid.addWidget(QLabel("Input TSV"), 0, 0)
@@ -1028,6 +1041,8 @@ class MainWindow(QMainWindow):
         self.recent_analysis_name.setObjectName("FieldLabel")
         self.recent_analysis_detail = QLabel()
         self.recent_analysis_detail.setObjectName("HelperText")
+        self.recent_analysis_name.setWordWrap(True)
+        self.recent_analysis_detail.setWordWrap(True)
         recent_copy.addWidget(recent_title)
         recent_copy.addWidget(self.recent_analysis_name)
         recent_copy.addWidget(self.recent_analysis_detail)
@@ -1081,24 +1096,29 @@ class MainWindow(QMainWindow):
         resume_row.addWidget(self.resume_btn)
         self.resume_status = QLabel("Ready to restore an existing review session.")
         self.resume_status.setObjectName("HelperText")
+        self.resume_status.setWordWrap(True)
+        self.resume_edit.setMinimumHeight(44)
         resume_layout.addWidget(resume_help)
         resume_layout.addLayout(resume_row)
         resume_layout.addWidget(self.resume_status)
         layout.addWidget(resume)
 
         activity = QGroupBox("Activity")
-        activity.setMaximumHeight(190)
+        activity.setMinimumHeight(190)
         activity_layout = QVBoxLayout(activity)
         activity_help = QLabel("Validation and processing messages for the current analysis.")
         activity_help.setObjectName("HelperText")
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
+        self.log.setMinimumHeight(120)
         self.log.setMaximumBlockCount(500)
         self.log.setPlaceholderText("No activity yet. Select a variant TSV to begin.")
         activity_layout.addWidget(activity_help)
         activity_layout.addWidget(self.log, 1)
         layout.addWidget(activity)
         layout.addStretch()
+        self.import_scroll.setWidget(content)
+        page_layout.addWidget(self.import_scroll)
         return page
 
     def _review_tab(self) -> QWidget:
@@ -2983,7 +3003,7 @@ class MainWindow(QMainWindow):
                 selection-color: {Palette.navy};
             }}
             QLineEdit, QDateEdit, QComboBox, QSpinBox {{
-                min-height: 20px;
+                min-height: 28px;
             }}
             QLineEdit:focus, QDateEdit:focus, QPlainTextEdit:focus,
             QTableWidget:focus, QComboBox:focus, QSpinBox:focus {{

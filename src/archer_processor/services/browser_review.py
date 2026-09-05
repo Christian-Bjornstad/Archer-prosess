@@ -447,8 +447,7 @@ class BrowserReviewService:
                 )
             except Exception as exc:
                 raise BrowserAutomationUnavailable(
-                    "Could not start COSMIC because its Edge profile is in use. "
-                    "Close any COSMIC Edge window and retry."
+                    f"Could not start COSMIC in Edge. Actual startup error: {exc}"
                 ) from exc
             page = context.pages[0] if context.pages else context.new_page()
             try:
@@ -848,8 +847,7 @@ class BrowserReviewService:
                 )
             except Exception as exc:
                 raise BrowserAutomationUnavailable(
-                    "Could not start ClinVar because its Edge profile is in use. "
-                    "Close any ClinVar Edge window and retry."
+                    f"Could not start ClinVar in Edge. Actual startup error: {exc}"
                 ) from exc
             page = context.pages[0] if context.pages else context.new_page()
             try:
@@ -1100,8 +1098,7 @@ class BrowserReviewService:
                     )
                 except Exception as exc:
                     raise BrowserAutomationUnavailable(
-                        "Could not start Franklin because its Edge profile is in use. "
-                        "Close any Franklin Edge window and retry."
+                        f"Could not start Franklin in Edge. Actual startup error: {exc}"
                     ) from exc
                 page = context.pages[0] if context.pages else context.new_page()
                 if self.franklin_email and self.franklin_password:
@@ -1756,8 +1753,7 @@ class BrowserReviewService:
                     )
                 except Exception as exc:
                     raise BrowserAutomationUnavailable(
-                        "Could not start MTBP because its Edge profile is in use. "
-                        "Close any MTBP Edge window and retry."
+                        f"Could not start MTBP in Edge. Actual startup error: {exc}"
                     ) from exc
                 page = context.pages[0] if context.pages else context.new_page()
                 if progress:

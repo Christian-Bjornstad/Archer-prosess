@@ -22,6 +22,64 @@ def test_browser_service_uses_edge_cdp_backend(tmp_path):
     assert timeout_type is EdgeCdpTimeout
 
 
+def test_local_devtools_http_ignores_enterprise_proxy(monkeypatch):
+    from archer_processor.services.edge_cdp import _http_json
+    import urllib.request
+
+    class Response:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def read(self):
+            return b'{"Browser":"Edge"}'
+
+    class Opener:
+        def open(self, request, timeout):
+            assert request.full_url == 'http://127.0.0.1:9222/json/version'
+            return Response()
+
+    def build(handler):
+        assert isinstance(handler, urllib.request.ProxyHandler)
+        assert handler.proxies == {}
+        return Opener()
+
+    monkeypatch.setattr(urllib.request, 'build_opener', build)
+    assert _http_json('http://127.0.0.1:9222/json/version') == {'Browser': 'Edge'}
+
+
+def test_devtools_websocket_uses_preconnected_loopback_socket(monkeypatch):
+    from archer_processor.services.edge_cdp import _CdpConnection
+    from types import SimpleNamespace
+    transport = SimpleNamespace(close=lambda: None)
+    monkeypatch.setattr('archer_processor.services.edge_cdp.socket.create_connection',
+                        lambda address, timeout: transport if address == ('127.0.0.1', 9222) else None)
+    def connect(url, **kwargs):
+        assert kwargs['socket'] is transport
+        return SimpleNamespace(close=lambda: None)
+    monkeypatch.setattr('archer_processor.services.edge_cdp.websocket.create_connection', connect)
+    connection = _CdpConnection('ws://127.0.0.1:9222/devtools/page/test', 'http://127.0.0.1:9222')
+    connection.close()
+
+
+def test_failed_launch_closes_only_its_known_browser_endpoint(monkeypatch):
+    from archer_processor.services.edge_cdp import _close_failed_browser
+    from types import SimpleNamespace
+    calls = []
+    class Connection:
+        def __init__(self, url, origin):
+            calls.append(url)
+        def call(self, method, **kwargs):
+            calls.append(method)
+        def close(self):
+            calls.append('closed')
+    monkeypatch.setattr('archer_processor.services.edge_cdp._CdpConnection', Connection)
+    _close_failed_browser(SimpleNamespace(poll=lambda: 0),
+                          {'webSocketDebuggerUrl':'ws://127.0.0.1:9222/devtools/browser/ours'},
+                          'http://127.0.0.1:9222')
+    assert calls == ['ws://127.0.0.1:9222/devtools/browser/ours', 'Browser.close', 'closed']
+
+
 def test_find_edge_executable_uses_managed_program_files(tmp_path, monkeypatch):
     edge = tmp_path / "Microsoft" / "Edge" / "Application" / "msedge.exe"
     edge.parent.mkdir(parents=True)

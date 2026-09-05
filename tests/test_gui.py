@@ -78,6 +78,22 @@ def test_search_controls_and_log_stay_available_when_content_scrolls(qt_app):
     window.close()
 
 
+def test_import_fields_do_not_overlap_in_short_window(qt_app):
+    window = MainWindow()
+    window.resize(1120, 720)
+    window.show()
+    qt_app.processEvents()
+    previous_bottom = -1
+    for control in (window.input_edit, window.output_edit, window.run_date):
+        top = control.mapTo(window.import_scroll.widget(), control.rect().topLeft()).y()
+        assert control.height() >= 44
+        assert top > previous_bottom
+        previous_bottom = top + control.height()
+    assert window.log.height() >= 120
+    assert window.import_scroll.verticalScrollBar().maximum() > 0
+    window.close()
+
+
 def test_database_tab_contains_current_sources(qt_app):
     window = MainWindow()
 

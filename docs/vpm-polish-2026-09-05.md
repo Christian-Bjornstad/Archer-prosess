@@ -63,3 +63,19 @@ MTBP cropping, Franklin's gene header after horizontal scrolling, and restoratio
 of the original scroll position. Citrix's installed build and actual NCBI trust
 chain require verification after updating to this commit; existing captures are
 not repaired by merely regenerating Excel.
+
+## Follow-up: Edge startup and compressed Import layout
+
+The live Import page showed overlapping input rows and clipped log text at
+Citrix window height. Import now scrolls, with explicit row spacing, readable
+control minimum heights and a minimum log height. A short-window regression
+checks that inputs cannot overlap.
+
+All provider launch exceptions previously became an unsupported "profile in
+use" claim. They now retain the actual startup error. DevTools HTTP/WebSocket
+connections bypass proxies only for the local browser control channel. Edge
+startup output is retained in the provider profile's `vpm-edge-startup.log`;
+exit/timeout errors include the actual connection error, exit code when known,
+and the log location. No profiles, cookies or unrelated Edge processes are
+deleted. The particular Citrix startup failure still needs reproduction with
+these diagnostics; a lock was not proven by the old dialog.

@@ -11,6 +11,7 @@ import socket
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
@@ -177,19 +178,22 @@ class EdgeCdpContext:
                 "--disable-renderer-backgrounding",
             ]
         creation_flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        process = subprocess.Popen(
-            arguments,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=creation_flags,
-        )
+        startup_log = profile_directory / "vpm-edge-startup.log"
+        with startup_log.open("ab") as log:
+            process = subprocess.Popen(
+                arguments,
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=log,
+                creationflags=creation_flags,
+            )
         started_at = time.monotonic()
         deadline = started_at + 20
         last_error: Exception | None = None
+        browser_version: dict[str, Any] = {}
         while time.monotonic() < deadline:
             try:
-                _http_json(f"{endpoint}/json/version", timeout=1)
+                browser_version = _http_json(f"{endpoint}/json/version", timeout=1)
                 context = cls(process, endpoint, origin, profile_directory)
                 pages = context.pages
                 if not pages:
@@ -215,19 +219,19 @@ class EdgeCdpContext:
                 # probing the reserved endpoint briefly before calling that a
                 # failed launch.
                 if process.poll() is not None and time.monotonic() - started_at >= 3:
+                    _close_failed_browser(process, browser_version, origin)
                     raise EdgeCdpError(
-                        "Microsoft Edge exited before its local DevTools endpoint opened. "
-                        "The dedicated browser profile may already be in use, or work-PC "
-                        "policy may block remote debugging."
+                        f"Microsoft Edge exited (code {process.returncode}) before "
+                        f"its local DevTools endpoint opened. Last error: {last_error}. "
+                        f"Profile: {profile_directory}. Startup log: {startup_log}"
                     ) from last_error
                 time.sleep(0.2)
-        try:
-            process.terminate()
-        except OSError:
-            pass
+        _close_failed_browser(process, browser_version, origin)
         raise EdgeCdpTimeout(
-            "Microsoft Edge opened, but the local DevTools endpoint did not become "
-            "available. Confirm that the Edge policy RemoteDebuggingAllowed is enabled."
+            "Microsoft Edge opened, but its local DevTools connection failed. "
+            f"Last error: {last_error}. Profile: {profile_directory}. "
+            f"Startup log: {startup_log}. RemoteDebuggingAllowed may be restricted "
+            "by managed Edge policy; this is not proof of a profile lock."
         ) from last_error
 
     @property
@@ -316,14 +320,25 @@ class _Dialog:
 
 class _CdpConnection:
     def __init__(self, websocket_url: str, origin: str) -> None:
+        address = urllib.parse.urlsplit(websocket_url)
+        if address.scheme != "ws" or address.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise EdgeCdpError("DevTools must use a local loopback WebSocket.")
+        transport = None
         try:
+            # A preconnected socket bypasses websocket-client's environment
+            # proxy discovery (some versions ignore http_no_proxy without an
+            # explicit proxy host). No global proxy settings are changed.
+            transport = socket.create_connection((address.hostname, address.port or 80), timeout=10)
             self._socket = websocket.create_connection(
                 websocket_url,
                 timeout=10,
                 origin=origin,
                 enable_multithread=False,
+                socket=transport,
             )
         except Exception as exc:
+            if transport is not None:
+                transport.close()
             raise EdgeCdpError(f"Could not connect to Microsoft Edge CDP: {exc}") from exc
         self._next_id = 1
         self._pending: dict[int, dict[str, Any]] = {}
@@ -843,6 +858,27 @@ class EdgeCdpLocator:
         self.page.screenshot(path=path, clip=box)
 
 
+def _close_failed_browser(process, version: dict[str, Any], origin: str) -> None:
+    """Close only the Edge instance reached through this launch's endpoint."""
+    websocket_url = str(version.get("webSocketDebuggerUrl") or "")
+    if websocket_url:
+        connection = None
+        try:
+            connection = _CdpConnection(websocket_url, origin)
+            connection.call("Browser.close", timeout_ms=2_000)
+        except EdgeCdpError:
+            pass
+        finally:
+            if connection is not None:
+                connection.close()
+    if process.poll() is None:
+        try:
+            process.terminate()
+            process.wait(timeout=3)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
 def _reserve_local_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
@@ -857,7 +893,10 @@ def _http_json(
 ) -> Any:
     request = urllib.request.Request(url, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        # This helper only communicates with our local DevTools listener.
+        # Enterprise/Citrix proxy settings must not route it off the machine.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
         raise EdgeCdpError(f"Edge DevTools endpoint failed: {url}: {exc}") from exc
