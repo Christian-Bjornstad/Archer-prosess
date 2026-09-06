@@ -14,6 +14,12 @@ from archer_processor.services import DatabaseSearchService
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
 
 
+def test_cosmic_not_applicable_is_norwegian():
+    assert PatientExcelReportWriter()._compact_evidence([
+        DatabaseEvidence("COSMIC", "not_applicable", "No COSMIC ID")
+    ]) == "Ikke relevant"
+
+
 def test_patient_comment_and_long_hsmd_survive_regeneration(tmp_path):
     result = VariantProcessor().process(FIXTURE, "2026-09-05", tmp_path / "review.xlsx")
     variant = result.variants[3]

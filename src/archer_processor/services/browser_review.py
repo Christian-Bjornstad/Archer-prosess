@@ -4155,13 +4155,16 @@ def _mtbp_screenshot_row_matches(text: str, variant: VariantRecord) -> bool:
     compact = re.sub(r"\s+", "", text or "").casefold()
     if not variant.symbol or variant.symbol.casefold() not in compact:
         return False
+    # MTBP may describe cDNA against another transcript. Prefer the displayed
+    # protein identity, consistently with parse_mtbp_report, before cDNA fallback.
+    expected_protein = _mtbp_normalized_protein(_protein_change(variant.hgvsp))
+    reported_proteins = _mtbp_proteins(text)
+    if expected_protein and reported_proteins:
+        return expected_protein in reported_proteins
     expected_cdna = _cdna_change(variant.hgvsc).casefold()
     cdna_tokens = re.findall(r"c\.[-+*0-9a-z_>]+", (text or "").casefold())
     if cdna_tokens and expected_cdna:
         return expected_cdna in cdna_tokens
-    expected_protein = _mtbp_normalized_protein(_protein_change(variant.hgvsp))
-    if expected_protein:
-        return expected_protein in _mtbp_proteins(text)
     return False
 
 

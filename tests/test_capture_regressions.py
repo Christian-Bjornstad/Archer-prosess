@@ -1,6 +1,7 @@
 import base64
 import io
 import json
+from dataclasses import replace
 
 import pytest
 from PIL import Image
@@ -10,6 +11,30 @@ from archer_processor.services.browser_review import BrowserReviewService
 from archer_processor.services.capture_validation import CaptureValidation, IncompleteCaptureError
 from archer_processor.services.edge_cdp import EdgeCdpPage
 from pathlib import Path
+
+
+def test_mtbp_cbl_protein_match_wins_over_different_transcript_cdna(tmp_path):
+    from archer_processor.io.tsv_reader import ArcherTsvReader
+    variant = replace(ArcherTsvReader().read(Path(__file__).parent / "fixtures/sample_variants.tsv")[3],
+                      symbol="CBL", hgvsc="NM_005188.3:c.1203C>G", hgvsp="NP_005179.2:p.Cys401Trp")
+    full = tmp_path / "patient.png"
+    source = Image.new("RGB", (400, 300), "white")
+    source.paste("red", (0, 50, 400, 130))
+    source.paste("green", (0, 180, 400, 260))
+    source.save(full)
+    rows = [
+        {"gene": "CBL", "identity": "Mutation\np.His398Tyr\nENST00000000000:c.1192C>T",
+         "row": {"x": 0, "y": 50, "width": 400, "height": 80}},
+        {"gene": "CBL", "identity": "Mutation\np.Cys401Trp\nENST00000000000:c.1257C>G",
+         "row": {"x": 0, "y": 180, "width": 400, "height": 80}},
+    ]
+    full.with_suffix(".geometry.json").write_text(json.dumps({"width": 400, "height": 300, "rows": rows}))
+    service = BrowserReviewService(profile_root=tmp_path, capture_validator=lambda _: CaptureValidation(True, "ok", 400, 80, 1))
+    output = service._crop_mtbp_variant_from_report(None, variant, tmp_path, full)
+    with Image.open(output) as cropped:
+        assert cropped.info["match_scope"] == "exact_variant"
+        assert cropped.size == (400, 80)
+        assert cropped.getextrema() == ((0, 0), (128, 128), (0, 0))
 
 
 def test_clip_maps_css_to_scaled_document_pixels(tmp_path):

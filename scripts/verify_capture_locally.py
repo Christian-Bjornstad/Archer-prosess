@@ -45,8 +45,8 @@ def main():
         <div class="accordion-item"><h2 style="background:cyan">Putative unknown variants</h2>
         <div id="scroll" style="height:180px;overflow:auto">
         <table style="width:800px"><tr><th>Gene</th><th>Gene Info</th><th>Alteration</th><th>Evidence</th><th>Reported biomarker(s)</th></tr>
-        <tr style="height:300px"><td>TP53</td><td></td><td><span>p.Arg175His</span><span>exon 5</span></td><td>A</td><td></td></tr>
-        <tr style="height:300px;background:lime"><td>DDX41</td><td></td><td>p.Arg525His</td><td>B</td><td></td></tr>
+        <tr style="height:300px"><td>CBL</td><td></td><td><span>p.His398Tyr</span><br>c.1192C>T</td><td>A</td><td></td></tr>
+        <tr style="height:300px;background:lime"><td>CBL</td><td></td><td>p.Cys401Trp<br>c.1257C>G</td><td>B</td><td></td></tr>
         </table></div></div></body></html>"""
         page.goto("data:text/html," + quote(html))
         page.evaluate("document.querySelector('#scroll').scrollTop=80")
@@ -56,7 +56,7 @@ def main():
         assert len(geometry['rows']) == 2
         assert geometry['rows'][1]['section']['height'] > 0
         assert geometry['rows'][1]['row']['y'] + geometry['rows'][1]['row']['height'] <= geometry['height']
-        assert 'p.Arg175His' in geometry['rows'][0]['identity']
+        assert 'p.His398Tyr' in geometry['rows'][0]['identity']
         assert page.evaluate("document.querySelector('#scroll').scrollTop") == 80
         with Image.open(full) as image:
             box = geometry['rows'][1]['row']
@@ -66,9 +66,10 @@ def main():
             assert g > r + 100 and g > b + 100, (point, (r,g,b))
         print('PASS nested scroll: both rows captured and original scroll restored')
         variant = ArcherTsvReader().read(Path(__file__).resolve().parents[1] / 'tests/fixtures/sample_variants.tsv')[3]
-        variant = replace(variant, symbol='DDX41', hgvsc='', hgvsp='p.Arg525His')
+        variant = replace(variant, symbol='CBL', hgvsc='NM_005188.3:c.1203C>G', hgvsp='NP_005179.2:p.Cys401Trp')
         crop = service._crop_mtbp_variant_from_report(page, variant, output, full)
         with Image.open(crop) as image:
+            assert image.info['match_scope'] == 'exact_variant'
             # Section title can be wider than the table; sample inside the row.
             r,g,b = image.convert('RGB').getpixel((image.width//2, image.height-20))
             assert g > r + 100 and g > b + 100
