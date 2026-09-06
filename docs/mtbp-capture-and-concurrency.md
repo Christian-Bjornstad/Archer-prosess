@@ -6,14 +6,19 @@
   the same image and the DOM geometry captured with it; no per-variant portal requests.
 - Include the MTBP accordion section title, column headings and complete evidence
   row (including functional relevance and evidence A/B/C).
-- Prefer a unique gene + cDNA/protein match. If none or multiple match, include
+- Prefer a unique gene + protein match in Alteration; cDNA is a fallback when
+  protein identity is unavailable. A different transcript's cDNA must not reject
+  an exact displayed protein match (regression: CBL p.Cys401Trp versus p.His398Tyr).
+  If none or multiple match, include
   all rows for that gene, with a visible `genkontekst - variant ikke entydig` warning.
   Never include another gene. A missing gene still fails capture validation.
 - Gene-context images do not change database match status or import an uncertain
   classification as exact evidence. They may accompany not-found/ambiguous results.
-- Evidence has one main scrolling area with fixed search controls; the duplicate
-  activity/log tabs are removed. Current activity remains visible in the page,
-  and messages still go to the Import log.
+- Evidence has one scrolling area including search controls. The duplicate
+  activity/log tabs, evidence matrix, fixed serial-worker field and privacy notice
+  are removed. Serial processing and privacy safeguards are unchanged. Current
+  activity remains in the page, and messages still go to the Import log.
+- COSMIC `not_applicable` displays as `Ikke relevant` in Oversikt.
 
 ## Concurrency assessment (not enabled)
 
@@ -36,7 +41,7 @@ increasing concurrency. No measured speedup is claimed for the proposed experime
 ## Verification and rollout
 
 Unit tests exercise exact selection, ambiguous/missing identity, gene exclusion,
-context headings and fixed Evidence controls. `scripts/verify_capture_locally.py`
+context headings and scrolling Evidence controls. `scripts/verify_capture_locally.py`
 exercises a real Edge browser against local synthetic HTML, including nested
 scroll containers, section headings, pixel scaling and Franklin captures.
 

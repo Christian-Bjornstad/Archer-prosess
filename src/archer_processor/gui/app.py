@@ -16,7 +16,6 @@ from PyQt6.QtWidgets import (
     QButtonGroup,
     QComboBox,
     QDateEdit,
-    QDialog,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -1222,7 +1221,7 @@ class MainWindow(QMainWindow):
         )
         self.stop_search_btn.clicked.connect(self._stop_evidence_search)
         command_layout.addWidget(self.stop_search_btn, 1, 2)
-        page_layout.addWidget(command)
+        layout.addWidget(command)
 
         self.current_activity = CurrentActivityPanel()
         layout.addWidget(self.current_activity)
@@ -1277,17 +1276,6 @@ class MainWindow(QMainWindow):
             "When enabled, excluded and flagged variants are not sent to any database website."
         )
         options_grid.addWidget(self.included_only_check, 0, 1, 1, 3)
-        serial_label = QLabel("Serial patient queue")
-        serial_label.setObjectName("FieldLabel")
-        options_grid.addWidget(serial_label, 1, 0)
-        self.worker_count = QSpinBox()
-        self.worker_count.setRange(1, 1)
-        self.worker_count.setValue(1)
-        self.worker_count.setFixedWidth(72)
-        self.worker_count.setToolTip(
-            "Patient-centric evidence collection is deliberately serial to avoid bursts of requests."
-        )
-        options_grid.addWidget(self.worker_count, 1, 1)
         selection_label = QLabel("Reviewed workbook")
         selection_label.setObjectName("FieldLabel")
         options_grid.addWidget(selection_label, 2, 0)
@@ -1336,12 +1324,6 @@ class MainWindow(QMainWindow):
         options_grid.addWidget(self.browser_signin_btn, 3, 2)
         options_grid.addWidget(self.browser_review_btn, 3, 3)
         options_grid.addWidget(self.rerun_failed_btn, 4, 0)
-        self.browser_security_label = QLabel(
-            "Local privacy guard: only variant coordinates are sent; patient and sample identifiers remain on this computer."
-        )
-        self.browser_security_label.setObjectName("SecurityNote")
-        self.browser_security_label.setWordWrap(True)
-        options_grid.addWidget(self.browser_security_label, 5, 1, 1, 3)
         layout.addWidget(options)
 
         exports = QGroupBox("Reports")
@@ -1375,35 +1357,6 @@ class MainWindow(QMainWindow):
         export_layout.addWidget(self.retry_report_saves_button)
         layout.addWidget(exports)
 
-        evidence_group = QGroupBox("Evidence matrix")
-        evidence_group.setMinimumHeight(330)
-        evidence_layout = QVBoxLayout(evidence_group)
-        self.evidence_result_summary = QLabel(
-            "No evidence collected yet. Run selected sources to populate this table."
-        )
-        self.evidence_result_summary.setObjectName("HelperText")
-        self.evidence_result_summary.setWordWrap(True)
-        self.evidence_result_summary.setSizePolicy(
-            QSizePolicy.Policy.Ignored,
-            QSizePolicy.Policy.Preferred,
-        )
-        evidence_layout.addWidget(self.evidence_result_summary)
-        self.evidence_table = QTableWidget(0, 3 + len(self.databases))
-        self.evidence_table.setHorizontalHeaderLabels(["Sample", "Gene", "HGVSc", *self.databases])
-        self.evidence_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.evidence_table.setColumnWidth(0, 175)
-        self.evidence_table.setColumnWidth(1, 90)
-        self.evidence_table.setColumnWidth(2, 245)
-        for column in range(3, self.evidence_table.columnCount()):
-            self.evidence_table.setColumnWidth(column, 210)
-        self.evidence_table.verticalHeader().setDefaultSectionSize(70)
-        self.evidence_table.setAlternatingRowColors(True)
-        self.evidence_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.evidence_table.cellDoubleClicked.connect(self._show_evidence_detail)
-        self.evidence_table.setWordWrap(True)
-        self.evidence_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        evidence_layout.addWidget(self.evidence_table)
-        layout.addWidget(evidence_group)
         self.database_scroll.setWidget(database_content)
         page_layout.addWidget(self.database_scroll, 1)
         self._update_evidence_summary()
@@ -1781,7 +1734,7 @@ class MainWindow(QMainWindow):
 
     def _database_finished(self, evidence: dict) -> None:
         _merge_evidence_results(self.evidence, evidence)
-        self._refresh_evidence_table()
+        self._refresh_operations_cockpit()
         self._auto_rewrite_workbook()
         self._set_ready()
         self._complete_run_progress("Evidence search complete")
@@ -1792,7 +1745,7 @@ class MainWindow(QMainWindow):
 
     def _database_patient_finished(self, patient_evidence: dict) -> None:
         _merge_evidence_results(self.evidence, patient_evidence)
-        self._refresh_evidence_table()
+        self._refresh_operations_cockpit()
         self._update_evidence_summary()
         self._auto_rewrite_workbook()
 
@@ -2094,7 +2047,7 @@ class MainWindow(QMainWindow):
         )
         self._refresh_metrics()
         self._refresh_variant_table()
-        self._refresh_evidence_table()
+        self._refresh_operations_cockpit()
         self.load_selection_btn.setEnabled(True)
         self._remember_recent_workbook(workbook_path)
         self._set_ready()
@@ -2129,7 +2082,7 @@ class MainWindow(QMainWindow):
 
     def _browser_review_finished(self, browser_evidence: dict) -> None:
         self._merge_browser_evidence(browser_evidence)
-        self._refresh_evidence_table()
+        self._refresh_operations_cockpit()
         self._auto_rewrite_workbook()
         self._set_ready()
         self._complete_run_progress("Browser evidence complete")
@@ -2138,7 +2091,7 @@ class MainWindow(QMainWindow):
 
     def _browser_patient_finished(self, patient_evidence: dict) -> None:
         self._merge_browser_evidence(patient_evidence)
-        self._refresh_evidence_table()
+        self._refresh_operations_cockpit()
         self._update_evidence_summary()
         self._auto_rewrite_workbook()
 
@@ -2182,7 +2135,7 @@ class MainWindow(QMainWindow):
                     for database in pending_databases
                 ]
             self._merge_browser_evidence(failed_evidence)
-        self._refresh_evidence_table()
+        self._refresh_operations_cockpit()
         self._auto_rewrite_workbook()
         self._worker_failed(message)
 
@@ -2300,7 +2253,7 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Evidence search resumed")
 
     def _search_cancelled(self) -> None:
-        self._refresh_evidence_table()
+        self._refresh_operations_cockpit()
         self._auto_rewrite_workbook()
         self._set_ready()
         self.run_progress.show()
@@ -2504,7 +2457,7 @@ class MainWindow(QMainWindow):
         self.settings.franklin_password = self.franklin_password_edit.text()
         self.settings.mtbp_email = self.mtbp_email_edit.text()
         self.settings.mtbp_password = self.mtbp_password_edit.text()
-        self.settings.database_workers = self.worker_count.value()
+        self.settings.database_workers = 1
         self.settings.browser_delay_seconds = self.browser_delay_spin.value()
         self.settings.browser_delay_max_seconds = max(
             self.settings.browser_delay_seconds,
@@ -2731,50 +2684,6 @@ class MainWindow(QMainWindow):
         )
         self.status_bar.showMessage("Evidence search complete — results are ready")
 
-    def _refresh_evidence_table(self) -> None:
-        self.evidence_table.setRowCount(0)
-        if not self.result:
-            self.evidence_result_summary.setText(
-                "No evidence collected yet. Process data before starting a search."
-            )
-            return
-        self._refresh_operations_cockpit()
-        evidence_by_key = self.evidence or {}
-        variants = [
-            variant
-            for variant in self.result.variants
-            if f"{variant.sample}|{variant.hgvsc}" in evidence_by_key
-        ]
-        for variant in variants:
-            row = self.evidence_table.rowCount()
-            self.evidence_table.insertRow(row)
-            evidence_items = evidence_by_key.get(f"{variant.sample}|{variant.hgvsc}", [])
-            by_database: dict[str, list] = {}
-            for evidence in evidence_items:
-                by_database.setdefault(evidence.database, []).append(evidence)
-            values = [
-                variant.sample,
-                variant.symbol,
-                variant.hgvsc,
-                *[self._database_cell(by_database.get(database, [])) for database in self.databases],
-            ]
-            for col, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setToolTip(value)
-                self.evidence_table.setItem(row, col, item)
-        row_count = self.evidence_table.rowCount()
-        if row_count:
-            source_count = sum(
-                len(items) for items in evidence_by_key.values()
-            )
-            self.evidence_result_summary.setText(
-                f"{row_count} variant(s) with {source_count} evidence result(s). Double-click a cell to inspect the full text."
-            )
-        else:
-            self.evidence_result_summary.setText(
-                "No evidence collected yet. Run selected sources to populate this table."
-            )
-
     def _set_busy(self, label: str) -> None:
         self.run_progress.hide()
         is_search = label in {"Searching", "Browser lookups"}
@@ -2862,27 +2771,6 @@ class MainWindow(QMainWindow):
     def _table_text(self, table: QTableWidget, row: int, col: int) -> str:
         item = table.item(row, col)
         return item.text().strip() if item else ""
-
-    def _database_cell(self, evidence_items: list) -> str:
-        return "\n".join(f"[{item.status}] {item.summary}".strip() for item in evidence_items)
-
-    def _show_evidence_detail(self, row: int, column: int) -> None:
-        item = self.evidence_table.item(row, column)
-        if item is None:
-            return
-        dialog = QDialog(self)
-        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        dialog.setWindowTitle("Evidensdetaljer")
-        dialog.resize(800, 420)
-        layout = QVBoxLayout(dialog)
-        details = QPlainTextEdit()
-        details.setReadOnly(True)
-        details.setPlainText(item.text())
-        layout.addWidget(details)
-        close = QPushButton("Lukk")
-        close.clicked.connect(dialog.close)
-        layout.addWidget(close)
-        dialog.show()
 
     def _apply_style(self) -> None:
         self.setStyleSheet(

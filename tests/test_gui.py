@@ -60,7 +60,7 @@ def test_evidence_actions_fit_target_window_sizes(qt_app):
             assert point.x() + button.width() <= viewport.width()
 
 
-def test_search_controls_and_log_stay_available_when_content_scrolls(qt_app):
+def test_entire_evidence_page_scrolls_and_import_keeps_log(qt_app):
     window = MainWindow()
     window._switch_page(2)
     window.resize(1120, 720)
@@ -70,11 +70,10 @@ def test_search_controls_and_log_stay_available_when_content_scrolls(qt_app):
     window.database_scroll.verticalScrollBar().setValue(window.database_scroll.verticalScrollBar().maximum())
     qt_app.processEvents()
     after = window.search_btn.mapTo(window, window.search_btn.rect().topLeft())
-    assert before == after
-    assert before.x() >= 0 and before.x() + window.search_btn.width() <= window.width()
+    assert after.y() < before.y()
     assert not hasattr(window, "evidence_splitter")
     assert not hasattr(window, "evidence_log")
-    # All space below the fixed command bar belongs to the main scroll area.
+    assert window.database_scroll.geometry().top() == 0
     assert window.database_scroll.geometry().bottom() >= window.database_scroll.parentWidget().height() - 2
     window._log('Test log message')
     assert 'Test log message' in window.log.toPlainText()
@@ -141,11 +140,9 @@ def test_database_tab_contains_current_sources(qt_app):
     assert not hasattr(window, "clinvar_key_edit")
     assert not hasattr(window, "oncokb_key_edit")
     assert not hasattr(window, "franklin_key_edit")
-    headers = [
-        window.evidence_table.horizontalHeaderItem(index).text()
-        for index in range(window.evidence_table.columnCount())
-    ]
-    assert headers == ["Sample", "Gene", "HGVSc", *window.databases]
+    assert not hasattr(window, "evidence_table")
+    assert not hasattr(window, "worker_count")
+    assert not hasattr(window, "browser_security_label")
 
 
 def test_artifact_settings_show_catalog_and_af_exception(qt_app):
