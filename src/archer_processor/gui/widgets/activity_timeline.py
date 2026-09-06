@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QFrame, QGridLayout, QLabel, QTableWidget, QTableWidgetItem
 
 from archer_processor.gui.status_model import RunActivity
@@ -25,6 +26,7 @@ class CurrentActivityPanel(QFrame):
             heading = QLabel(label)
             heading.setObjectName("SettingsColumnHeader")
             value.setObjectName("FieldLabel")
+            value.setWordWrap(True)
             layout.addWidget(heading, 0, column)
             layout.addWidget(value, 1, column)
 
@@ -47,8 +49,15 @@ class ActivityTimeline(QTableWidget):
         self.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.verticalHeader().setVisible(False)
         self.horizontalHeader().setStretchLastSection(True)
+        self.setAlternatingRowColors(True)
+        self.setWordWrap(True)
+        for column, width in enumerate((76, 115, 90, 140, 400)):
+            self.setColumnWidth(column, width)
+        self.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.setVerticalScrollMode(QTableWidget.ScrollMode.ScrollPerPixel)
 
     def add_activity(self, activity: RunActivity) -> None:
+        follow = self.verticalScrollBar().value() >= self.verticalScrollBar().maximum() - 2
         if self.rowCount() >= self.MAX_EVENTS:
             self.removeRow(0)
         row = self.rowCount()
@@ -61,4 +70,10 @@ class ActivityTimeline(QTableWidget):
             activity.message,
         ]
         for column, value in enumerate(values):
-            self.setItem(row, column, QTableWidgetItem(value))
+            item = QTableWidgetItem(value)
+            item.setToolTip(value)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            self.setItem(row, column, item)
+        self.resizeRowToContents(row)
+        if follow:
+            self.scrollToBottom()

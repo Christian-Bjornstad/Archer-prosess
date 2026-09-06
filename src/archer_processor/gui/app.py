@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QTabWidget,
     QStatusBar,
     QTableWidget,
     QTableWidgetItem,
@@ -70,10 +71,6 @@ from archer_processor.gui.theme import Palette, application_stylesheet
 from archer_processor.gui.widgets.navigation import NavigationRail
 from archer_processor.gui.widgets.run_status import RunStatusStrip
 from archer_processor.gui.widgets.status_matrix import StatusMatrix
-from archer_processor.gui.widgets.activity_timeline import (
-    ActivityTimeline,
-    CurrentActivityPanel,
-)
 
 
 class ProcessingWorker(QObject):
@@ -865,7 +862,7 @@ class MainWindow(QMainWindow):
         self._search_started_at: float | None = None
         self.workbook_write_pending = False
         self._workbook_lock_warning_shown = False
-        self.setWindowTitle("Myolid Tolkning")
+        self.setWindowTitle("VPM Tolkning")
         self.app_icon_path = (
             Path(__file__).resolve().parents[1] / "assets" / "vpm-tolkning-icon.png"
         )
@@ -969,11 +966,22 @@ class MainWindow(QMainWindow):
 
     def _processing_tab(self) -> QWidget:
         page = QWidget()
-        layout = QVBoxLayout(page)
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        self.import_scroll = QScrollArea()
+        self.import_scroll.setWidgetResizable(True)
+        self.import_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        layout = QVBoxLayout(content)
         layout.setSpacing(14)
 
         files = QGroupBox("Analysis input")
         grid = QGridLayout(files)
+        grid.setContentsMargins(16, 24, 16, 16)
+        grid.setVerticalSpacing(12)
+        grid.setHorizontalSpacing(12)
+        for row in range(3):
+            grid.setRowMinimumHeight(row, 44)
         grid.setColumnStretch(1, 1)
         self.input_edit = QLineEdit()
         self.input_edit.setPlaceholderText("Select the filtered variant TSV")
@@ -989,6 +997,8 @@ class MainWindow(QMainWindow):
         self.run_date.setCalendarPopup(True)
         self.run_date.setDisplayFormat("yyyy-MM-dd")
         self.run_date.setDate(QDate.currentDate())
+        for control in (self.input_edit, self.output_edit, self.run_date, input_btn, output_btn):
+            control.setMinimumHeight(44)
         self.hide_excluded = QCheckBox("Hide excluded rows in workbook")
         self.hide_excluded.setChecked(False)
         grid.addWidget(QLabel("Input TSV"), 0, 0)
@@ -1025,6 +1035,8 @@ class MainWindow(QMainWindow):
         self.recent_analysis_name.setObjectName("FieldLabel")
         self.recent_analysis_detail = QLabel()
         self.recent_analysis_detail.setObjectName("HelperText")
+        self.recent_analysis_name.setWordWrap(True)
+        self.recent_analysis_detail.setWordWrap(True)
         recent_copy.addWidget(recent_title)
         recent_copy.addWidget(self.recent_analysis_name)
         recent_copy.addWidget(self.recent_analysis_detail)
@@ -1071,31 +1083,36 @@ class MainWindow(QMainWindow):
         self.resume_btn.setObjectName("OutlineButton")
         self.resume_btn.setMinimumHeight(44)
         self.resume_btn.setToolTip(
-            "Resume a workbook created by Myolid Tolkning without reprocessing the TSV."
+            "Resume a workbook created by VPM Tolkning without reprocessing the TSV."
         )
         self.resume_btn.clicked.connect(self._browse_processed_workbook)
         resume_row.addWidget(self.resume_edit, 1)
         resume_row.addWidget(self.resume_btn)
         self.resume_status = QLabel("Ready to restore an existing review session.")
         self.resume_status.setObjectName("HelperText")
+        self.resume_status.setWordWrap(True)
+        self.resume_edit.setMinimumHeight(44)
         resume_layout.addWidget(resume_help)
         resume_layout.addLayout(resume_row)
         resume_layout.addWidget(self.resume_status)
         layout.addWidget(resume)
 
         activity = QGroupBox("Activity")
-        activity.setMaximumHeight(190)
+        activity.setMinimumHeight(190)
         activity_layout = QVBoxLayout(activity)
         activity_help = QLabel("Validation and processing messages for the current analysis.")
         activity_help.setObjectName("HelperText")
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
+        self.log.setMinimumHeight(120)
         self.log.setMaximumBlockCount(500)
         self.log.setPlaceholderText("No activity yet. Select a variant TSV to begin.")
         activity_layout.addWidget(activity_help)
         activity_layout.addWidget(self.log, 1)
         layout.addWidget(activity)
         layout.addStretch()
+        self.import_scroll.setWidget(content)
+        page_layout.addWidget(self.import_scroll)
         return page
 
     def _review_tab(self) -> QWidget:
@@ -1147,6 +1164,7 @@ class MainWindow(QMainWindow):
         self.database_scroll = QScrollArea()
         self.database_scroll.setWidgetResizable(True)
         self.database_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.database_scroll.verticalScrollBar().setSingleStep(32)
         self.database_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
@@ -1156,10 +1174,10 @@ class MainWindow(QMainWindow):
 
         command = QFrame()
         command.setObjectName("EvidenceCommand")
-        command_layout = QHBoxLayout(command)
+        command_layout = QGridLayout(command)
         command_layout.setContentsMargins(16, 13, 16, 13)
         command_copy = QVBoxLayout()
-        command_title = QLabel("Research queue")
+        command_title = QLabel("Run queue")
         command_title.setObjectName("SectionTitle")
         self.evidence_summary = QLabel("Choose sources to prepare a search")
         self.evidence_summary.setObjectName("HelperText")
@@ -1170,17 +1188,17 @@ class MainWindow(QMainWindow):
         )
         command_copy.addWidget(command_title)
         command_copy.addWidget(self.evidence_summary)
-        command_layout.addLayout(command_copy, 1)
+        command_layout.addLayout(command_copy, 0, 0, 1, 3)
         self.search_btn = QPushButton("Run Evidence Search")
         self.search_btn.setObjectName("PrimaryButton")
-        self.search_btn.setFixedWidth(190)
+        self.search_btn.setMinimumWidth(190)
         self.search_btn.setMinimumHeight(44)
         self.search_btn.setEnabled(False)
         self.search_btn.clicked.connect(self._start_database_search)
-        command_layout.addWidget(self.search_btn)
+        command_layout.addWidget(self.search_btn, 1, 0)
         self.pause_search_btn = QPushButton("Pause Search")
         self.pause_search_btn.setObjectName("PauseButton")
-        self.pause_search_btn.setFixedWidth(124)
+        self.pause_search_btn.setMinimumWidth(124)
         self.pause_search_btn.setMinimumHeight(44)
         self.pause_search_btn.setEnabled(False)
         self.pause_search_btn.setAccessibleName("Pause or resume evidence search")
@@ -1188,10 +1206,10 @@ class MainWindow(QMainWindow):
             "Pause at the next safe checkpoint, then resume the same queue without repeating completed work."
         )
         self.pause_search_btn.clicked.connect(self._toggle_search_pause)
-        command_layout.addWidget(self.pause_search_btn)
+        command_layout.addWidget(self.pause_search_btn, 1, 1)
         self.stop_search_btn = QPushButton("Stop Search")
         self.stop_search_btn.setObjectName("StopButton")
-        self.stop_search_btn.setFixedWidth(118)
+        self.stop_search_btn.setMinimumWidth(118)
         self.stop_search_btn.setMinimumHeight(44)
         self.stop_search_btn.setEnabled(False)
         self.stop_search_btn.setAccessibleName("Stop evidence search")
@@ -1199,11 +1217,8 @@ class MainWindow(QMainWindow):
             "Safely stop after the current browser action. Evidence already collected is kept."
         )
         self.stop_search_btn.clicked.connect(self._stop_evidence_search)
-        command_layout.addWidget(self.stop_search_btn)
+        command_layout.addWidget(self.stop_search_btn, 1, 2)
         layout.addWidget(command)
-
-        self.current_activity = CurrentActivityPanel()
-        layout.addWidget(self.current_activity)
 
         checks = QGroupBox("Evidence sources")
         checks.setMinimumHeight(250)
@@ -1240,13 +1255,6 @@ class MainWindow(QMainWindow):
         status_layout.addWidget(self.status_matrix)
         layout.addWidget(status_group)
 
-        timeline_group = QGroupBox("Activity timeline")
-        timeline_layout = QVBoxLayout(timeline_group)
-        self.activity_timeline = ActivityTimeline()
-        self.activity_timeline.setMinimumHeight(160)
-        timeline_layout.addWidget(self.activity_timeline)
-        layout.addWidget(timeline_group)
-
         options = QGroupBox("Search scope and browser session")
         options_grid = QGridLayout(options)
         options_grid.setColumnStretch(1, 1)
@@ -1262,17 +1270,6 @@ class MainWindow(QMainWindow):
             "When enabled, excluded and flagged variants are not sent to any database website."
         )
         options_grid.addWidget(self.included_only_check, 0, 1, 1, 3)
-        serial_label = QLabel("Serial patient queue")
-        serial_label.setObjectName("FieldLabel")
-        options_grid.addWidget(serial_label, 1, 0)
-        self.worker_count = QSpinBox()
-        self.worker_count.setRange(1, 1)
-        self.worker_count.setValue(1)
-        self.worker_count.setFixedWidth(72)
-        self.worker_count.setToolTip(
-            "Patient-centric evidence collection is deliberately serial to avoid bursts of requests."
-        )
-        options_grid.addWidget(self.worker_count, 1, 1)
         selection_label = QLabel("Reviewed workbook")
         selection_label.setObjectName("FieldLabel")
         options_grid.addWidget(selection_label, 2, 0)
@@ -1307,26 +1304,10 @@ class MainWindow(QMainWindow):
             "Runs selected ClinVar, COSMIC, OncoKB, Franklin, and MTBP sources patient-by-patient in visible Edge."
         )
         self.browser_review_btn.clicked.connect(self._start_browser_review)
-        self.rerun_failed_btn = QPushButton("Rerun Failed Sources")
-        self.rerun_failed_btn.setFixedWidth(170)
-        self.rerun_failed_btn.setObjectName("OutlineButton")
-        self.rerun_failed_btn.setEnabled(False)
-        self.rerun_failed_btn.setToolTip(
-            "Re-runs only the variant/source lookups that ended in a retryable state "
-            "(website down, timeout, lost session). Safe to press repeatedly."
-        )
-        self.rerun_failed_btn.clicked.connect(self._rerun_failed_sources)
         options_grid.addWidget(browser_label, 3, 0)
         options_grid.addWidget(self.browser_database_combo, 3, 1)
         options_grid.addWidget(self.browser_signin_btn, 3, 2)
         options_grid.addWidget(self.browser_review_btn, 3, 3)
-        options_grid.addWidget(self.rerun_failed_btn, 4, 0)
-        self.browser_security_label = QLabel(
-            "Local privacy guard: only variant coordinates are sent; patient and sample identifiers remain on this computer."
-        )
-        self.browser_security_label.setObjectName("SecurityNote")
-        self.browser_security_label.setWordWrap(True)
-        options_grid.addWidget(self.browser_security_label, 5, 1, 1, 3)
         layout.addWidget(options)
 
         exports = QGroupBox("Reports")
@@ -1360,35 +1341,8 @@ class MainWindow(QMainWindow):
         export_layout.addWidget(self.retry_report_saves_button)
         layout.addWidget(exports)
 
-        evidence_group = QGroupBox("Evidence matrix")
-        evidence_group.setMinimumHeight(330)
-        evidence_layout = QVBoxLayout(evidence_group)
-        self.evidence_result_summary = QLabel(
-            "No evidence collected yet. Run selected sources to populate this table."
-        )
-        self.evidence_result_summary.setObjectName("HelperText")
-        self.evidence_result_summary.setWordWrap(True)
-        self.evidence_result_summary.setSizePolicy(
-            QSizePolicy.Policy.Ignored,
-            QSizePolicy.Policy.Preferred,
-        )
-        evidence_layout.addWidget(self.evidence_result_summary)
-        self.evidence_table = QTableWidget(0, 3 + len(self.databases))
-        self.evidence_table.setHorizontalHeaderLabels(["Sample", "Gene", "HGVSc", *self.databases])
-        self.evidence_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.evidence_table.setColumnWidth(0, 175)
-        self.evidence_table.setColumnWidth(1, 90)
-        self.evidence_table.setColumnWidth(2, 245)
-        for column in range(3, self.evidence_table.columnCount()):
-            self.evidence_table.setColumnWidth(column, 210)
-        self.evidence_table.verticalHeader().setDefaultSectionSize(70)
-        self.evidence_table.setAlternatingRowColors(True)
-        self.evidence_table.setWordWrap(True)
-        self.evidence_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        evidence_layout.addWidget(self.evidence_table)
-        layout.addWidget(evidence_group)
         self.database_scroll.setWidget(database_content)
-        page_layout.addWidget(self.database_scroll)
+        page_layout.addWidget(self.database_scroll, 1)
         self._update_evidence_summary()
         return page
 
@@ -1764,7 +1718,7 @@ class MainWindow(QMainWindow):
 
     def _database_finished(self, evidence: dict) -> None:
         _merge_evidence_results(self.evidence, evidence)
-        self._refresh_evidence_table()
+        self._refresh_operations_cockpit()
         self._auto_rewrite_workbook()
         self._set_ready()
         self._complete_run_progress("Evidence search complete")
@@ -1775,7 +1729,7 @@ class MainWindow(QMainWindow):
 
     def _database_patient_finished(self, patient_evidence: dict) -> None:
         _merge_evidence_results(self.evidence, patient_evidence)
-        self._refresh_evidence_table()
+        self._refresh_operations_cockpit()
         self._update_evidence_summary()
         self._auto_rewrite_workbook()
 
@@ -1815,53 +1769,6 @@ class MainWindow(QMainWindow):
             )
             return
         self._launch_browser_review(databases)
-
-    def _rerun_failed_sources(self) -> None:
-        """Re-run only lookups that ended in a retryable state (e.g. site was down).
-
-        Completed evidence is never repeated; only variant/source pairs whose last
-        attempt produced a retryable status (error, timeout, session_lost, ...)
-        are re-queued.
-        """
-        if not self.result:
-            return
-        if (
-            self.browser_thread is not None
-            and self.browser_thread.isRunning()
-        ) or (
-            self.database_thread is not None
-            and self.database_thread.isRunning()
-        ):
-            QMessageBox.information(
-                self,
-                "Search in progress",
-                "An evidence search is already running. Wait for it to finish "
-                "before rerunning failed lookups.",
-            )
-            return
-        databases = [
-            database
-            for database in BROWSER_DATABASES
-            if _has_failed_lookups(
-                self._variants_for_search(), self.evidence, [database]
-            )
-        ]
-        if not databases:
-            QMessageBox.information(
-                self,
-                "No failed lookups",
-                "There are no failed source lookups to rerun. Everything "
-                "searched so far is complete.",
-            )
-            return
-        failed_variants = _failed_search_variants(
-            self._variants_for_search(), self.evidence, databases
-        )
-        self._log(
-            f"Manual rerun: {len(failed_variants)} failed variant lookup(s) across "
-            f"{', '.join(databases)}"
-        )
-        self._launch_browser_review(databases, variants=failed_variants)
 
     def _selected_browser_databases(self, *, api_fallback_only: bool = False) -> list[str]:
         return [
@@ -2077,7 +1984,7 @@ class MainWindow(QMainWindow):
         )
         self._refresh_metrics()
         self._refresh_variant_table()
-        self._refresh_evidence_table()
+        self._refresh_operations_cockpit()
         self.load_selection_btn.setEnabled(True)
         self._remember_recent_workbook(workbook_path)
         self._set_ready()
@@ -2107,12 +2014,12 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(
             self,
             "Processed workbook could not be loaded",
-            f"{message}\n\nChoose a workbook created by the current Myolid Tolkning review workflow.",
+            f"{message}\n\nChoose a workbook created by the current VPM Tolkning review workflow.",
         )
 
     def _browser_review_finished(self, browser_evidence: dict) -> None:
         self._merge_browser_evidence(browser_evidence)
-        self._refresh_evidence_table()
+        self._refresh_operations_cockpit()
         self._auto_rewrite_workbook()
         self._set_ready()
         self._complete_run_progress("Browser evidence complete")
@@ -2121,7 +2028,7 @@ class MainWindow(QMainWindow):
 
     def _browser_patient_finished(self, patient_evidence: dict) -> None:
         self._merge_browser_evidence(patient_evidence)
-        self._refresh_evidence_table()
+        self._refresh_operations_cockpit()
         self._update_evidence_summary()
         self._auto_rewrite_workbook()
 
@@ -2165,7 +2072,7 @@ class MainWindow(QMainWindow):
                     for database in pending_databases
                 ]
             self._merge_browser_evidence(failed_evidence)
-        self._refresh_evidence_table()
+        self._refresh_operations_cockpit()
         self._auto_rewrite_workbook()
         self._worker_failed(message)
 
@@ -2283,7 +2190,7 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Evidence search resumed")
 
     def _search_cancelled(self) -> None:
-        self._refresh_evidence_table()
+        self._refresh_operations_cockpit()
         self._auto_rewrite_workbook()
         self._set_ready()
         self.run_progress.show()
@@ -2487,7 +2394,7 @@ class MainWindow(QMainWindow):
         self.settings.franklin_password = self.franklin_password_edit.text()
         self.settings.mtbp_email = self.mtbp_email_edit.text()
         self.settings.mtbp_password = self.mtbp_password_edit.text()
-        self.settings.database_workers = self.worker_count.value()
+        self.settings.database_workers = 1
         self.settings.browser_delay_seconds = self.browser_delay_spin.value()
         self.settings.browser_delay_max_seconds = max(
             self.settings.browser_delay_seconds,
@@ -2571,8 +2478,6 @@ class MainWindow(QMainWindow):
             self._patient_report_outcome(outcome)
 
     def _activity_received(self, activity: RunActivity) -> None:
-        self.current_activity.set_activity(activity)
-        self.activity_timeline.add_activity(activity)
         self._log(activity.message or activity.action)
 
     def _refresh_variant_table(self) -> None:
@@ -2715,50 +2620,6 @@ class MainWindow(QMainWindow):
         )
         self.status_bar.showMessage("Evidence search complete — results are ready")
 
-    def _refresh_evidence_table(self) -> None:
-        self.evidence_table.setRowCount(0)
-        if not self.result:
-            self.evidence_result_summary.setText(
-                "No evidence collected yet. Process data before starting a search."
-            )
-            return
-        self._refresh_operations_cockpit()
-        evidence_by_key = self.evidence or {}
-        variants = [
-            variant
-            for variant in self.result.variants
-            if f"{variant.sample}|{variant.hgvsc}" in evidence_by_key
-        ]
-        for variant in variants:
-            row = self.evidence_table.rowCount()
-            self.evidence_table.insertRow(row)
-            evidence_items = evidence_by_key.get(f"{variant.sample}|{variant.hgvsc}", [])
-            by_database: dict[str, list] = {}
-            for evidence in evidence_items:
-                by_database.setdefault(evidence.database, []).append(evidence)
-            values = [
-                variant.sample,
-                variant.symbol,
-                variant.hgvsc,
-                *[self._database_cell(by_database.get(database, [])) for database in self.databases],
-            ]
-            for col, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setToolTip(value)
-                self.evidence_table.setItem(row, col, item)
-        row_count = self.evidence_table.rowCount()
-        if row_count:
-            source_count = sum(
-                len(items) for items in evidence_by_key.values()
-            )
-            self.evidence_result_summary.setText(
-                f"{row_count} variant(s) with {source_count} evidence result(s). Double-click a cell to inspect the full text."
-            )
-        else:
-            self.evidence_result_summary.setText(
-                "No evidence collected yet. Run selected sources to populate this table."
-            )
-
     def _set_busy(self, label: str) -> None:
         self.run_progress.hide()
         is_search = label in {"Searching", "Browser lookups"}
@@ -2789,7 +2650,6 @@ class MainWindow(QMainWindow):
         self.stop_search_btn.setEnabled(is_search)
         self.browser_signin_btn.setEnabled(False)
         self.browser_review_btn.setEnabled(False)
-        self.rerun_failed_btn.setEnabled(False)
         self.rewrite_btn.setEnabled(False)
         self.patient_excel_btn.setEnabled(False)
         self.resume_btn.setEnabled(False)
@@ -2810,12 +2670,6 @@ class MainWindow(QMainWindow):
         self.stop_search_btn.setEnabled(False)
         self.browser_signin_btn.setEnabled(True)
         self.browser_review_btn.setEnabled(self.result is not None)
-        self.rerun_failed_btn.setEnabled(
-            self.result is not None
-            and _has_failed_lookups(
-                self._variants_for_search(), self.evidence, list(BROWSER_DATABASES)
-            )
-        )
         self.rewrite_btn.setEnabled(self.result is not None)
         self.patient_excel_btn.setEnabled(self.result is not None)
         self.resume_btn.setEnabled(True)
@@ -2846,9 +2700,6 @@ class MainWindow(QMainWindow):
     def _table_text(self, table: QTableWidget, row: int, col: int) -> str:
         item = table.item(row, col)
         return item.text().strip() if item else ""
-
-    def _database_cell(self, evidence_items: list) -> str:
-        return "\n".join(f"[{item.status}] {item.summary}".strip() for item in evidence_items)
 
     def _apply_style(self) -> None:
         self.setStyleSheet(
@@ -2953,7 +2804,7 @@ class MainWindow(QMainWindow):
                 selection-color: {Palette.navy};
             }}
             QLineEdit, QDateEdit, QComboBox, QSpinBox {{
-                min-height: 20px;
+                min-height: 28px;
             }}
             QLineEdit:focus, QDateEdit:focus, QPlainTextEdit:focus,
             QTableWidget:focus, QComboBox:focus, QSpinBox:focus {{
@@ -3016,6 +2867,15 @@ class MainWindow(QMainWindow):
             QPushButton#ReportButton:hover {{
                 background: #3F724A;
             }}
+            QPushButton#PrimaryButton:disabled, QPushButton#ReportButton:disabled,
+            QPushButton#OutlineButton:disabled, QPushButton#PauseButton:disabled,
+            QPushButton#StopButton:disabled {{
+                background: #E7EEF2;
+                color: #536977;
+                border: 1px solid #C6D3DB;
+            }}
+            QTabBar::tab {{ padding: 8px 12px; background: #E7EEF2; color: #163445; }}
+            QTabBar::tab:selected {{ background: white; border-top: 2px solid #087EA4; }}
             QFrame#MetricCard {{
                 background: {Palette.panel};
                 border: 1px solid {Palette.border};

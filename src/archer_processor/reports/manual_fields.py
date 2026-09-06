@@ -18,6 +18,21 @@ def variant_manual_key(patient_id: str, variant: VariantRecord) -> str:
     return _manual_key(patient_id, variant.symbol, variant.hgvsc, variant.hgvsp)
 
 
+def read_patient_comment(path: Path) -> str:
+    if not path.is_file():
+        return ""
+    workbook = openpyxl.load_workbook(path, read_only=False, data_only=False)
+    try:
+        if "Oversikt" not in workbook.sheetnames:
+            return ""
+        sheet = workbook["Oversikt"]
+        if "E4:J7" not in {str(area) for area in sheet.merged_cells.ranges}:
+            return ""
+        return str(sheet["E4"].value or "")
+    finally:
+        workbook.close()
+
+
 def read_manual_fields(
     path: Path, patient_id: str
 ) -> dict[str, ManualVariantFields]:

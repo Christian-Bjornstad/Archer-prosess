@@ -14,6 +14,36 @@ from archer_processor.services import DatabaseSearchService
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
 
 
+def test_cosmic_not_applicable_is_norwegian():
+    assert PatientExcelReportWriter()._compact_evidence([
+        DatabaseEvidence("COSMIC", "not_applicable", "No COSMIC ID")
+    ]) == "Ikke funnet"
+
+
+def test_patient_comment_and_long_hsmd_survive_regeneration(tmp_path):
+    result = VariantProcessor().process(FIXTURE, "2026-09-05", tmp_path / "review.xlsx")
+    variant = result.variants[3]
+    output = tmp_path / "patient.xlsx"
+    writer = PatientExcelReportWriter()
+    writer.write_patient(result, variant.patient_id, [variant], output, {})
+    workbook = openpyxl.load_workbook(output)
+    sheet = workbook["Oversikt"]
+    assert "E4:J7" in {str(area) for area in sheet.merged_cells.ranges}
+    assert sheet["E3"].value is None
+    assert sheet["E4"].fill.fgColor.rgb == "00FFF3E8"
+    sheet["E4"] = "Manuell vurdering\nBevares ved ny generering"
+    sheet["D11"] = sheet["D11"].value.replace("HSMD -", "HSMD - " + "manuelt funn " * 20)
+    workbook.save(output)
+    workbook.close()
+    writer.write_patient(result, variant.patient_id, [variant], output, {})
+    workbook = openpyxl.load_workbook(output)
+    sheet = workbook["Oversikt"]
+    assert sheet["E4"].value == "Manuell vurdering\nBevares ved ny generering"
+    assert "manuelt funn" in sheet["D11"].value
+    assert sheet.row_dimensions[11].height > 160
+    workbook.close()
+
+
 def test_patient_overview_uses_light_blue_and_white_banding(tmp_path):
     result = VariantProcessor().process(
         FIXTURE, "2026-08-11", tmp_path / "review.xlsx"
@@ -144,7 +174,7 @@ def test_patient_overview_row_height_follows_short_evidence_line_count(tmp_path)
         overview = workbook["Oversikt"]
         expected_lines = str(overview["D11"].value).count("\n") + 1
         assert expected_lines == 6
-        assert overview.row_dimensions[11].height == max(30, expected_lines * 15)
+        assert overview.row_dimensions[11].height >= expected_lines * 16 + 12
     finally:
         workbook.close()
 

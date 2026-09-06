@@ -4,6 +4,7 @@ import json
 import math
 import os
 import re
+import textwrap
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from archer_processor.reports.excel_report import ExcelReportWriter
 from archer_processor.reports.manual_fields import (
     ManualVariantFields,
     read_manual_fields,
+    read_patient_comment,
     variant_manual_key,
 )
 
@@ -132,6 +134,7 @@ class PatientExcelReportWriter:
     ) -> Path:
         variants = sorted(variants, key=variant_sort_key)
         manual_fields = read_manual_fields(output_path, patient_id)
+        patient_comment = read_patient_comment(output_path)
         # Artifacts remain in the hidden Data sheet for traceability but are
         # kept out of every interpretation sheet (Oversikt, Vedlegg, the
         # per-variant sheets).  Callers that hand us the full result list
@@ -148,6 +151,7 @@ class PatientExcelReportWriter:
             variants,
             evidence,
             manual_fields,
+            patient_comment,
         )
         workbook.remove(placeholder)
         self._attachment_sheet(workbook, patient_id, variants, evidence)
@@ -284,6 +288,7 @@ class PatientExcelReportWriter:
         variants: list[VariantRecord],
         evidence: dict[str, list[DatabaseEvidence]],
         manual_fields: dict[str, ManualVariantFields],
+        patient_comment: str = "",
     ) -> None:
         # Artifacts stay in the hidden Data sheet for traceability, but never
         # appear in the interpretation overview the patient report shows.
@@ -297,9 +302,17 @@ class PatientExcelReportWriter:
         ws.merge_cells("A1:J2")
         ws["A1"] = f"VPM-tolkning – {patient_id}"
         self._title_style(ws["A1"])
-        self._info_row(ws, 5, "DIT/pasientnummer", patient_id, end_column=10)
-        self._info_row(ws, 6, "Rapportdato", result.run_date, end_column=10)
-        self._info_row(ws, 7, "Antall varianter", len(variants), end_column=10)
+        self._info_row(ws, 5, "DIT/pasientnummer", patient_id, end_column=4)
+        self._info_row(ws, 6, "Rapportdato", result.run_date, end_column=4)
+        self._info_row(ws, 7, "Antall varianter", len(variants), end_column=4)
+        ws.merge_cells("E4:J7")
+        ws["E4"] = patient_comment
+        ws["E4"].alignment = Alignment(vertical="top", wrap_text=True)
+        for row in ws.iter_rows(min_row=4, max_row=7, min_col=5, max_col=10):
+            for cell in row:
+                cell.fill = PatternFill("solid", fgColor=self.colors["pale_orange"])
+        for row in range(4, 8):
+            ws.row_dimensions[row].height = 24
 
         ws.merge_cells("A9:J9")
         ws["A9"] = "Varianter og signifikant evidens"
@@ -371,8 +384,15 @@ class PatientExcelReportWriter:
                     ws.cell(row, column).fill = PatternFill(
                         "solid", fgColor=fill_color
                     )
-            evidence_lines = str(values[3] or "").count("\n") + 1
-            ws.row_dimensions[row].height = max(30, evidence_lines * 15)
+            # Excel does not auto-fit wrapped cells with an explicit height.
+            # Allow for wrapping, not just newline characters (HSMD is last).
+            widths = [14, 31, 25, 52, 32, 22, 22, 22, 22, 22]
+            lines = max(
+                sum(max(1, len(textwrap.wrap(line, max(1, width - 7))))
+                    for line in str(value or "").split("\n"))
+                for value, width in zip(values, widths)
+            )
+            ws.row_dimensions[row].height = min(409, max(108, lines * 16 + 12))
         ws.column_dimensions["A"].width = 14
         ws.column_dimensions["B"].width = 31
         ws.column_dimensions["C"].width = 25
@@ -654,7 +674,9 @@ class PatientExcelReportWriter:
             return row + 1
         with PillowImage.open(path) as source:
             width, height = source.size
-        scale = min(1.0, 1120 / max(1, width), 2200 / max(1, height))
+        # Keep long patient reports readable; reserve additional rows instead
+        # of shrinking their text to fit an arbitrary image-height limit.
+        scale = min(1.0, 1120 / max(1, width))
         image = ExcelImage(str(path))
         image.width = max(1, int(width * scale))
         image.height = max(1, int(height * scale))
@@ -777,6 +799,7 @@ class PatientExcelReportWriter:
                 status_labels = {
                     "found": "Funnet",
                     "not_found": "Ikke funnet",
+                    "not_applicable": "Ikke funnet" if item.database == "COSMIC" else "Ikke relevant",
                     "invalid_query": "Mangler søkegrunnlag",
                     "login_required": "Innlogging kreves",
                     "rate_limited": "Ratebegrenset",

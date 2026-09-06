@@ -45,19 +45,55 @@ def test_primary_and_secondary_text_actions_are_at_least_44px(qt_app):
 
 def test_evidence_actions_fit_target_window_sizes(qt_app):
     window = MainWindow()
+    window._switch_page(2)
     window.show()
     for width, height in [(1120, 720), (1440, 900)]:
         window.resize(width, height)
         qt_app.processEvents()
         viewport = window.database_scroll.viewport().rect()
         for button in [
-            window.search_btn,
             window.rewrite_btn,
             window.patient_excel_btn,
         ]:
             point = button.mapTo(window.database_scroll.viewport(), button.rect().topLeft())
             assert point.x() >= 0
             assert point.x() + button.width() <= viewport.width()
+
+
+def test_entire_evidence_page_scrolls_and_import_keeps_log(qt_app):
+    window = MainWindow()
+    window._switch_page(2)
+    window.resize(1120, 720)
+    window.show()
+    qt_app.processEvents()
+    before = window.search_btn.mapTo(window, window.search_btn.rect().topLeft())
+    window.database_scroll.verticalScrollBar().setValue(window.database_scroll.verticalScrollBar().maximum())
+    qt_app.processEvents()
+    after = window.search_btn.mapTo(window, window.search_btn.rect().topLeft())
+    assert after.y() < before.y()
+    assert not hasattr(window, "evidence_splitter")
+    assert not hasattr(window, "evidence_log")
+    assert window.database_scroll.geometry().top() == 0
+    assert window.database_scroll.geometry().bottom() >= window.database_scroll.parentWidget().height() - 2
+    window._log('Test log message')
+    assert 'Test log message' in window.log.toPlainText()
+    window.close()
+
+
+def test_import_fields_do_not_overlap_in_short_window(qt_app):
+    window = MainWindow()
+    window.resize(1120, 720)
+    window.show()
+    qt_app.processEvents()
+    previous_bottom = -1
+    for control in (window.input_edit, window.output_edit, window.run_date):
+        top = control.mapTo(window.import_scroll.widget(), control.rect().topLeft()).y()
+        assert control.height() >= 44
+        assert top > previous_bottom
+        previous_bottom = top + control.height()
+    assert window.log.height() >= 120
+    assert window.import_scroll.verticalScrollBar().maximum() > 0
+    window.close()
 
 
 def test_database_tab_contains_current_sources(qt_app):
@@ -104,11 +140,9 @@ def test_database_tab_contains_current_sources(qt_app):
     assert not hasattr(window, "clinvar_key_edit")
     assert not hasattr(window, "oncokb_key_edit")
     assert not hasattr(window, "franklin_key_edit")
-    headers = [
-        window.evidence_table.horizontalHeaderItem(index).text()
-        for index in range(window.evidence_table.columnCount())
-    ]
-    assert headers == ["Sample", "Gene", "HGVSc", *window.databases]
+    assert not hasattr(window, "evidence_table")
+    assert not hasattr(window, "worker_count")
+    assert not hasattr(window, "browser_security_label")
 
 
 def test_artifact_settings_show_catalog_and_af_exception(qt_app):
@@ -219,7 +253,7 @@ def test_status_matrix_renders_visible_text_for_every_state(qt_app):
     assert matrix.item(0, 4).text() == "Save pending"
 
 
-def test_activity_updates_current_provider_and_timeline(qt_app):
+def test_activity_is_logged_without_duplicate_evidence_panel(qt_app):
     window = MainWindow()
 
     window._activity_received(
@@ -233,9 +267,20 @@ def test_activity_updates_current_provider_and_timeline(qt_app):
         )
     )
 
-    assert window.current_activity.provider_value.text() == "Franklin"
-    assert window.current_activity.patient_value.text() == "SYNTHETIC02"
-    assert window.activity_timeline.rowCount() == 1
+    assert not hasattr(window, "current_activity")
+    assert "Population frequencies" in window.log.toPlainText()
+
+
+def test_evidence_has_run_queue_without_redundant_retry_button(qt_app):
+    from PyQt6.QtWidgets import QLabel
+    window = MainWindow()
+    labels = {label.text() for label in window.database_scroll.findChildren(QLabel)}
+    assert "Run queue" in labels
+    assert "Research queue" not in labels
+    assert not hasattr(window, "rerun_failed_btn")
+    window._set_busy("Searching")
+    window._set_ready()
+    window.close()
 
 
 def test_locked_report_exposes_retry_action(qt_app, tmp_path):
@@ -624,7 +669,8 @@ def test_application_icon_is_packaged_and_loaded(qt_app):
 
     assert window.app_icon_path.exists()
     assert window.app_icon_path.name == "vpm-tolkning-icon.png"
-    assert window.windowTitle() == "Myolid Tolkning"
+    assert window.windowTitle() == "VPM Tolkning"
+    assert ":not(" not in window.styleSheet()
     assert not window.windowIcon().isNull()
     with Image.open(window.app_icon_path) as icon:
         corners = [

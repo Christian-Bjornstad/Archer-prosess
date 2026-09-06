@@ -24,7 +24,7 @@ class NavigationRail(QFrame):
         brand_mark.setObjectName("BrandMark")
         brand_mark.setFixedSize(48, 48)
         brand_mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        brand_mark.setAccessibleName("Myolid Tolkning application icon")
+        brand_mark.setAccessibleName("VPM Tolkning application icon")
         if app_icon_path.exists():
             brand_mark.setPixmap(
                 QPixmap(str(app_icon_path)).scaled(
@@ -35,7 +35,8 @@ class NavigationRail(QFrame):
                 )
             )
         layout.addWidget(brand_mark)
-        title = QLabel("Myolid Tolkning")
+        title = QLabel("VPM Tolkning")
+        title.setWordWrap(True)
         title.setObjectName("BrandTitle")
         layout.addWidget(title)
         layout.addSpacing(20)
