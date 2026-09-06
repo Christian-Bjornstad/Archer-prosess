@@ -17,7 +17,7 @@ FIXTURE = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
 def test_cosmic_not_applicable_is_norwegian():
     assert PatientExcelReportWriter()._compact_evidence([
         DatabaseEvidence("COSMIC", "not_applicable", "No COSMIC ID")
-    ]) == "Ikke relevant"
+    ]) == "Ikke funnet"
 
 
 def test_patient_comment_and_long_hsmd_survive_regeneration(tmp_path):

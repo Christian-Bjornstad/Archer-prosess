@@ -18,7 +18,7 @@
   activity/log tabs, evidence matrix, fixed serial-worker field and privacy notice
   are removed. Serial processing and privacy safeguards are unchanged. Current
   activity remains in the page, and messages still go to the Import log.
-- COSMIC `not_applicable` displays as `Ikke relevant` in Oversikt.
+- COSMIC `not_applicable` displays as `Ikke funnet` in Oversikt (display text only; internal status unchanged).
 
 ## Concurrency assessment (not enabled)
 

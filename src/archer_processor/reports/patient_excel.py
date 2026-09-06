@@ -799,7 +799,7 @@ class PatientExcelReportWriter:
                 status_labels = {
                     "found": "Funnet",
                     "not_found": "Ikke funnet",
-                    "not_applicable": "Ikke relevant",
+                    "not_applicable": "Ikke funnet" if item.database == "COSMIC" else "Ikke relevant",
                     "invalid_query": "Mangler søkegrunnlag",
                     "login_required": "Innlogging kreves",
                     "rate_limited": "Ratebegrenset",
