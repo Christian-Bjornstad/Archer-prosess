@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont, PngImagePlugin
 
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
 from archer_processor.services.genomic_notation import format_mtbp_grch37
@@ -1634,14 +1634,17 @@ class BrowserReviewService:
                         except Exception:
                             report_captures[analysis_id] = None
                     full_report_path = report_captures[analysis_id]
-                    if evidence.status == "found":
+                    if evidence.status == "found" or (
+                        full_report_path is not None and evidence.raw.get("gene_candidate_count", 0) > 0
+                    ):
                         try:
                             if full_report_path is not None:
                                 screenshot_path = self._crop_mtbp_variant_from_report(page, variant, artifact_directory, full_report_path)
                             else:
                                 screenshot_path = self._capture_mtbp_variant_screenshot(page, variant, artifact_directory)
                         except IncompleteCaptureError as exc:
-                            evidence.status = "partial_capture"
+                            if evidence.status == "found":
+                                evidence.status = "partial_capture"
                             evidence.summary = (
                                 f"{evidence.summary} MTBP screenshot requires retry."
                             ).strip()
@@ -1936,7 +1939,9 @@ class BrowserReviewService:
                     evidence = parsed[key]
                     evidence.accession = query
                     screenshot_path = None
-                    if evidence.status == "found":
+                    if evidence.status == "found" or (
+                        full_report_path is not None and evidence.raw.get("gene_candidate_count", 0) > 0
+                    ):
                         try:
                             if full_report_path is not None:
                                 screenshot_path = self._crop_mtbp_variant_from_report(
@@ -1947,7 +1952,8 @@ class BrowserReviewService:
                                     page, variant, artifact_directory
                                 )
                         except IncompleteCaptureError as exc:
-                            evidence.status = "partial_capture"
+                            if evidence.status == "found":
+                                evidence.status = "partial_capture"
                             evidence.summary = (
                                 f"{evidence.summary} MTBP screenshot requires retry."
                             ).strip()
@@ -3169,20 +3175,30 @@ class BrowserReviewService:
         self, page: Any, variant: VariantRecord, artifact_directory: Path,
         full_report_path: Path,
     ) -> Path:
-        """Reuse the patient capture with its table heading and exact variant row."""
+        """Reuse frozen report pixels; ambiguous matches are labelled gene context only."""
         try:
             geometry = json.loads(full_report_path.with_suffix(".geometry.json").read_text(encoding="utf-8"))
-            matches = [entry for entry in geometry["rows"]
-                       if _mtbp_screenshot_row_matches(entry["gene"] + " " + entry["identity"], variant)
-                       and _mtbp_gene_symbol(entry["gene"]).casefold() == variant.symbol.casefold()]
-            if len(matches) != 1:
-                raise ValueError("MTBP capture has no unique exact variant row")
-            entry = matches[0]
+            gene_rows = [entry for entry in geometry["rows"]
+                         if variant.symbol and _mtbp_gene_symbol(entry["gene"]).casefold() == variant.symbol.casefold()]
+            matches = [entry for entry in gene_rows
+                       if _mtbp_screenshot_row_matches(entry["gene"] + " " + entry["identity"], variant)]
+            gene_context = len(matches) != 1
+            selected = gene_rows if gene_context else matches
+            if not selected:
+                raise ValueError("MTBP capture has no rows for this gene")
+            caption = f"{variant.symbol}: genkontekst - variant ikke entydig; alle genets rader vises."
+            metadata = PngImagePlugin.PngInfo()
+            metadata.add_text("match_scope", "gene_context" if gene_context else "exact_variant")
+            metadata.add_text("caption", caption if gene_context else "Exact variant")
             path = self._screenshot_path(artifact_directory, "MTBP", variant)
             with Image.open(full_report_path) as source:
                 sx, sy = source.width / geometry["width"], source.height / geometry["height"]
                 pieces = []
-                for box in (entry.get("header"), entry["row"]):
+                # Repeat the section and column heading for each selected row,
+                # preserving putative/unknown context and the complete A/B/C cell.
+                boxes = [box for entry in selected
+                         for box in (entry.get("section"), entry.get("header"), entry["row"])]
+                for box in boxes:
                     if not box:
                         continue
                     bounds = (round(box["x"] * sx), round(box["y"] * sy),
@@ -3193,12 +3209,26 @@ class BrowserReviewService:
                             or bounds[3] <= bounds[1]):
                         raise ValueError("MTBP row outside captured report")
                     pieces.append(source.crop(bounds).convert("RGB"))
-                combined = Image.new("RGB", (max(p.width for p in pieces), sum(p.height for p in pieces)), "white")
+                width = max(p.width for p in pieces)
+                if gene_context:
+                    # The warning is part of the pixels, not just optional PNG metadata.
+                    import textwrap
+                    lines = textwrap.wrap(caption, width=max(12, width // 14))
+                    banner = Image.new("RGB", (width, 30 * len(lines) + 16), "#fff0cf")
+                    draw = ImageDraw.Draw(banner)
+                    try:
+                        font = ImageFont.truetype("arial.ttf", 20)
+                    except OSError:
+                        font = ImageFont.load_default()
+                    for index, line in enumerate(lines):
+                        draw.text((8, 8 + index * 30), line, fill="#453019", font=font)
+                    pieces.insert(0, banner)
+                combined = Image.new("RGB", (width, sum(p.height for p in pieces)), "white")
                 y = 0
                 for piece in pieces:
                     combined.paste(piece, (0, y))
                     y += piece.height
-                combined.save(path)
+                combined.save(path, pnginfo=metadata)
             validation = self.capture_validator(path)
             if not validation.valid:
                 raise IncompleteCaptureError(validation)
@@ -3228,9 +3258,12 @@ class BrowserReviewService:
                     const header=table.rows[0];
                     if (!header || header.cells[0]?.innerText.trim() !== 'Gene'
                         || header.cells[2]?.innerText.trim() !== 'Alteration') return [];
+                    const section = table.closest('.accordion-item')?.firstElementChild;
                     return [...table.rows].slice(1).filter(row => row.getBoundingClientRect().height > 0)
                         .map(row => ({gene:row.cells[0]?.innerText || '',
                         identity:(row.cells[2]?.innerText || '') + '\\n' + (row.cells[2]?.textContent || ''),
+                            section:section && !section.contains(table) && section.getBoundingClientRect().height > 0
+                                ? rect(section) : null,
                             header:rect(header), row:rect(row)}));
                 });
                 return {width:document.documentElement.scrollWidth,

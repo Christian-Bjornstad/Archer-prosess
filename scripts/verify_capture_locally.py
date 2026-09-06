@@ -42,17 +42,19 @@ def main():
                 assert green == blue == (0, 0)
                 print(f"PASS zoom={zoom}: {image.size}")
         html = """<html><body style="margin:0"><h1>Patient report</h1>
+        <div class="accordion-item"><h2 style="background:cyan">Putative unknown variants</h2>
         <div id="scroll" style="height:180px;overflow:auto">
         <table style="width:800px"><tr><th>Gene</th><th>Gene Info</th><th>Alteration</th><th>Evidence</th><th>Reported biomarker(s)</th></tr>
         <tr style="height:300px"><td>TP53</td><td></td><td><span>p.Arg175His</span><span>exon 5</span></td><td>A</td><td></td></tr>
         <tr style="height:300px;background:lime"><td>DDX41</td><td></td><td>p.Arg525His</td><td>B</td><td></td></tr>
-        </table></div></body></html>"""
+        </table></div></div></body></html>"""
         page.goto("data:text/html," + quote(html))
         page.evaluate("document.querySelector('#scroll').scrollTop=80")
         service = BrowserReviewService(profile_root=output, capture_validator=lambda _: CaptureValidation(True, 'ok', 800, 700, 1))
         full = service._capture_mtbp_full_report(page, output, "nested-scroll")
         geometry = json.loads(full.with_suffix('.geometry.json').read_text())
         assert len(geometry['rows']) == 2
+        assert geometry['rows'][1]['section']['height'] > 0
         assert geometry['rows'][1]['row']['y'] + geometry['rows'][1]['row']['height'] <= geometry['height']
         assert 'p.Arg175His' in geometry['rows'][0]['identity']
         assert page.evaluate("document.querySelector('#scroll').scrollTop") == 80
@@ -67,8 +69,11 @@ def main():
         variant = replace(variant, symbol='DDX41', hgvsc='', hgvsp='p.Arg525His')
         crop = service._crop_mtbp_variant_from_report(page, variant, output, full)
         with Image.open(crop) as image:
-            r,g,b = image.convert('RGB').getpixel((image.width-20, image.height//2))
+            # Section title can be wider than the table; sample inside the row.
+            r,g,b = image.convert('RGB').getpixel((image.width//2, image.height-20))
             assert g > r + 100 and g > b + 100
+            assert any(g > r + 100 and b > r + 100 for r,g,b
+                       in image.convert('RGB').crop((0,0,image.width,35)).getdata())
         print('PASS MTBP: correct second variant cropped from shared report')
         html = """<html><body style="margin:0"><div id="scroll" style="width:500px;height:240px;overflow:auto">
         <div style="width:1000px"><h1 style="background:lime">TP53</h1>

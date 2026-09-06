@@ -36,7 +36,8 @@ def test_clip_maps_css_to_scaled_document_pixels(tmp_path):
         assert cropped.getextrema() == ((255, 255), (0, 0), (0, 0))
 
 
-def test_mtbp_crops_only_exact_row_from_saved_patient_capture(tmp_path):
+@pytest.mark.parametrize("ambiguous_identity", [False, True])
+def test_mtbp_crops_only_exact_row_from_saved_patient_capture(tmp_path, ambiguous_identity):
     result = VariantProcessor().process(Path(__file__).parent / "fixtures/sample_variants.tsv", "2026-09-05", tmp_path / "review.xlsx")
     variant = result.variants[3]
     service = BrowserReviewService(profile_root=tmp_path, capture_validator=lambda _: CaptureValidation(True, "ok", 100, 100, 1.0))
@@ -56,7 +57,33 @@ def test_mtbp_crops_only_exact_row_from_saved_patient_capture(tmp_path):
         assert cropped.size == (400, 120)
         assert cropped.getpixel((20, 20)) == (0, 0, 255)
         assert cropped.getpixel((20, 70)) == (255, 0, 0)
-    geometry["rows"].append(entry)
+    geometry["rows"].append({**entry, "identity": "c.9999G>A",
+                             "row": {"x": 0, "y": 140, "width": 200, "height": 40}})
+    metadata.write_text(json.dumps(geometry))
+    output = service._crop_mtbp_variant_from_report(None, variant, tmp_path, full)
+    with Image.open(output) as cropped:
+        assert cropped.size == (400, 120)
+        assert cropped.info["match_scope"] == "exact_variant"
+    geometry["rows"] = [entry]
+    # When no exact identity is available, preserve ALL rows of this gene,
+    # including section context, but never another gene's pixels.
+    source.paste("yellow", (0, 80, 400, 120))
+    source.paste("green", (0, 280, 400, 360))
+    source.save(full)
+    entry["identity"] = variant.hgvsc if ambiguous_identity else "Mutation"
+    entry["section"] = {"x": 0, "y": 40, "width": 200, "height": 20}
+    geometry["rows"].extend([
+        {**entry, "row": {"x": 0, "y": 140, "width": 200, "height": 40}},
+        {**entry, "gene": "OTHER"},
+    ])
+    metadata.write_text(json.dumps(geometry))
+    output = service._crop_mtbp_variant_from_report(None, variant, tmp_path, full)
+    with Image.open(output) as cropped:
+        colours = set(cropped.convert("RGB").getdata())
+        assert {(255, 255, 0), (255, 0, 0), (0, 128, 0)} <= colours
+        assert cropped.info["match_scope"] == "gene_context"
+        assert "ikke entydig" in cropped.info["caption"]
+    geometry["rows"] = [{**entry, "gene": "OTHER"}]
     metadata.write_text(json.dumps(geometry))
     with pytest.raises(IncompleteCaptureError):
         service._crop_mtbp_variant_from_report(None, variant, tmp_path, full)
