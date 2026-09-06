@@ -72,9 +72,12 @@ def test_search_controls_and_log_stay_available_when_content_scrolls(qt_app):
     after = window.search_btn.mapTo(window, window.search_btn.rect().topLeft())
     assert before == after
     assert before.x() >= 0 and before.x() + window.search_btn.width() <= window.width()
-    assert window.activity_timeline.isVisible()
+    assert not hasattr(window, "evidence_splitter")
+    assert not hasattr(window, "evidence_log")
+    # All space below the fixed command bar belongs to the main scroll area.
+    assert window.database_scroll.geometry().bottom() >= window.database_scroll.parentWidget().height() - 2
     window._log('Test log message')
-    assert 'Test log message' in window.evidence_log.toPlainText()
+    assert 'Test log message' in window.log.toPlainText()
     window.close()
 
 
@@ -269,7 +272,7 @@ def test_activity_updates_current_provider_and_timeline(qt_app):
 
     assert window.current_activity.provider_value.text() == "Franklin"
     assert window.current_activity.patient_value.text() == "SYNTHETIC02"
-    assert window.activity_timeline.rowCount() == 1
+    assert "Population frequencies" in window.log.toPlainText()
 
 
 def test_locked_report_exposes_retry_action(qt_app, tmp_path):

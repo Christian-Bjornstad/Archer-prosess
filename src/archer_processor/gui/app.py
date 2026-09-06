@@ -33,7 +33,6 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
-    QSplitter,
     QTabWidget,
     QStatusBar,
     QTableWidget,
@@ -74,7 +73,6 @@ from archer_processor.gui.widgets.navigation import NavigationRail
 from archer_processor.gui.widgets.run_status import RunStatusStrip
 from archer_processor.gui.widgets.status_matrix import StatusMatrix
 from archer_processor.gui.widgets.activity_timeline import (
-    ActivityTimeline,
     CurrentActivityPanel,
 )
 
@@ -1170,6 +1168,7 @@ class MainWindow(QMainWindow):
         self.database_scroll = QScrollArea()
         self.database_scroll.setWidgetResizable(True)
         self.database_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.database_scroll.verticalScrollBar().setSingleStep(32)
         self.database_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
@@ -1262,15 +1261,6 @@ class MainWindow(QMainWindow):
         self.status_matrix.setMinimumHeight(210)
         status_layout.addWidget(self.status_matrix)
         layout.addWidget(status_group)
-
-        timeline_group = QTabWidget()
-        timeline_group.setMinimumHeight(150)
-        self.activity_timeline = ActivityTimeline()
-        timeline_group.addTab(self.activity_timeline, "Aktivitet")
-        self.evidence_log = QPlainTextEdit()
-        self.evidence_log.setReadOnly(True)
-        self.evidence_log.setDocument(self.log.document())
-        timeline_group.addTab(self.evidence_log, "Full logg · marker og kopier")
 
         options = QGroupBox("Search scope and browser session")
         options_grid = QGridLayout(options)
@@ -1415,12 +1405,7 @@ class MainWindow(QMainWindow):
         evidence_layout.addWidget(self.evidence_table)
         layout.addWidget(evidence_group)
         self.database_scroll.setWidget(database_content)
-        self.evidence_splitter = QSplitter(Qt.Orientation.Vertical)
-        self.evidence_splitter.setChildrenCollapsible(False)
-        self.evidence_splitter.addWidget(self.database_scroll)
-        self.evidence_splitter.addWidget(timeline_group)
-        self.evidence_splitter.setSizes([500, 190])
-        page_layout.addWidget(self.evidence_splitter, 1)
+        page_layout.addWidget(self.database_scroll, 1)
         self._update_evidence_summary()
         return page
 
@@ -2604,7 +2589,6 @@ class MainWindow(QMainWindow):
 
     def _activity_received(self, activity: RunActivity) -> None:
         self.current_activity.set_activity(activity)
-        self.activity_timeline.add_activity(activity)
         self._log(activity.message or activity.action)
 
     def _refresh_variant_table(self) -> None:
@@ -3073,7 +3057,6 @@ class MainWindow(QMainWindow):
                 color: #536977;
                 border: 1px solid #C6D3DB;
             }}
-            QSplitter::handle {{ background: #D3E0E6; height: 7px; }}
             QTabBar::tab {{ padding: 8px 12px; background: #E7EEF2; color: #163445; }}
             QTabBar::tab:selected {{ background: white; border-top: 2px solid #087EA4; }}
             QFrame#MetricCard {{
