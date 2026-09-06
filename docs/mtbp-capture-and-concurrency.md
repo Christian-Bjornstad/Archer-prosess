@@ -16,8 +16,10 @@
   classification as exact evidence. They may accompany not-found/ambiguous results.
 - Evidence has one scrolling area including search controls. The duplicate
   activity/log tabs, evidence matrix, fixed serial-worker field and privacy notice
-  are removed. Serial processing and privacy safeguards are unchanged. Current
-  activity remains in the page, and messages still go to the Import log.
+  are removed. The command group is named Run queue. The duplicate current-activity
+  panel and Rerun Failed Sources button are also removed; progress remains in the
+  top progress area and messages still go to the Import log. Serial processing,
+  queue resume and privacy safeguards are unchanged.
 - COSMIC `not_applicable` displays as `Ikke funnet` in Oversikt (display text only; internal status unchanged).
 
 ## Concurrency assessment (not enabled)

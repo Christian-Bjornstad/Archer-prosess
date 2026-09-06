@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="src/archer_processor/assets/vpm-tolkning-icon.png" alt="Myolid Tolkning icon" width="104" height="104">
+  <img src="src/archer_processor/assets/vpm-tolkning-icon.png" alt="VPM Tolkning icon" width="104" height="104">
 </p>
 
-<h1 align="center">Myolid Tolkning</h1>
+<h1 align="center">VPM Tolkning</h1>
 
 <p align="center">
   A focused Windows workstation for somatic variant review, evidence collection,<br>
@@ -21,13 +21,15 @@
   <img src="docs/assets/vpm-tolkning-evidence.png" alt="VPM Tolkning evidence workspace" width="100%">
 </p>
 
+<p align="center"><sub>Actual desktop UI with synthetic demonstration data. No live patient data or provider results.</sub></p>
+
 > [!IMPORTANT]
-> Myolid Tolkning is a research and interpretation-support tool. Database findings
+> VPM Tolkning is a research and interpretation-support tool. Database findings
 > and generated reports must be reviewed by qualified personnel before clinical use.
 
 ## What it does
 
-Myolid Tolkning turns an Archer Analysis TSV export into a controlled review and
+VPM Tolkning turns an Archer Analysis TSV export into a controlled review and
 evidence workflow. It keeps variant selection, browser research, screenshots,
 audit data, and patient workbooks connected without sending patient or sample
 identifiers to the evidence providers.
@@ -60,7 +62,7 @@ flowchart LR
 4. Select the evidence sources and run the patient-by-patient search.
 5. Verify the compact findings and captured source images.
 6. In **Patient progress**, select one or more patient rows, or leave the table unselected for all patients.
-7. Click **Generer VEDLEGG_APP**. Reports are written to `VEDLEGG_APP` beside the review workbook as `<DIT>_VPM_Tolkning.xlsx`.
+7. Click **Generer VEDLEGG_APP**. Reports are written to `VEDLEGG_APP` beside the review workbook as `<DIT>_VPM_Tolkning_APP.xlsx`.
 
 Use **Pause Search** to pause at the next safe browser checkpoint and **Resume
 Search** to continue the same queue without repeating completed work. **Stop
@@ -75,10 +77,14 @@ Manual **Sign In** windows still open visibly. Variant-to-variant pacing remains
 randomized according to Settings; switching between providers uses a fixed 3-second
 transition.
 
-The desktop interface is organised as an operations cockpit. A persistent strip
+The desktop interface is organised around four pages: **Import**, **Variants**,
+**Evidence**, and **Settings**. A persistent progress strip
 distinguishes Ready, Running, Paused, Interrupted, Complete, Retry available, and
-Report save pending. The Evidence workspace keeps the current task, a
-patient-by-provider matrix, and timestamped activity visible. Startup can offer
+Report save pending. The entire Evidence workspace scrolls, including **Run queue**,
+source selection, **Patient progress**, browser sessions and report controls.
+There is no duplicate activity panel or evidence matrix; the copyable, timestamped
+log lives in **Import**. Resume incomplete work from the main queue controls.
+Startup can offer
 the most recent local workbook, but it never loads data or contacts a provider
 until **Restore analysis** is selected. **Retry Pending Saves** retries only
 locked report files and never repeats database searches.
@@ -90,7 +96,7 @@ the provider exposes that choice.
 
 | Source | Capture strategy | Key safeguards |
 | --- | --- | --- |
-| **MTBP** | One pseudonymous combined report per patient, one full report image, and local alteration-centric crops | Transcript HGVS first; only rejected variants change to validated GRCh37 genomic fallback before the patient batch is resubmitted; returned variant identity is checked; successfully captured reports are deleted from the portal and personal report URLs are not exported |
+| **MTBP** | One combined report per patient; full image in Vedlegg and local variant crops with section headings and A/B/C evidence | Gene + protein matching takes priority for crops, then cDNA when protein identity is unavailable. Unclear matches include all rows of that gene with a visible genkontekst warning; this does not upgrade the database match status. Only rejected input variants use GRCh37 genomic fallback. |
 | **Franklin** | Classification-only ACMG/Oncology overviews, each named evidence card, Predictions, and Population Frequencies | Explicit **hg19** + **Somatic** search; capture bounds include a fixed safety margin on both sides and space above the heading, clamped to the document; ACMG stops after De Novo Data; Somatic Clinical Evidence and Add More Evidence are excluded; blank, narrow, or truncated captures are rejected and retried on resume |
 | **ClinVar** | Variant title and focused germline/somatic classification summary | Opens a candidate only after chromosome, VCF position, reference, alternate, and **GRCh37** assembly all match exactly; older unverified results are queued for verification |
 | **OncoKB** | Variant Overview and Mutation Effect | Rejects the cookie overlay before taking the screenshot |
@@ -161,21 +167,26 @@ row height.
 
 ### Patient workbooks
 
-Patient reports are named `<DIT>_VPM_Tolkning.xlsx` and contain:
+Patient reports are named `<DIT>_VPM_Tolkning_APP.xlsx` (for example,
+`26OUM12345_VPM_Tolkning_APP.xlsx`) and contain:
 
 - **Oversikt** — compact findings such as `ClinVar – Benign`, plus source links,
   a manual **Kommentar** column, and a manual `HSMD -` line. Kommentar and HSMD
   text follow the variant when a workbook is regenerated and AF order changes.
-- **Vedlegg** — the DIT identifier and space for manual additions.
+  A pale-orange merged **E4:J7** box holds patient-level comments and is preserved
+  on regeneration. COSMIC's not-applicable display text is **Ikke funnet**;
+  the internal status remains unchanged.
+- **Vedlegg** — the complete combined MTBP report, retained alongside the variant crops.
 - **One sheet per variant** — linked compact evidence followed by embedded screenshots with plain, non-linked captions.
 
 Unique genes use the gene symbol as the sheet name. If a patient has multiple
 variants in the same gene, the protein change is added; the coding-DNA change is
 used when protein information is unavailable.
 
-Each report is updated beside the processed workbook after that patient finishes.
-If a report is open in Excel, its save is marked pending and retried during final
-reconciliation without stopping the evidence run.
+Patient reports are generated **only when the report button is pressed**, not
+automatically during database searches. Existing evidence and screenshot paths
+are reused. Close the target workbook in Excel before regenerating it; locked
+report saves can be retried with **Retry Pending Saves** without repeating searches.
 
 ## Resume a previous analysis
 
@@ -260,6 +271,20 @@ Run the full automated test suite:
 pytest -q
 ```
 
+Exercise capture geometry against local synthetic HTML in real Edge, without
+contacting evidence providers:
+
+```powershell
+$env:PYTHONPATH = "$PWD/src"
+python scripts/verify_capture_locally.py
+```
+
+Refresh the README screenshot from the real PyQt interface with synthetic data:
+
+```powershell
+python scripts/render_readme_screenshot.py
+```
+
 Project layout:
 
 ```text
@@ -274,12 +299,16 @@ src/archer_processor/
 
 tests/          Unit and workflow regression tests
 docs/           Workflow and design notes
-design-system/  Myolid Tolkning visual and interaction rules
+design-system/  VPM Tolkning visual and interaction rules
 ```
 
 ## Status
 
-Myolid Tolkning is under active development for a specialised laboratory workflow.
+VPM Tolkning is under active development for a specialised laboratory workflow.
 Provider websites can change without notice, so browser selectors and evidence
 boundaries are intentionally fail-closed and covered by regression tests wherever
 possible.
+
+See [capture and concurrency notes](docs/mtbp-capture-and-concurrency.md) for the
+MTBP fallback policy and why browser searches remain serial. Parallel browser
+processing has not been enabled.
