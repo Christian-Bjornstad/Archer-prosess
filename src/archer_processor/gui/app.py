@@ -71,9 +71,6 @@ from archer_processor.gui.theme import Palette, application_stylesheet
 from archer_processor.gui.widgets.navigation import NavigationRail
 from archer_processor.gui.widgets.run_status import RunStatusStrip
 from archer_processor.gui.widgets.status_matrix import StatusMatrix
-from archer_processor.gui.widgets.activity_timeline import (
-    CurrentActivityPanel,
-)
 
 
 class ProcessingWorker(QObject):
@@ -1180,7 +1177,7 @@ class MainWindow(QMainWindow):
         command_layout = QGridLayout(command)
         command_layout.setContentsMargins(16, 13, 16, 13)
         command_copy = QVBoxLayout()
-        command_title = QLabel("Research queue")
+        command_title = QLabel("Run queue")
         command_title.setObjectName("SectionTitle")
         self.evidence_summary = QLabel("Choose sources to prepare a search")
         self.evidence_summary.setObjectName("HelperText")
@@ -1222,9 +1219,6 @@ class MainWindow(QMainWindow):
         self.stop_search_btn.clicked.connect(self._stop_evidence_search)
         command_layout.addWidget(self.stop_search_btn, 1, 2)
         layout.addWidget(command)
-
-        self.current_activity = CurrentActivityPanel()
-        layout.addWidget(self.current_activity)
 
         checks = QGroupBox("Evidence sources")
         checks.setMinimumHeight(250)
@@ -1310,20 +1304,10 @@ class MainWindow(QMainWindow):
             "Runs selected ClinVar, COSMIC, OncoKB, Franklin, and MTBP sources patient-by-patient in visible Edge."
         )
         self.browser_review_btn.clicked.connect(self._start_browser_review)
-        self.rerun_failed_btn = QPushButton("Rerun Failed Sources")
-        self.rerun_failed_btn.setFixedWidth(170)
-        self.rerun_failed_btn.setObjectName("OutlineButton")
-        self.rerun_failed_btn.setEnabled(False)
-        self.rerun_failed_btn.setToolTip(
-            "Re-runs only the variant/source lookups that ended in a retryable state "
-            "(website down, timeout, lost session). Safe to press repeatedly."
-        )
-        self.rerun_failed_btn.clicked.connect(self._rerun_failed_sources)
         options_grid.addWidget(browser_label, 3, 0)
         options_grid.addWidget(self.browser_database_combo, 3, 1)
         options_grid.addWidget(self.browser_signin_btn, 3, 2)
         options_grid.addWidget(self.browser_review_btn, 3, 3)
-        options_grid.addWidget(self.rerun_failed_btn, 4, 0)
         layout.addWidget(options)
 
         exports = QGroupBox("Reports")
@@ -1785,53 +1769,6 @@ class MainWindow(QMainWindow):
             )
             return
         self._launch_browser_review(databases)
-
-    def _rerun_failed_sources(self) -> None:
-        """Re-run only lookups that ended in a retryable state (e.g. site was down).
-
-        Completed evidence is never repeated; only variant/source pairs whose last
-        attempt produced a retryable status (error, timeout, session_lost, ...)
-        are re-queued.
-        """
-        if not self.result:
-            return
-        if (
-            self.browser_thread is not None
-            and self.browser_thread.isRunning()
-        ) or (
-            self.database_thread is not None
-            and self.database_thread.isRunning()
-        ):
-            QMessageBox.information(
-                self,
-                "Search in progress",
-                "An evidence search is already running. Wait for it to finish "
-                "before rerunning failed lookups.",
-            )
-            return
-        databases = [
-            database
-            for database in BROWSER_DATABASES
-            if _has_failed_lookups(
-                self._variants_for_search(), self.evidence, [database]
-            )
-        ]
-        if not databases:
-            QMessageBox.information(
-                self,
-                "No failed lookups",
-                "There are no failed source lookups to rerun. Everything "
-                "searched so far is complete.",
-            )
-            return
-        failed_variants = _failed_search_variants(
-            self._variants_for_search(), self.evidence, databases
-        )
-        self._log(
-            f"Manual rerun: {len(failed_variants)} failed variant lookup(s) across "
-            f"{', '.join(databases)}"
-        )
-        self._launch_browser_review(databases, variants=failed_variants)
 
     def _selected_browser_databases(self, *, api_fallback_only: bool = False) -> list[str]:
         return [
@@ -2541,7 +2478,6 @@ class MainWindow(QMainWindow):
             self._patient_report_outcome(outcome)
 
     def _activity_received(self, activity: RunActivity) -> None:
-        self.current_activity.set_activity(activity)
         self._log(activity.message or activity.action)
 
     def _refresh_variant_table(self) -> None:
@@ -2714,7 +2650,6 @@ class MainWindow(QMainWindow):
         self.stop_search_btn.setEnabled(is_search)
         self.browser_signin_btn.setEnabled(False)
         self.browser_review_btn.setEnabled(False)
-        self.rerun_failed_btn.setEnabled(False)
         self.rewrite_btn.setEnabled(False)
         self.patient_excel_btn.setEnabled(False)
         self.resume_btn.setEnabled(False)
@@ -2735,12 +2670,6 @@ class MainWindow(QMainWindow):
         self.stop_search_btn.setEnabled(False)
         self.browser_signin_btn.setEnabled(True)
         self.browser_review_btn.setEnabled(self.result is not None)
-        self.rerun_failed_btn.setEnabled(
-            self.result is not None
-            and _has_failed_lookups(
-                self._variants_for_search(), self.evidence, list(BROWSER_DATABASES)
-            )
-        )
         self.rewrite_btn.setEnabled(self.result is not None)
         self.patient_excel_btn.setEnabled(self.result is not None)
         self.resume_btn.setEnabled(True)

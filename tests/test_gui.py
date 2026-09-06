@@ -253,7 +253,7 @@ def test_status_matrix_renders_visible_text_for_every_state(qt_app):
     assert matrix.item(0, 4).text() == "Save pending"
 
 
-def test_activity_updates_current_provider_and_timeline(qt_app):
+def test_activity_is_logged_without_duplicate_evidence_panel(qt_app):
     window = MainWindow()
 
     window._activity_received(
@@ -267,9 +267,20 @@ def test_activity_updates_current_provider_and_timeline(qt_app):
         )
     )
 
-    assert window.current_activity.provider_value.text() == "Franklin"
-    assert window.current_activity.patient_value.text() == "SYNTHETIC02"
+    assert not hasattr(window, "current_activity")
     assert "Population frequencies" in window.log.toPlainText()
+
+
+def test_evidence_has_run_queue_without_redundant_retry_button(qt_app):
+    from PyQt6.QtWidgets import QLabel
+    window = MainWindow()
+    labels = {label.text() for label in window.database_scroll.findChildren(QLabel)}
+    assert "Run queue" in labels
+    assert "Research queue" not in labels
+    assert not hasattr(window, "rerun_failed_btn")
+    window._set_busy("Searching")
+    window._set_ready()
+    window.close()
 
 
 def test_locked_report_exposes_retry_action(qt_app, tmp_path):
