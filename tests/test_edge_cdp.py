@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from archer_processor.services.browser_review import BrowserReviewService
 from archer_processor.services.edge_cdp import (
     EdgeCdpError,
@@ -56,9 +58,14 @@ def test_devtools_websocket_uses_preconnected_loopback_socket(monkeypatch):
                         lambda address, timeout: transport if address == ('127.0.0.1', 9222) else None)
     def connect(url, **kwargs):
         assert kwargs['socket'] is transport
+        assert 'origin' not in kwargs
+        # websocket-client otherwise synthesizes an Origin header from the
+        # URL host, which Edge 111+ rejects when the port was chosen at
+        # runtime. Origin-less local clients stay accepted.
+        assert kwargs['suppress_origin'] is True
         return SimpleNamespace(close=lambda: None)
     monkeypatch.setattr('archer_processor.services.edge_cdp.websocket.create_connection', connect)
-    connection = _CdpConnection('ws://127.0.0.1:9222/devtools/page/test', 'http://127.0.0.1:9222')
+    connection = _CdpConnection('ws://127.0.0.1:9222/devtools/page/test')
     connection.close()
 
 
@@ -67,7 +74,7 @@ def test_failed_launch_closes_only_its_known_browser_endpoint(monkeypatch):
     from types import SimpleNamespace
     calls = []
     class Connection:
-        def __init__(self, url, origin):
+        def __init__(self, url):
             calls.append(url)
         def call(self, method, **kwargs):
             calls.append(method)
@@ -75,8 +82,7 @@ def test_failed_launch_closes_only_its_known_browser_endpoint(monkeypatch):
             calls.append('closed')
     monkeypatch.setattr('archer_processor.services.edge_cdp._CdpConnection', Connection)
     _close_failed_browser(SimpleNamespace(poll=lambda: 0),
-                          {'webSocketDebuggerUrl':'ws://127.0.0.1:9222/devtools/browser/ours'},
-                          'http://127.0.0.1:9222')
+                          {'webSocketDebuggerUrl':'ws://127.0.0.1:9222/devtools/browser/ours'})
     assert calls == ['ws://127.0.0.1:9222/devtools/browser/ours', 'Browser.close', 'closed']
 
 
@@ -120,6 +126,76 @@ def test_wait_for_url_accepts_predicate():
             return self.current
 
     Page().wait_for_url(lambda url: url.endswith("/result"), timeout=1_000)
+
+
+def test_launch_requests_dynamic_port_and_connects_to_announced_port(tmp_path, monkeypatch):
+    from archer_processor.services import edge_cdp
+
+    launches = []
+    probes = []
+
+    class Popen:
+        def __init__(self, arguments, **kwargs):
+            launches.append(list(arguments))
+            self.returncode = None
+            self._closed = False
+            port_file = Path(arguments[[str(a) for a in arguments].index(
+                next(a for a in arguments if str(a).startswith("--user-data-dir="))
+            )].split("=", 1)[1]) / "DevToolsActivePort"
+            port_file.write_text("25687\n/devtools/browser/test\n", encoding="utf-8")
+
+        def poll(self):
+            return None if not self._closed else 0
+
+        def wait(self, timeout=None):
+            return None
+
+        def terminate(self):
+            self._closed = True
+
+    def fake_http_json(url, **kwargs):
+        probes.append(url)
+        if url.endswith("/json/version"):
+            return {"webSocketDebuggerUrl": "ws://127.0.0.1:25687/devtools/browser/test"}
+        if url.endswith("/json/list"):
+            return [{"id": "page-1", "type": "page",
+                     "webSocketDebuggerUrl": "ws://127.0.0.1:25687/devtools/page/page-1"}]
+        if "/json/new" in url:
+            return {"id": "page-1", "type": "page",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1:25687/devtools/page/page-1"}
+        raise AssertionError(f"unexpected DevTools probe: {url}")
+
+    class Connection:
+        def __init__(self, websocket_url):
+            probes.append(websocket_url)
+
+        def call(self, method, params=None, **kwargs):
+            probes.append(method)
+            return {}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(edge_cdp.subprocess, "Popen", Popen)
+    monkeypatch.setattr(edge_cdp, "_http_json", fake_http_json)
+    monkeypatch.setattr(edge_cdp, "_CdpConnection", Connection)
+    monkeypatch.setattr(edge_cdp, "find_edge_executable", lambda: Path("msedge.exe"))
+
+    context = EdgeCdpContext.launch(
+        tmp_path / "profile",
+        viewport={"width": 1440, "height": 1000},
+        accept_downloads=True,
+    )
+
+    arguments = launches[0]
+    assert "--remote-debugging-port=0" in arguments
+    assert not any("--remote-allow-origins" in str(a) for a in arguments)
+    assert "--remote-debugging-address=127.0.0.1" in arguments
+    # The context must talk to the port Edge announced in DevToolsActivePort.
+    assert context.endpoint == "http://127.0.0.1:25687"
+    assert "http://127.0.0.1:25687/json/version" in probes
+    assert "http://127.0.0.1:25687/json/list" in probes
+    context.close()
 
 
 def test_edge_launcher_retries_transient_broker_failures(tmp_path, monkeypatch):
