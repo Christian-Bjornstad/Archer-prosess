@@ -4,7 +4,7 @@
 
 **Goal:** Run MTBP concurrently with the serial queue of other browser providers, and restrict COSMIC searches to COSMIC identifiers.
 
-**Architecture:** `BrowserReviewWorker` partitions each patient's selected databases into a one-provider MTBP lane and one serial other-provider lane. Two independent `BrowserReviewService` instances run through a two-worker executor, return isolated evidence maps, and are merged after completion; a captured owner-thread cancellation callback keeps stop and pause correct from executor threads.
+**Architecture:** `DatabaseWorker` and `BrowserReviewWorker` partition each patient's selected databases into a one-provider MTBP lane and one serial other-provider lane. Two independent `BrowserReviewService` instances run through a two-worker executor, return isolated evidence maps, and are merged after completion; a captured owner-thread cancellation callback keeps stop and pause correct from executor threads.
 
 **Tech Stack:** Python 3.11+, PyQt6 `QObject`/`QThread`, `concurrent.futures.ThreadPoolExecutor`, pytest.
 
@@ -76,7 +76,7 @@ git add src/archer_processor/services/browser_review.py tests/test_browser_revie
 git commit -m "fix: restrict COSMIC searches to COSMIC identifiers"
 ```
 
-### Task 2: Add bounded per-patient browser lanes
+### Task 2: Add bounded per-patient browser lanes to both run paths
 
 **Files:**
 - Modify: `src/archer_processor/gui/app.py`
@@ -84,11 +84,11 @@ git commit -m "fix: restrict COSMIC searches to COSMIC identifiers"
 
 **Interfaces:**
 - Consumes: `BrowserReviewService.search_variants(variants, databases, artifact_directory, ...)`.
-- Produces: `BrowserReviewWorker._database_lanes() -> list[tuple[str, list[str]]]` and a patient search that returns the same `dict[str, list[DatabaseEvidence]]` shape as today.
+- Produces: a shared database-lane partition plus patient searches in both worker classes that return the same `dict[str, list[DatabaseEvidence]]` shape as today.
 
 - [ ] **Step 1: Write failing tests for lane partitioning and real overlap**
 
-Create controlled fake services with `threading.Event` barriers. Assert that a patient selecting `COSMIC`, `Franklin`, and `MTBP` creates exactly two service instances, that calls are `("other", ["COSMIC", "Franklin"])` and `("mtbp", ["MTBP"])`, and that both calls enter before either is released. Also assert evidence from both calls is present in the emitted final mapping.
+Create controlled fake services with `threading.Barrier`. Assert for both the normal Evidence worker and the separate Browser Sources worker that a patient selecting `COSMIC`, `Franklin`, and `MTBP` creates two lanes, that calls contain `["COSMIC", "Franklin"]` and `["MTBP"]`, and that both calls enter before either is released. Also assert evidence from both calls is present in the final mapping.
 
 - [ ] **Step 2: Run the new worker tests and verify RED**
 
