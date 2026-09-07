@@ -9,8 +9,9 @@ ID and must never fall back to genomic position.
 
 ## Architecture
 
-For each patient, `BrowserReviewWorker` splits the selected browser databases
-into two independent lanes:
+For each patient, both `DatabaseWorker` (the normal Evidence run) and
+`BrowserReviewWorker` (the separate Browser Sources run) split the selected
+browser databases into two independent lanes:
 
 1. An MTBP lane containing only MTBP.
 2. An other-provider lane containing the remaining selected browser databases
@@ -29,11 +30,11 @@ unchanged.
 
 ## Data Flow and State
 
-Each lane returns its own evidence mapping. The owning `BrowserReviewWorker`
-merges both mappings only after the futures complete, avoiding concurrent writes
-to shared in-memory evidence. Existing checkpoint signals may still be emitted
-from either lane; Qt queues these signals back to the GUI thread, which keeps
-workbook writes serialized.
+Each lane returns its own evidence mapping. The owning worker merges both
+mappings only after the futures complete, avoiding concurrent writes to shared
+in-memory evidence. Existing checkpoint signals may still be emitted from either
+lane; Qt queues these signals back to the GUI thread, which keeps workbook writes
+serialized.
 
 The combined patient result has exactly the same shape as before. A failure in
 one lane is converted through the existing per-provider error handling and does
