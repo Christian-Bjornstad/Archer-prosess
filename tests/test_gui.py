@@ -1,6 +1,7 @@
 from datetime import datetime
 from pathlib import Path
 import re
+import threading
 import time
 
 from PIL import Image
@@ -633,6 +634,91 @@ def test_browser_worker_passes_restored_evidence_to_provider_resume(
     assert received == [{key: [prior]}]
 
 
+def test_browser_worker_overlaps_mtbp_with_serial_other_provider_lane(
+    qt_app, tmp_path, monkeypatch
+):
+    variant = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-07",
+        tmp_path / "parallel.xlsx",
+    ).variants[0]
+    key = f"{variant.sample}|{variant.hgvsc}"
+    worker = BrowserReviewWorker(
+        [variant],
+        ["Franklin", "MTBP", "COSMIC"],
+        tmp_path / "evidence",
+        AppSettings(),
+    )
+    rendezvous = threading.Barrier(2, timeout=2)
+    calls = []
+    calls_lock = threading.Lock()
+
+    class Service:
+        def search_variants(self, variants, databases, *args, **kwargs):
+            with calls_lock:
+                calls.append((threading.current_thread().name, list(databases)))
+            rendezvous.wait()
+            return {
+                key: [
+                    DatabaseEvidence(database, "found", f"{database} result")
+                    for database in databases
+                ]
+            }
+
+    monkeypatch.setattr(worker, "_build_service", lambda: Service())
+
+    evidence = worker._search_patient_lanes(
+        variant.patient_id,
+        [variant],
+        1,
+        f"Patient 1 ({variant.patient_id})",
+    )
+
+    assert {tuple(databases) for _, databases in calls} == {
+        ("COSMIC", "Franklin"),
+        ("MTBP",),
+    }
+    assert len({thread_name for thread_name, _ in calls}) == 2
+    assert {item.database for item in evidence[key]} == {
+        "COSMIC",
+        "Franklin",
+        "MTBP",
+    }
+
+
+def test_browser_worker_uses_direct_path_when_only_one_lane_is_selected(
+    qt_app, tmp_path, monkeypatch
+):
+    variant = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-07",
+        tmp_path / "single-lane.xlsx",
+    ).variants[0]
+    key = f"{variant.sample}|{variant.hgvsc}"
+    worker = BrowserReviewWorker(
+        [variant], ["MTBP"], tmp_path / "evidence", AppSettings()
+    )
+    calling_thread = threading.current_thread().name
+    observed = []
+
+    class Service:
+        def search_variants(self, variants, databases, *args, **kwargs):
+            observed.append((threading.current_thread().name, list(databases)))
+            return {key: [DatabaseEvidence("MTBP", "found", "MTBP result")]}
+
+    monkeypatch.setattr(worker, "_build_service", lambda: Service())
+
+    evidence = worker._search_patient_lanes(
+        variant.patient_id,
+        [variant],
+        1,
+        f"Patient 1 ({variant.patient_id})",
+    )
+
+    assert observed == [(calling_thread, ["MTBP"])]
+    assert evidence[key][0].database == "MTBP"
+
+
 def test_resume_keeps_unverified_and_partial_evidence_pending():
     key = "SYNTHETIC_VPM_1|NM_000546.6:c.524G>A"
     for status in (
@@ -811,6 +897,59 @@ def test_database_diagnostics_cover_token_and_manual_statuses(qt_app):
     assert diagnostics["ClinVar"].startswith("browser summary capture")
 
 
+def test_main_database_worker_overlaps_mtbp_with_other_browser_sources(
+    qt_app, tmp_path, monkeypatch
+):
+    variant = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-07",
+        tmp_path / "main-parallel.xlsx",
+    ).variants[0]
+    key = f"{variant.sample}|{variant.hgvsc}"
+    worker = DatabaseWorker(
+        [variant],
+        [],
+        ["Franklin", "MTBP", "COSMIC"],
+        tmp_path / "evidence",
+        AppSettings(),
+    )
+    rendezvous = threading.Barrier(2, timeout=2)
+    calls = []
+    calls_lock = threading.Lock()
+
+    class Service:
+        def search_variants(self, variants, databases, *args, **kwargs):
+            with calls_lock:
+                calls.append((threading.current_thread().name, list(databases)))
+            rendezvous.wait()
+            return {
+                key: [
+                    DatabaseEvidence(database, "found", f"{database} result")
+                    for database in databases
+                ]
+            }
+
+    monkeypatch.setattr(worker, "_browser_service", lambda: Service())
+
+    evidence = worker._search_browser_lanes(
+        variant.patient_id,
+        [variant],
+        1,
+        f"Patient 1 ({variant.patient_id})",
+    )
+
+    assert {tuple(databases) for _, databases in calls} == {
+        ("COSMIC", "Franklin"),
+        ("MTBP",),
+    }
+    assert len({thread_name for thread_name, _ in calls}) == 2
+    assert {item.database for item in evidence[key]} == {
+        "COSMIC",
+        "Franklin",
+        "MTBP",
+    }
+
+
 def test_database_worker_completes_all_sources_before_next_patient(
     qt_app, tmp_path, monkeypatch
 ):
@@ -950,7 +1089,7 @@ def test_database_worker_completes_all_sources_before_next_patient(
     assert 10 <= sum(slept) <= 20
     assert all(delay <= 0.25 for delay in slept)
     assert report_events == []
-    assert prior_snapshots == [restored_evidence, restored_evidence]
+    assert prior_snapshots == [restored_evidence] * 4
 
 
 def test_stop_search_requests_safe_interruption_and_keeps_status(

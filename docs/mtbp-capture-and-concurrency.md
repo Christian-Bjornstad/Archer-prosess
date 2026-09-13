@@ -22,23 +22,23 @@
   queue resume and privacy safeguards are unchanged.
 - COSMIC `not_applicable` displays as `Ikke funnet` in Oversikt (display text only; internal status unchanged).
 
-## Concurrency assessment (not enabled)
+## Bounded browser concurrency
 
-The browser workflow remains sequential. The generic API service has a worker-pool
-method, but that is not a safe switch for browser-based searches: each provider
-uses persistent browser/profile state, login, navigation and capture, and MTBP
-also manages report capacity/cleanup. Sharing those mutable sessions between
-workers risks mixed pages, profile locks and misassigned captures.
+The normal Evidence run and the separate Browser Sources run now use two lanes
+per patient: MTBP runs alone while the remaining selected browser providers run
+serially in their canonical order. Each lane owns a separate service instance,
+and every provider still uses its own persistent Edge profile. There are never
+more than two browser lanes, and neither patients nor variants within a provider
+are parallelized.
 
-Potential next experiment: at most two *different* providers concurrently, each
-with its own browser/session and one in-flight request, preserving provider delays,
-backoff, pause/stop and serial checkpoint/report writes. Compare elapsed time and
-error rate on a synthetic batch before enabling. Do not parallelize patients or
-variants within MTBP, Franklin or COSMIC. Website permission/terms have not been
-established by this code review; technical feasibility is not authorization.
+Both lanes must finish before the next patient begins. Existing provider delays,
+backoff, pause/stop checks and queued checkpoint/report writes are preserved.
+Synthetic tests prove the two lanes overlap and that a single selected lane runs
+directly. A live Citrix run is still needed to measure the real elapsed-time gain
+and observe whether either portal changes its failure rate.
 
-Batch MTBP once per patient and crop locally first: this saves portal work without
-increasing concurrency. No measured speedup is claimed for the proposed experiment.
+MTBP remains batched once per patient and its variant crops are derived locally,
+so concurrency does not add per-variant MTBP requests.
 
 ## Verification and rollout
 

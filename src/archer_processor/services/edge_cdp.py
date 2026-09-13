@@ -130,12 +130,10 @@ class EdgeCdpContext:
         self,
         process: subprocess.Popen[bytes],
         endpoint: str,
-        origin: str,
         profile_directory: Path,
     ) -> None:
         self.process = process
         self.endpoint = endpoint
-        self.origin = origin
         self.profile_directory = profile_directory
         self._page_by_target: dict[str, EdgeCdpPage] = {}
         self._closed = False
@@ -151,14 +149,19 @@ class EdgeCdpContext:
     ) -> "EdgeCdpContext":
         profile_directory.mkdir(parents=True, exist_ok=True)
         edge = find_edge_executable()
-        port = _reserve_local_port()
-        origin = f"http://127.0.0.1:{port}"
-        endpoint = origin
+        # Managed Edge can hand the requested DevTools port to its process
+        # broker and announce a different port. Requesting port 0 lets Edge
+        # choose a free port itself, which the DevToolsActivePort file in the
+        # profile then reports reliably. Never assume the requested port.
+        port_file = profile_directory / "DevToolsActivePort"
+        try:
+            port_file.unlink()
+        except FileNotFoundError:
+            pass
         arguments = [
             str(edge),
-            f"--remote-debugging-port={port}",
+            "--remote-debugging-port=0",
             "--remote-debugging-address=127.0.0.1",
-            f"--remote-allow-origins={origin}",
             f"--user-data-dir={profile_directory.resolve()}",
             f"--window-size={int(viewport['width'])},{int(viewport['height'])}",
             "--no-first-run",
@@ -193,8 +196,10 @@ class EdgeCdpContext:
         browser_version: dict[str, Any] = {}
         while time.monotonic() < deadline:
             try:
+                port = _read_devtools_active_port(port_file)
+                endpoint = f"http://127.0.0.1:{port}"
                 browser_version = _http_json(f"{endpoint}/json/version", timeout=1)
-                context = cls(process, endpoint, origin, profile_directory)
+                context = cls(process, endpoint, profile_directory)
                 pages = context.pages
                 if not pages:
                     context.new_page()
@@ -216,17 +221,17 @@ class EdgeCdpContext:
                 last_error = exc
                 # Managed Edge may hand the command to its broker and let the
                 # original process exit before the broker exposes CDP. Keep
-                # probing the reserved endpoint briefly before calling that a
+                # probing the announced endpoint briefly before calling that a
                 # failed launch.
                 if process.poll() is not None and time.monotonic() - started_at >= 3:
-                    _close_failed_browser(process, browser_version, origin)
+                    _close_failed_browser(process, browser_version)
                     raise EdgeCdpError(
                         f"Microsoft Edge exited (code {process.returncode}) before "
                         f"its local DevTools endpoint opened. Last error: {last_error}. "
                         f"Profile: {profile_directory}. Startup log: {startup_log}"
                     ) from last_error
                 time.sleep(0.2)
-        _close_failed_browser(process, browser_version, origin)
+        _close_failed_browser(process, browser_version)
         raise EdgeCdpTimeout(
             "Microsoft Edge opened, but its local DevTools connection failed. "
             f"Last error: {last_error}. Profile: {profile_directory}. "
@@ -252,7 +257,6 @@ class EdgeCdpContext:
                 page = EdgeCdpPage(
                     target_id,
                     str(target["webSocketDebuggerUrl"]),
-                    self.origin,
                 )
                 self._page_by_target[target_id] = page
             pages.append(page)
@@ -267,7 +271,6 @@ class EdgeCdpContext:
         page = EdgeCdpPage(
             str(target["id"]),
             str(target["webSocketDebuggerUrl"]),
-            self.origin,
         )
         self._page_by_target[page.target_id] = page
         return page
@@ -319,7 +322,7 @@ class _Dialog:
 
 
 class _CdpConnection:
-    def __init__(self, websocket_url: str, origin: str) -> None:
+    def __init__(self, websocket_url: str) -> None:
         address = urllib.parse.urlsplit(websocket_url)
         if address.scheme != "ws" or address.hostname not in {"127.0.0.1", "localhost", "::1"}:
             raise EdgeCdpError("DevTools must use a local loopback WebSocket.")
@@ -328,11 +331,16 @@ class _CdpConnection:
             # A preconnected socket bypasses websocket-client's environment
             # proxy discovery (some versions ignore http_no_proxy without an
             # explicit proxy host). No global proxy settings are changed.
+            # suppress_origin keeps websocket-client from synthesizing an
+            # Origin header from the URL host:port. Edge 111+ rejects any
+            # Origin not allow-listed by --remote-allow-origins, and that flag
+            # cannot be set up front because the DevTools port is chosen by
+            # Edge at runtime. Origin-less local clients remain accepted.
             transport = socket.create_connection((address.hostname, address.port or 80), timeout=10)
             self._socket = websocket.create_connection(
                 websocket_url,
                 timeout=10,
-                origin=origin,
+                suppress_origin=True,
                 enable_multithread=False,
                 socket=transport,
             )
@@ -424,9 +432,9 @@ class _CdpConnection:
 
 
 class EdgeCdpPage:
-    def __init__(self, target_id: str, websocket_url: str, origin: str) -> None:
+    def __init__(self, target_id: str, websocket_url: str) -> None:
         self.target_id = target_id
-        self._connection = _CdpConnection(websocket_url, origin)
+        self._connection = _CdpConnection(websocket_url)
         self._last_url = "about:blank"
         self._connection.call("Page.enable")
         self._connection.call("Runtime.enable")
@@ -858,13 +866,13 @@ class EdgeCdpLocator:
         self.page.screenshot(path=path, clip=box)
 
 
-def _close_failed_browser(process, version: dict[str, Any], origin: str) -> None:
+def _close_failed_browser(process, version: dict[str, Any]) -> None:
     """Close only the Edge instance reached through this launch's endpoint."""
     websocket_url = str(version.get("webSocketDebuggerUrl") or "")
     if websocket_url:
         connection = None
         try:
-            connection = _CdpConnection(websocket_url, origin)
+            connection = _CdpConnection(websocket_url)
             connection.call("Browser.close", timeout_ms=2_000)
         except EdgeCdpError:
             pass
@@ -879,10 +887,19 @@ def _close_failed_browser(process, version: dict[str, Any], origin: str) -> None
             pass
 
 
-def _reserve_local_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.bind(("127.0.0.1", 0))
-        return int(listener.getsockname()[1])
+def _read_devtools_active_port(port_file: Path) -> int:
+    """Read the DevTools port Edge itself announced for this profile.
+
+    Edge writes the first free port it chose (with
+    ``--remote-debugging-port=0``) as the first line of DevToolsActivePort
+    inside the user-data-dir. This is the only reliable source: the managed
+    Edge broker may ignore a pre-reserved port request entirely.
+    """
+    lines = port_file.read_text(encoding="utf-8").splitlines()
+    port = int(lines[0])
+    if not 1 <= port <= 65535:
+        raise ValueError(f"Invalid DevTools port: {port}")
+    return port
 
 
 def _http_json(

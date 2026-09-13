@@ -5,6 +5,7 @@ import random
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -169,6 +170,21 @@ def _variants_grouped_by_patient(variants) -> list[tuple[str, list]]:
     return list(grouped.items())
 
 
+def _browser_database_lanes(databases: list[str]) -> list[tuple[str, list[str]]]:
+    requested = set(databases)
+    other_databases = [
+        database
+        for database in BROWSER_DATABASES
+        if database in requested and database != "MTBP"
+    ]
+    lanes: list[tuple[str, list[str]]] = []
+    if other_databases:
+        lanes.append(("other databases", other_databases))
+    if "MTBP" in requested:
+        lanes.append(("MTBP", ["MTBP"]))
+    return lanes
+
+
 def _merge_evidence_results(target: dict, incoming: dict) -> None:
     for key, new_items in incoming.items():
         by_database = {item.database: item for item in target.get(key, [])}
@@ -308,11 +324,16 @@ class DatabaseWorker(QObject):
         self.result = result
         self.existing_evidence = existing_evidence or {}
         self.report_variants = list(report_variants or variants)
+        self._owner_thread: QThread | None = None
 
     def run(self) -> None:
         try:
+            self._owner_thread = QThread.currentThread()
             api_service = DatabaseSearchService(self.settings)
-            browser_service = self._browser_service()
+            browser_services = {
+                lane_name: self._browser_service()
+                for lane_name, _ in self._browser_lanes()
+            }
             for database, status in api_service.database_diagnostics(self.api_databases).items():
                 self.status.emit(f"{database}: {status}")
             for database in self.browser_databases:
@@ -382,14 +403,12 @@ class DatabaseWorker(QObject):
                         self._wait(
                             f"{prefix}: website safety buffer before signed-in sources"
                         )
-                    browser_evidence = browser_service.search_variants(
+                    browser_evidence = self._search_browser_lanes(
+                        patient_id,
                         patient_variants,
-                        self.browser_databases,
-                        self.artifact_root / f"patient-{original_patient_index:03d}",
-                        progress=lambda message, p=prefix: self.status.emit(f"{p}: {message}"),
-                        completed_sources=self.completed_sources,
-                        checkpoint=self.patient_finished.emit,
-                        prior_evidence=self.existing_evidence,
+                        original_patient_index,
+                        prefix,
+                        services=browser_services,
                     )
                     _merge_evidence_results(patient_evidence, browser_evidence)
 
@@ -406,6 +425,85 @@ class DatabaseWorker(QObject):
         except Exception as exc:
             self.failed.emit(str(exc))
 
+    def _browser_lanes(self) -> list[tuple[str, list[str]]]:
+        return _browser_database_lanes(self.browser_databases)
+
+    def _search_browser_lanes(
+        self,
+        patient_id: str,
+        patient_variants: list,
+        original_patient_index: int,
+        prefix: str,
+        *,
+        services: dict[str, BrowserReviewService] | None = None,
+    ) -> dict[str, list[DatabaseEvidence]]:
+        lanes = self._browser_lanes()
+        if not lanes:
+            return {}
+        active_services = services or {
+            lane_name: self._browser_service() for lane_name, _ in lanes
+        }
+        patient_evidence: dict[str, list[DatabaseEvidence]] = {}
+        if len(lanes) == 1:
+            lane_name, databases = lanes[0]
+            result = self._run_browser_lane(
+                lane_name,
+                databases,
+                active_services[lane_name],
+                patient_id,
+                patient_variants,
+                original_patient_index,
+                prefix,
+            )
+            _merge_evidence_results(patient_evidence, result)
+            return patient_evidence
+
+        with ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="database-browser"
+        ) as executor:
+            futures = [
+                executor.submit(
+                    self._run_browser_lane,
+                    lane_name,
+                    databases,
+                    active_services[lane_name],
+                    patient_id,
+                    patient_variants,
+                    original_patient_index,
+                    prefix,
+                )
+                for lane_name, databases in lanes
+            ]
+            for future in as_completed(futures):
+                _merge_evidence_results(patient_evidence, future.result())
+        return patient_evidence
+
+    def _run_browser_lane(
+        self,
+        lane_name: str,
+        databases: list[str],
+        service: BrowserReviewService,
+        patient_id: str,
+        patient_variants: list,
+        original_patient_index: int,
+        prefix: str,
+    ) -> dict[str, list[DatabaseEvidence]]:
+        started_at = time.monotonic()
+        result = service.search_variants(
+            patient_variants,
+            databases,
+            self.artifact_root / f"patient-{original_patient_index:03d}",
+            progress=lambda message, p=prefix, lane=lane_name: self.status.emit(
+                f"{p} · {lane}: {message}"
+            ),
+            completed_sources=self.completed_sources,
+            checkpoint=self.patient_finished.emit,
+            prior_evidence=self.existing_evidence,
+        )
+        elapsed = time.monotonic() - started_at
+        self.status.emit(f"{prefix}: {lane_name} complete ({elapsed:.1f}s)")
+        return result
+
     def _browser_service(self) -> BrowserReviewService:
         return BrowserReviewService(
             mtbp_cancer_type=self.settings.mtbp_cancer_type,
@@ -421,7 +519,7 @@ class DatabaseWorker(QObject):
             franklin_password=self.settings.franklin_password,
             mtbp_email=self.settings.mtbp_email,
             mtbp_password=self.settings.mtbp_password,
-            stop_requested=lambda: QThread.currentThread().isInterruptionRequested(),
+            stop_requested=self._stop_requested,
             pause_wait=self._wait_if_paused,
             browser_background=self.settings.browser_background,
         )
@@ -434,12 +532,16 @@ class DatabaseWorker(QObject):
 
     def _wait_if_paused(self) -> None:
         self.pause_control.wait(
-            stop_requested=lambda: QThread.currentThread().isInterruptionRequested(),
+            stop_requested=self._stop_requested,
             pause_changed=self.paused.emit,
         )
 
+    def _stop_requested(self) -> bool:
+        thread = self._owner_thread or QThread.currentThread()
+        return thread.isInterruptionRequested()
+
     def _check_cancelled(self) -> None:
-        if QThread.currentThread().isInterruptionRequested():
+        if self._stop_requested():
             raise BrowserReviewCancelled("Evidence search stopped by user.")
         self._wait_if_paused()
 
@@ -531,29 +633,17 @@ class BrowserReviewWorker(QObject):
         # Evidence collected across all retry passes within this worker's run;
         # used so retry passes never repeat lookups that already succeeded.
         self._pass_evidence: dict[str, list[DatabaseEvidence]] = {}
+        self._owner_thread: QThread | None = None
 
     def run(self) -> None:
         try:
-            service = BrowserReviewService(
-                mtbp_cancer_type=self.settings.mtbp_cancer_type,
-                clinvar_api_key=self.settings.clinvar_api_key,
-                analysis_timeout_ms=self.settings.mtbp_timeout_minutes * 60_000,
-                request_delay_ms=self.settings.browser_delay_seconds * 1_000,
-                request_delay_max_ms=self.settings.browser_delay_max_seconds * 1_000,
-                cosmic_email=self.settings.cosmic_email,
-                cosmic_password=self.settings.cosmic_password,
-                oncokb_email=self.settings.oncokb_email,
-                oncokb_password=self.settings.oncokb_password,
-                franklin_email=self.settings.franklin_email,
-                franklin_password=self.settings.franklin_password,
-                mtbp_email=self.settings.mtbp_email,
-                mtbp_password=self.settings.mtbp_password,
-                stop_requested=lambda: QThread.currentThread().isInterruptionRequested(),
-                pause_wait=self._wait_if_paused,
-                browser_background=self.settings.browser_background,
-            )
+            self._owner_thread = QThread.currentThread()
             all_evidence: dict[str, list[DatabaseEvidence]] = {}
             patients = _variants_grouped_by_patient(self.variants)
+            lane_services = {
+                lane_name: self._build_service()
+                for lane_name, _ in self._database_lanes()
+            }
             self.progress.emit(0, len(patients), "Preparing signed-in browser queue")
             original_patient_total = max(
                 self.patient_indexes.values(), default=len(patients)
@@ -572,12 +662,12 @@ class BrowserReviewWorker(QObject):
                     len(patients),
                     f"{patient_id} · {len(patient_variants)} variant(s) · {len(self.databases)} source(s)",
                 )
-                patient_evidence = self._search_patient_with_retries(
-                    service,
+                patient_evidence = self._search_patient_lanes(
                     patient_id,
                     patient_variants,
                     original_patient_index,
                     prefix,
+                    services=lane_services,
                 )
                 _merge_evidence_results(all_evidence, patient_evidence)
                 self.status.emit(f"{prefix}: browser sources complete")
@@ -611,6 +701,90 @@ class BrowserReviewWorker(QObject):
         except Exception as exc:
             self.failed.emit(str(exc))
 
+    def _database_lanes(self) -> list[tuple[str, list[str]]]:
+        return _browser_database_lanes(self.databases)
+
+    def _search_patient_lanes(
+        self,
+        patient_id: str,
+        patient_variants: list,
+        original_patient_index: int,
+        prefix: str,
+        *,
+        services: dict[str, BrowserReviewService] | None = None,
+    ) -> dict[str, list[DatabaseEvidence]]:
+        lanes = self._database_lanes()
+        if not lanes:
+            return {}
+
+        lane_states = {lane_name: {} for lane_name, _ in lanes}
+        active_services = services or {
+            lane_name: self._build_service() for lane_name, _ in lanes
+        }
+        patient_evidence: dict[str, list[DatabaseEvidence]] = {}
+        if len(lanes) == 1:
+            lane_name, databases = lanes[0]
+            result = self._run_patient_lane(
+                lane_name,
+                databases,
+                active_services[lane_name],
+                patient_id,
+                patient_variants,
+                original_patient_index,
+                prefix,
+                lane_states[lane_name],
+            )
+            _merge_evidence_results(patient_evidence, result)
+        else:
+            with ThreadPoolExecutor(
+                max_workers=2, thread_name_prefix="browser-review"
+            ) as executor:
+                futures = {
+                    executor.submit(
+                        self._run_patient_lane,
+                        lane_name,
+                        databases,
+                        active_services[lane_name],
+                        patient_id,
+                        patient_variants,
+                        original_patient_index,
+                        prefix,
+                        lane_states[lane_name],
+                    ): lane_name
+                    for lane_name, databases in lanes
+                }
+                for future in as_completed(futures):
+                    _merge_evidence_results(patient_evidence, future.result())
+
+        for lane_evidence in lane_states.values():
+            _merge_evidence_results(self._pass_evidence, lane_evidence)
+        return patient_evidence
+
+    def _run_patient_lane(
+        self,
+        lane_name: str,
+        databases: list[str],
+        service: BrowserReviewService,
+        patient_id: str,
+        patient_variants: list,
+        original_patient_index: int,
+        prefix: str,
+        pass_evidence: dict[str, list[DatabaseEvidence]],
+    ) -> dict[str, list[DatabaseEvidence]]:
+        started_at = time.monotonic()
+        result = self._search_patient_with_retries(
+            service,
+            patient_id,
+            patient_variants,
+            original_patient_index,
+            f"{prefix} · {lane_name}",
+            databases=databases,
+            pass_evidence=pass_evidence,
+        )
+        elapsed = time.monotonic() - started_at
+        self.status.emit(f"{prefix}: {lane_name} complete ({elapsed:.1f}s)")
+        return result
+
     def _search_patient_with_retries(
         self,
         service: BrowserReviewService,
@@ -618,6 +792,9 @@ class BrowserReviewWorker(QObject):
         patient_variants: list,
         original_patient_index: int,
         prefix: str,
+        *,
+        databases: list[str] | None = None,
+        pass_evidence: dict[str, list[DatabaseEvidence]] | None = None,
     ) -> dict[str, list[DatabaseEvidence]]:
         """Search one patient, then retry failed lookups once before moving on.
 
@@ -626,12 +803,24 @@ class BrowserReviewWorker(QObject):
         retry pass runs for just those lookups. Anything still failing afterwards
         is left for the batch-end pass or the manual rerun button.
         """
-        patient_evidence = self._run_search_pass(
-            service, patient_id, patient_variants, original_patient_index, prefix
+        active_databases = list(
+            self.databases if databases is None else databases
         )
-        _merge_evidence_results(self._pass_evidence, patient_evidence)
+        accumulated_evidence = (
+            pass_evidence if pass_evidence is not None else self._pass_evidence
+        )
+        patient_evidence = self._run_search_pass(
+            service,
+            patient_id,
+            patient_variants,
+            original_patient_index,
+            prefix,
+            databases=active_databases,
+            pass_evidence=accumulated_evidence,
+        )
+        _merge_evidence_results(accumulated_evidence, patient_evidence)
         failed = _failed_search_variants(
-            patient_variants, patient_evidence, self.databases
+            patient_variants, patient_evidence, active_databases
         )
         if not failed:
             return patient_evidence
@@ -644,11 +833,13 @@ class BrowserReviewWorker(QObject):
             failed,
             original_patient_index,
             f"{prefix} (retry)",
+            databases=active_databases,
+            pass_evidence=accumulated_evidence,
         )
         _merge_evidence_results(patient_evidence, retry_evidence)
-        _merge_evidence_results(self._pass_evidence, retry_evidence)
+        _merge_evidence_results(accumulated_evidence, retry_evidence)
         still_failed = _failed_search_variants(
-            failed, patient_evidence, self.databases
+            failed, patient_evidence, active_databases
         )
         if still_failed:
             self.status.emit(
@@ -664,17 +855,26 @@ class BrowserReviewWorker(QObject):
         variants: list,
         original_patient_index: int,
         prefix: str,
+        *,
+        databases: list[str] | None = None,
+        pass_evidence: dict[str, list[DatabaseEvidence]] | None = None,
     ) -> dict[str, list[DatabaseEvidence]]:
+        active_databases = list(
+            self.databases if databases is None else databases
+        )
+        accumulated_evidence = (
+            pass_evidence if pass_evidence is not None else self._pass_evidence
+        )
         completed_sources = self.completed_sources | _completed_evidence_sources(
-            self._pass_evidence
+            accumulated_evidence
         )
         prior_evidence = {
             key: list(items) for key, items in self.existing_evidence.items()
         }
-        _merge_evidence_results(prior_evidence, self._pass_evidence)
+        _merge_evidence_results(prior_evidence, accumulated_evidence)
         return service.search_variants(
             variants,
-            self.databases,
+            active_databases,
             self.artifact_root / f"patient-{original_patient_index:03d}",
             progress=lambda message, p=prefix: self.status.emit(f"{p}: {message}"),
             activity=lambda database, message, patient=patient_id, pass_variants=variants: self.activity.emit(
@@ -753,7 +953,7 @@ class BrowserReviewWorker(QObject):
             franklin_password=self.settings.franklin_password,
             mtbp_email=self.settings.mtbp_email,
             mtbp_password=self.settings.mtbp_password,
-            stop_requested=lambda: QThread.currentThread().isInterruptionRequested(),
+            stop_requested=self._stop_requested,
             pause_wait=self._wait_if_paused,
             browser_background=self.settings.browser_background,
         )
@@ -766,12 +966,16 @@ class BrowserReviewWorker(QObject):
 
     def _wait_if_paused(self) -> None:
         self.pause_control.wait(
-            stop_requested=lambda: QThread.currentThread().isInterruptionRequested(),
+            stop_requested=self._stop_requested,
             pause_changed=self.paused.emit,
         )
 
+    def _stop_requested(self) -> bool:
+        thread = self._owner_thread or QThread.currentThread()
+        return thread.isInterruptionRequested()
+
     def _check_cancelled(self) -> None:
-        if QThread.currentThread().isInterruptionRequested():
+        if self._stop_requested():
             raise BrowserReviewCancelled("Evidence search stopped by user.")
         self._wait_if_paused()
 
