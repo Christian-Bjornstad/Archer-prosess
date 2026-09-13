@@ -14,6 +14,7 @@ from urllib.parse import quote
 
 from PIL import Image, ImageDraw, ImageFont, PngImagePlugin
 
+from archer_processor.core.highlights import is_automatic_database_skip
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
 from archer_processor.services.genomic_notation import format_mtbp_grch37
 from archer_processor.services.capture_layout import expanded_capture_layout
@@ -243,6 +244,11 @@ class BrowserReviewService:
         prior_evidence: dict[str, list[DatabaseEvidence]] | None = None,
     ) -> dict[str, list[DatabaseEvidence]]:
         variant_list = list(variants)
+        searchable_variants = [
+            variant
+            for variant in variant_list
+            if not is_automatic_database_skip(variant)
+        ]
         requested = set(databases)
         database_list = [database for database in BROWSER_DATABASES if database in requested]
         results: dict[str, list[DatabaseEvidence]] = {
@@ -255,7 +261,7 @@ class BrowserReviewService:
                 database,
                 [
                     variant
-                    for variant in variant_list
+                    for variant in searchable_variants
                     if (self.variant_key(variant), database) not in completed_sources
                 ],
             )
@@ -456,6 +462,7 @@ class BrowserReviewService:
                     wait_until="domcontentloaded",
                     timeout=self.navigation_timeout_ms,
                 )
+                self._ensure_cosmic_grch37(page)
                 if not self._try_saved_login("COSMIC", page):
                     return {
                         self.variant_key(variant): DatabaseEvidence(
@@ -468,6 +475,7 @@ class BrowserReviewService:
                         )
                         for variant in variants
                     }
+                self._ensure_cosmic_grch37(page)
 
                 for index, variant in enumerate(variants, start=1):
                     self._check_cancelled()
@@ -678,6 +686,45 @@ class BrowserReviewService:
             wait_until="domcontentloaded",
             timeout=self.navigation_timeout_ms,
         )
+        self._verify_cosmic_grch37(page)
+
+    def _cosmic_grch37_options(self, page: Any) -> list[dict[str, str]]:
+        options = page.locator("a[href*='genome=37']").evaluate_all(
+            "nodes => nodes.map(node => ({href: node.href, text: node.textContent.trim()}))"
+        )
+        return [
+            option
+            for option in options
+            if isinstance(option, dict)
+            and re.match(r"^GRCh37\b", option.get("text", ""), re.IGNORECASE)
+        ]
+
+    def _ensure_cosmic_grch37(self, page: Any) -> None:
+        """Select GRCh37 through COSMIC's global Genome Version menu."""
+        options = self._cosmic_grch37_options(page)
+        if any("✔" in option.get("text", "") or "✓" in option.get("text", "") for option in options):
+            return
+        targets = list(
+            dict.fromkeys(option.get("href", "") for option in options if option.get("href"))
+        )
+        if len(targets) != 1:
+            raise RuntimeError("COSMIC GRCh37 genome menu option was not uniquely available.")
+        page.goto(
+            targets[0],
+            wait_until="domcontentloaded",
+            timeout=self.navigation_timeout_ms,
+        )
+        page.wait_for_timeout(250)
+        self._verify_cosmic_grch37(page)
+
+    def _verify_cosmic_grch37(self, page: Any) -> None:
+        options = self._cosmic_grch37_options(page)
+        selected = any(
+            ("✔" in option.get("text", "") or "✓" in option.get("text", ""))
+            for option in options
+        )
+        if not selected or not re.search(r"[?&]genome=37(?:&|$)", page.url):
+            raise RuntimeError("COSMIC GRCh37 was not selected; result capture was stopped.")
 
     def _search_clinvar(
         self,
@@ -2423,7 +2470,10 @@ class BrowserReviewService:
             state="visible", timeout=self.navigation_timeout_ms
         )
         page.evaluate("window.scrollTo(0, window.scrollY)")
-        page.wait_for_timeout(250)
+        # Franklin keeps the previous Angular panel visible briefly after the
+        # subtab click. Allow the new classification model to settle so the
+        # screenshot cannot reuse pixels from the preceding subtab.
+        page.wait_for_timeout(1_000)
 
     def _wait_for_nonempty_category_titles(
         self,
@@ -3127,8 +3177,17 @@ class BrowserReviewService:
                                 ? rect(section) : null,
                             header:rect(header), row:rect(row)}));
                 });
+                const genomics = [...document.querySelectorAll('h1,h2,h3,h4,h5,h6')]
+                    .find(node => node.innerText.trim() === 'Genomics'
+                        && node.getBoundingClientRect().height > 0);
+                const fallbackTop = rows.length
+                    ? Math.min(...rows.map(entry =>
+                        (entry.section || entry.header || entry.row).y))
+                    : 0;
                 return {width:document.documentElement.scrollWidth,
-                    height:document.documentElement.scrollHeight, rows};
+                    height:document.documentElement.scrollHeight,
+                    content_top: genomics ? rect(genomics).y : fallbackTop,
+                    rows};
             }""")
             page.screenshot(path=str(screenshot_path), full_page=True)
             screenshot_path.with_suffix(".geometry.json").write_text(

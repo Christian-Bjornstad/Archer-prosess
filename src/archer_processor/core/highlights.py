@@ -26,6 +26,16 @@ def priority_warning(variant: VariantRecord) -> str:
     return ""
 
 
+def is_automatic_database_skip(variant: VariantRecord) -> bool:
+    """Return whether a coloured priority row must not enter provider searches."""
+    return variant_highlight(variant) in {
+        "artifact",
+        "artifact_light",
+        "germline",
+        "germline_low_af",
+    }
+
+
 def _is_artifact(variant: VariantRecord) -> bool:
     # Only consider artifacts from user-configured rules (matched_rules)
     return any("artifact" in rule.lower() for rule in variant.matched_rules)

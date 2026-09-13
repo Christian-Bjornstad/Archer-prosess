@@ -1,6 +1,8 @@
 import hashlib
 import json
+import os
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 
 import openpyxl
@@ -64,6 +66,18 @@ def test_processed_workbook_restores_variants_x_marks_and_evidence(tmp_path):
     assert restored["OncoKB"].clinical_significance == "Likely Oncogenic"
     assert restored["OncoKB"].url == "https://www.oncokb.org/example"
     assert restored["OncoKB"].raw["screenshot"].endswith("oncokb.png")
+
+
+def test_processed_workbook_restores_original_run_date_not_file_mtime(tmp_path):
+    output = tmp_path / "review.xlsx"
+    result = VariantProcessor().process(FIXTURE, "2026-01-02", output)
+    ExcelReportWriter().write(result, output)
+    changed = datetime(2026, 9, 13, 12, 0).timestamp()
+    os.utime(output, (changed, changed))
+
+    state = ProcessedWorkbookLoader().load(output)
+
+    assert state.result.run_date == "2026-01-02"
 
 
 def test_processed_workbook_rejects_unrelated_excel_file(tmp_path):

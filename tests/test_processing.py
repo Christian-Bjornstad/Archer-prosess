@@ -10,6 +10,7 @@ from archer_processor.core import (
     production_rules,
 )
 from archer_processor.core.models import DatabaseEvidence
+from archer_processor.core.highlights import is_automatic_database_skip
 from archer_processor.io import ArcherTsvReader
 from archer_processor.reports import ExcelReportWriter
 from archer_processor.services import DatabaseSearchService, load_database_skip_keys
@@ -39,6 +40,17 @@ def test_production_rules_and_boundaries():
     assert by_sample["26OUM00004"].warnings
     assert by_sample["26OUM00005"].decision == "excluded"
     assert by_sample["26OUM00005"].warnings
+
+
+def test_green_germline_variants_are_automatic_database_skips():
+    base = ArcherTsvReader().read(FIXTURE)[3]
+    strong = replace(base, raw={**base.raw, "Germ": 11}, af=0.35)
+    weak = replace(base, raw={**base.raw, "Germ": 11}, af=0.10)
+    missing_af = replace(base, raw={**base.raw, "Germ": 11}, af=None)
+
+    assert is_automatic_database_skip(strong)
+    assert is_automatic_database_skip(weak)
+    assert not is_automatic_database_skip(missing_af)
 
 
 def test_default_artifact_catalog_includes_fragmentation_v1_and_v2_hgvsc_columns():
@@ -206,8 +218,9 @@ def test_review_workbook_sorts_each_patient_by_descending_numeric_percent_af(tmp
                 0.10,
                 None,
             ]
-            assert sheet.cell(2, af_col).number_format == "0.00%"
-            assert sheet.cell(3, af_col).number_format == "0.00%"
+            assert sheet.cell(2, af_col).number_format == "0%"
+            assert sheet.cell(3, af_col).number_format == "0%"
+            assert sheet.cell(2, af_col).font.bold
     finally:
         workbook.close()
 

@@ -6,6 +6,7 @@ import os
 import re
 import textwrap
 from collections import Counter, defaultdict
+from copy import copy
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +83,17 @@ COSMIC_FIELD_DESCRIPTIONS = {
     "COSMIC_PHENOTYPE_ID": "COSMIC phenotype identifier for the tumour context.",
 }
 COSMIC_PUBLIC_API_URL = "https://clinicaltables.nlm.nih.gov/apidoc/cosmic/v4/doc.html"
+WHO_DRIVER_GENES = frozenset(
+    {
+        "ASXL1", "BCOR", "BCORL1", "BRAF", "BRCC3", "CALR", "CBL", "CEBPA",
+        "CREBBP", "CSF1R", "CSF3R", "CTCF", "CUX1", "DNMT3A", "ETV6", "EZH2",
+        "GATA2", "GNAS", "GNB1", "IDH1", "IDH2", "JAK2", "JAK3", "KDM6A",
+        "KIT", "KMT2A", "KRAS", "MPL", "MYD88", "NOTCH1", "NRAS", "PHF6",
+        "PIGA", "PPM1D", "PRPF40B", "PTEN", "PTPN11", "RAD21", "RUNX1",
+        "SETBP1", "SF1", "SF3A1", "SF3B1", "SMC1A", "SMC3", "SRSF2", "STAG2",
+        "STAT3", "TET2", "TP53", "U2AF1", "U2AF2", "WT1", "ZRSR2",
+    }
+)
 
 
 class PatientExcelReportWriter:
@@ -159,7 +171,7 @@ class PatientExcelReportWriter:
             variant for variant in result.variants
             if variant.patient_id == patient_id
         ]
-        self._data_sheet(workbook, patient_data, evidence)
+        self._data_sheet(workbook, patient_data, evidence, result.run_date)
         gene_counts = Counter((variant.symbol or "Variant").casefold() for variant in variants)
         used_names = {"Oversikt", "Vedlegg", "Data"}
         for index, variant in enumerate(variants, start=1):
@@ -413,10 +425,16 @@ class PatientExcelReportWriter:
     ) -> None:
         ws = workbook.create_sheet("Vedlegg")
         self._base_sheet(ws)
+        ws.sheet_view.showGridLines = True
         ws.sheet_properties.tabColor = self.colors["muted"]
         ws["A1"] = patient_id
         ws["A1"].font = Font(size=18, bold=True, color=self.colors["navy"])
         ws.column_dimensions["A"].width = max(18, len(patient_id) + 4)
+        for row in range(2, 6):
+            for column in range(1, 13):
+                ws.cell(row, column).fill = PatternFill(
+                    "solid", fgColor=self.colors["pale_blue"]
+                )
         report_paths: list[Path] = []
         seen: set[str] = set()
         for variant in variants:
@@ -427,30 +445,102 @@ class PatientExcelReportWriter:
                 if value and value not in seen:
                     seen.add(value)
                     report_paths.append(Path(value))
-        row = 3
+        row = 6
         for report_path in report_paths:
             ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
             ws.cell(row, 1, "MTBP – samlet pasientrapport")
             self._section_style(ws.cell(row, 1))
-            row = self._add_image(ws, report_path, row + 1) + 1
+            display_path = self._trim_mtbp_intro(report_path)
+            row = self._add_image(ws, display_path, row + 1) + 1
+
+    @staticmethod
+    def _trim_mtbp_intro(report_path: Path) -> Path:
+        """Create an attachment copy beginning at MTBP's Genomics/report content."""
+        geometry_path = report_path.with_suffix(".geometry.json")
+        if not report_path.is_file() or not geometry_path.is_file():
+            return report_path
+        try:
+            geometry = json.loads(geometry_path.read_text(encoding="utf-8"))
+            content_top = float(geometry.get("content_top") or 0)
+            if content_top <= 0:
+                legacy_tops = [
+                    float(box.get("y") or 0)
+                    for row in geometry.get("rows") or []
+                    if isinstance(row, dict)
+                    for box in [row.get("section") or row.get("header") or row.get("row")]
+                    if isinstance(box, dict) and float(box.get("y") or 0) > 0
+                ]
+                content_top = min(legacy_tops, default=0)
+            document_height = float(geometry.get("height") or 0)
+            if content_top <= 0 or document_height <= content_top:
+                return report_path
+            with PillowImage.open(report_path) as source:
+                pixel_top = round(content_top * source.height / document_height)
+                if pixel_top <= 0 or pixel_top >= source.height - 1:
+                    return report_path
+                output = report_path.with_name(
+                    f"{report_path.stem}-attachment{report_path.suffix}"
+                )
+                source.crop((0, pixel_top, source.width, source.height)).save(output)
+            return output
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return report_path
 
     def _data_sheet(
         self,
         workbook: Workbook,
         variants: list[VariantRecord],
         evidence: dict[str, list[DatabaseEvidence]],
+        run_date: str,
     ) -> None:
         raw_writer = ExcelReportWriter()
+        ordered_variants = sorted(
+            variants,
+            key=lambda variant: (
+                1
+                if variant_highlight(variant) in {"artifact", "artifact_light"}
+                else 0,
+                variant_sort_key(variant),
+            ),
+        )
         raw_writer._raw_variant_sheet(
             workbook,
             "Data",
-            variants,
+            ordered_variants,
             evidence,
             include_selection=False,
+            include_database_evidence=False,
+            preserve_variant_order=True,
         )
         ws = workbook["Data"]
         ws.sheet_properties.tabColor = self.colors["green"]
         ws.sheet_view.showGridLines = False
+        ws.column_dimensions["D"].hidden = True
+        ws.column_dimensions["E"].hidden = True
+
+        headers = [cell.value for cell in ws[1]]
+        symbol_column = headers.index("Symbol") + 1
+        who_column = len(headers) + 1
+        run_date_column = who_column + 1
+        raw_writer._headers(ws, [*headers, "WHO drivergen", "Rundato"])
+        formatted_run_date = str(run_date or "").replace("-", "_")
+        for row_index, variant in enumerate(ordered_variants, start=2):
+            who_cell = ws.cell(
+                row_index,
+                who_column,
+                "X" if variant.symbol.upper() in WHO_DRIVER_GENES else "",
+            )
+            run_date_cell = ws.cell(row_index, run_date_column, formatted_run_date)
+            for cell in (who_cell, run_date_cell):
+                cell.border = raw_writer._border()
+                cell.alignment = Alignment(vertical="center")
+                cell.fill = copy(ws.cell(row_index, 1).fill)
+            ws.cell(row_index, symbol_column).font = Font(bold=True)
+        ws.column_dimensions[get_column_letter(who_column)].width = 17
+        ws.column_dimensions[get_column_letter(run_date_column)].width = 14
+        ws.auto_filter.ref = (
+            f"A1:{get_column_letter(run_date_column)}{max(1, len(ordered_variants) + 1)}"
+        )
 
     def _variant_sheet(
         self,

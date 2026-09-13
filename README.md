@@ -97,10 +97,10 @@ the provider exposes that choice.
 | Source | Capture strategy | Key safeguards |
 | --- | --- | --- |
 | **MTBP** | One combined report per patient; full image in Vedlegg and local variant crops with section headings and A/B/C evidence | Gene + protein matching takes priority for crops, then cDNA when protein identity is unavailable. Unclear matches include all rows of that gene with a visible genkontekst warning; this does not upgrade the database match status. Only rejected input variants use GRCh37 genomic fallback. |
-| **Franklin** | Classification-only ACMG/Oncology overviews, each named evidence card, Predictions, and Population Frequencies | Explicit **hg19** + **Somatic** search; capture bounds include a fixed safety margin on both sides and space above the heading, clamped to the document; ACMG stops after De Novo Data; Somatic Clinical Evidence and Add More Evidence are excluded; blank, narrow, or truncated captures are rejected and retried on resume |
+| **Franklin** | Classification-only ACMG/Oncology overviews, each named evidence card, Predictions, and Population Frequencies | Explicit **hg19** + **Somatic** search; each classification subtab receives a render-settling buffer before capture; capture bounds include a fixed safety margin on both sides and space above the heading, clamped to the document; ACMG stops after De Novo Data; Somatic Clinical Evidence and Add More Evidence are excluded; blank, narrow, or truncated captures are rejected and retried on resume |
 | **ClinVar** | Variant title and focused germline/somatic classification summary | Opens a candidate only after chromosome, VCF position, reference, alternate, and **GRCh37** assembly all match exactly; older unverified results are queued for verification |
 | **OncoKB** | Variant Overview and Mutation Effect | Rejects the cookie overlay before taking the screenshot |
-| **COSMIC** | Overview, Tissue distribution, and Samples filtered to `lymphoid` | Tries every distinct COSM/COSV identifier from the Archer `COSMICID` column in source order; after all identifiers miss, performs exactly one genomic GRCh37 search and accepts a candidate only after chromosome, position, REF, ALT, and assembly are verified; multiple verified candidates or an identity mismatch fail closed |
+| **COSMIC** | Overview, Tissue distribution, and Samples filtered to `lymphoid` | Explicitly selects **GRCh37** in COSMIC's global Genome Version menu before searching, then verifies both the active menu marker and the resolved `genome=37` result URL before capture. Tries every distinct COSM/COSV identifier from the Archer `COSMICID` column in source order; multiple candidates or an identity mismatch fail closed |
 
 Patient report images are embedded in this order:
 
@@ -176,7 +176,8 @@ Patient reports are named `<DIT>_VPM_Tolkning_APP.xlsx` (for example,
   A pale-orange merged **E4:J7** box holds patient-level comments and is preserved
   on regeneration. COSMIC's not-applicable display text is **Ikke funnet**;
   the internal status remains unchanged.
-- **Vedlegg** — the complete combined MTBP report, retained alongside the variant crops.
+- **Vedlegg** — the combined MTBP report without the portal/header intro above the Genomics content. The original full screenshot remains in the local evidence directory. The sheet keeps visible gridlines and four light guide rows above the report.
+- **Data** — the traceability data with database evidence columns removed, columns D/E hidden, integer-percent bold AF values, bold gene symbols, a WHO-driver flag, and the run date in `YYYY_MM_DD` form. Orange artifact rows are grouped last.
 - **One sheet per variant** — linked compact evidence followed by embedded screenshots with plain, non-linked captions.
 
 Unique genes use the gene symbol as the sheet name. If a patient has multiple
@@ -213,6 +214,10 @@ Artifact colouring always takes precedence. Non-artifact rows are highlighted:
 - strong green when `Germ > 10` and AF is at least 35%;
 - weak green when `Germ > 10` and AF is below 35%;
 - uncoloured with a warning when `Germ > 10` but AF is missing.
+
+Both green Germline categories are automatically excluded from every database
+search. A Germline row with missing AF remains uncoloured and is not automatically
+excluded because it cannot be assigned to either green category.
 
 Tier I and Tier II counts do not affect row colouring.
 

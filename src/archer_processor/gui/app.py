@@ -43,7 +43,11 @@ from PyQt6.QtWidgets import (
 )
 
 from archer_processor.core import DatabaseEvidence, FilterEngine, ProcessingResult, VariantProcessor, default_artifact_rules, production_rules
-from archer_processor.core.highlights import priority_warning, variant_highlight
+from archer_processor.core.highlights import (
+    is_automatic_database_skip,
+    priority_warning,
+    variant_highlight,
+)
 from archer_processor.io import ArcherTsvReader
 from archer_processor.reports import (
     ExcelReportWriter,
@@ -2049,6 +2053,7 @@ class MainWindow(QMainWindow):
             variant
             for variant in variants
             if BrowserReviewService.variant_key(variant) not in self.database_skip_keys
+            and not is_automatic_database_skip(variant)
         ]
 
     def _pending_variants_for_search(self, databases: list[str]):

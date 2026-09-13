@@ -1,4 +1,5 @@
 from datetime import datetime
+from dataclasses import replace
 from pathlib import Path
 import re
 import threading
@@ -8,6 +9,7 @@ from PIL import Image
 from PyQt6.QtWidgets import QPushButton
 
 from archer_processor.core import DatabaseEvidence, VariantProcessor, default_artifact_rules
+from archer_processor.core.highlights import is_automatic_database_skip
 from archer_processor.gui.app import (
     BrowserReviewWorker,
     DatabaseWorker,
@@ -802,15 +804,46 @@ def test_database_lookup_scope_can_be_limited_to_included_variants(qt_app, tmp_p
     )
 
     window.included_only_check.setChecked(True)
-    assert window._variants_for_search() == window.result.included
+    assert window._variants_for_search() == [
+        variant
+        for variant in window.result.included
+        if not is_automatic_database_skip(variant)
+    ]
 
     window.included_only_check.setChecked(False)
-    assert window._variants_for_search() == window.result.variants
+    expected = [
+        variant
+        for variant in window.result.variants
+        if not is_automatic_database_skip(variant)
+    ]
+    assert window._variants_for_search() == expected
 
-    skipped = window.result.variants[0]
+    skipped = expected[0]
     window.database_skip_keys = {f"{skipped.sample}|{skipped.hgvsc}"}
     assert skipped not in window._variants_for_search()
-    assert len(window._variants_for_search()) == window.result.total_count - 1
+    assert len(window._variants_for_search()) == len(expected) - 1
+
+
+def test_green_germline_rows_never_enter_database_search(qt_app, tmp_path):
+    window = MainWindow()
+    window.result = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-13",
+        tmp_path / "review.xlsx",
+    )
+    base = window.result.variants[3]
+    strong = replace(base, raw={**base.raw, "Germ": 11}, af=0.35)
+    weak = replace(
+        base,
+        source_row=base.source_row + 100,
+        hgvsc="NM_000546.6:c.525A>G",
+        raw={**base.raw, "HGVSc": "NM_000546.6:c.525A>G", "Germ": 11},
+        af=0.10,
+    )
+    window.result.variants = [strong, weak]
+    window.included_only_check.setChecked(False)
+
+    assert window._variants_for_search() == []
 
 
 def test_resume_scope_keeps_only_variants_with_unfinished_selected_sources(
@@ -823,7 +856,14 @@ def test_resume_scope_keeps_only_variants_with_unfinished_selected_sources(
         tmp_path / "review.xlsx",
     )
     window.included_only_check.setChecked(False)
-    first, second = window.result.variants[:2]
+    first = window.result.variants[3]
+    second = replace(
+        first,
+        source_row=first.source_row + 100,
+        hgvsc="NM_000546.6:c.525A>G",
+        raw={**first.raw, "HGVSc": "NM_000546.6:c.525A>G"},
+    )
+    window.result.variants = [first, second]
     window.evidence = {
         f"{first.sample}|{first.hgvsc}": [
             DatabaseEvidence("ClinVar", "found", "complete"),

@@ -7,7 +7,7 @@ from PIL import Image
 
 from archer_processor.core import DatabaseEvidence, VariantProcessor
 from archer_processor.reports import PatientExcelReportWriter
-from archer_processor.reports.patient_excel import IMAGE_DATABASES
+from archer_processor.reports.patient_excel import IMAGE_DATABASES, WHO_DRIVER_GENES
 from archer_processor.services import DatabaseSearchService
 
 
@@ -273,7 +273,7 @@ def test_patient_attachment_contains_combined_mtbp_report_only_once(tmp_path):
     try:
         attachment = workbook["Vedlegg"]
         assert len(attachment._images) == 1
-        assert attachment["A3"].value == "MTBP – samlet pasientrapport"
+        assert attachment["A6"].value == "MTBP – samlet pasientrapport"
     finally:
         workbook.close()
 
@@ -310,16 +310,22 @@ def test_patient_data_sheet_includes_artifacts_without_skip_column(tmp_path):
         headers = [cell.value for cell in data[1]]
         assert headers[0] == "Sample"
         assert "Skip Database Search (X)" not in headers
-        assert headers[-5:] == [
-            "ClinVar Evidence",
-            "MTBP Evidence",
-            "Franklin Evidence",
-            "OncoKB Evidence",
-            "COSMIC Evidence",
-        ]
+        assert not any(str(header).endswith(" Evidence") for header in headers)
+        assert headers[-2:] == ["WHO drivergen", "Rundato"]
         assert data.max_row == 3
         assert data.sheet_properties.tabColor.rgb == "004F8A5B"
+        assert data.column_dimensions["D"].hidden
+        assert data.column_dimensions["E"].hidden
         hgvsc_column = headers.index("HGVSc") + 1
+        symbol_column = headers.index("Symbol") + 1
+        af_column = headers.index("AF") + 1
+        who_column = headers.index("WHO drivergen") + 1
+        run_date_column = headers.index("Rundato") + 1
+        assert data.cell(2, symbol_column).font.bold
+        assert data.cell(2, af_column).font.bold
+        assert data.cell(2, af_column).number_format == "0%"
+        assert data.cell(2, who_column).value == "X"
+        assert data.cell(2, run_date_column).value == "2026_08_11"
         colors_by_hgvsc = {
             data.cell(row, hgvsc_column).value: data.cell(row, 1).fill.fgColor.rgb
             for row in range(2, data.max_row + 1)
@@ -330,8 +336,84 @@ def test_patient_data_sheet_includes_artifacts_without_skip_column(tmp_path):
         assert data.column_dimensions[
             openpyxl.utils.get_column_letter(report_column)
         ].hidden
+        assert data.cell(data.max_row, hgvsc_column).value == artifact.hgvsc
     finally:
         workbook.close()
+
+
+def test_who_driver_gene_catalog_matches_attached_workbook():
+    assert WHO_DRIVER_GENES == frozenset({
+        "ASXL1", "BCOR", "BCORL1", "BRAF", "BRCC3", "CALR", "CBL", "CEBPA",
+        "CREBBP", "CSF1R", "CSF3R", "CTCF", "CUX1", "DNMT3A", "ETV6", "EZH2",
+        "GATA2", "GNAS", "GNB1", "IDH1", "IDH2", "JAK2", "JAK3", "KDM6A",
+        "KIT", "KMT2A", "KRAS", "MPL", "MYD88", "NOTCH1", "NRAS", "PHF6",
+        "PIGA", "PPM1D", "PRPF40B", "PTEN", "PTPN11", "RAD21", "RUNX1",
+        "SETBP1", "SF1", "SF3A1", "SF3B1", "SMC1A", "SMC3", "SRSF2", "STAG2",
+        "STAT3", "TET2", "TP53", "U2AF1", "U2AF2", "WT1", "ZRSR2",
+    })
+
+
+def test_attachment_uses_gridlines_four_light_rows_and_trimmed_mtbp_report(tmp_path):
+    result = VariantProcessor().process(
+        FIXTURE, "2026-09-13", tmp_path / "review.xlsx"
+    )
+    variant = result.variants[3]
+    report = tmp_path / "ARCHER-synthetic-full-report.png"
+    image = Image.new("RGB", (600, 900), "white")
+    image.save(report)
+    report.with_suffix(".geometry.json").write_text(
+        '{"width": 600, "height": 900, "content_top": 240, "rows": []}',
+        encoding="utf-8",
+    )
+    evidence = {
+        DatabaseSearchService().variant_key(variant): [
+            DatabaseEvidence(
+                "MTBP",
+                "found",
+                "synthetic",
+                raw={"patient_report_screenshot": str(report)},
+            )
+        ]
+    }
+    output = tmp_path / "patient.xlsx"
+
+    PatientExcelReportWriter().write_patient(
+        result, variant.patient_id, [variant], output, evidence
+    )
+
+    workbook = openpyxl.load_workbook(output)
+    try:
+        attachment = workbook["Vedlegg"]
+        assert attachment.sheet_view.showGridLines
+        assert all(
+            attachment.cell(row, 1).fill.fgColor.rgb == "00EAF3FA"
+            for row in range(2, 6)
+        )
+        assert attachment["A6"].value == "MTBP – samlet pasientrapport"
+        assert len(attachment._images) == 1
+        assert attachment._images[0].height < 900
+    finally:
+        workbook.close()
+
+
+def test_mtbp_intro_trim_uses_legacy_row_geometry_when_content_top_is_absent(
+    tmp_path,
+):
+    report = tmp_path / "legacy-full-report.png"
+    Image.new("RGB", (600, 900), "white").save(report)
+    report.with_suffix(".geometry.json").write_text(
+        '{"width": 600, "height": 900, "rows": '
+        '[{"section": {"x": 0, "y": 260, "width": 600, "height": 40}, '
+        '"header": {"x": 0, "y": 300, "width": 600, "height": 40}, '
+        '"row": {"x": 0, "y": 340, "width": 600, "height": 120}}]}',
+        encoding="utf-8",
+    )
+
+    trimmed = PatientExcelReportWriter()._trim_mtbp_intro(report)
+
+    assert trimmed != report
+    with Image.open(trimmed) as image:
+        assert image.height == 640
 
 
 def test_patient_excel_report_uses_requested_sheet_layout_and_image_order(tmp_path):

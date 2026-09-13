@@ -90,6 +90,28 @@ def test_browser_sources_use_canonical_order_with_mtbp_last(tmp_path, monkeypatc
     assert visited == ["COSMIC", "OncoKB", "Franklin", "MTBP"]
 
 
+def test_green_germline_variant_is_blocked_at_browser_service_boundary(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    variant.raw = {**variant.raw, "Germ": 11}
+    variant.af = 0.35
+    service = BrowserReviewService(profile_root=tmp_path)
+    monkeypatch.setattr(
+        service,
+        "_search_database",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("provider must not receive Germline variant")
+        ),
+    )
+
+    results = service.search_variants(
+        [variant], ["ClinVar"], tmp_path / "evidence"
+    )
+
+    assert results[service.variant_key(variant)] == []
+
+
 def test_browser_review_reports_provider_with_progress(tmp_path, monkeypatch):
     variant = ArcherTsvReader().read(FIXTURE)[3]
     service = BrowserReviewService(
@@ -315,6 +337,8 @@ def test_cosmic_search_resolves_canonical_internal_mutation_id(tmp_path):
                 return Links([grch38])
             if selector == "a[href*='genome=37'][href*='id=']":
                 return Links([grch37])
+            if selector == "a[href*='genome=37']":
+                return Links([{"href": grch37, "text": "GRCh37 ✔"}])
             raise AssertionError(selector)
 
         def goto(self, url, **kwargs):
@@ -328,6 +352,63 @@ def test_cosmic_search_resolves_canonical_internal_mutation_id(tmp_path):
 
     assert page.url == grch37
     assert _cosmic_source_url(page.url, variant.cosmic_id) == grch37
+
+
+def test_cosmic_explicitly_selects_global_grch37_menu_option(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path, navigation_timeout_ms=500)
+
+    class Links:
+        def __init__(self, page):
+            self.page = page
+
+        def evaluate_all(self, script):
+            selected = "genome=37" in self.page.url
+            return [{
+                "href": "https://cancer.sanger.ac.uk/cosmic/login?genome=37",
+                "text": "GRCh37 ✔" if selected else "GRCh37",
+            }]
+
+    class Page:
+        url = "https://cancer.sanger.ac.uk/cosmic/login"
+
+        def __init__(self):
+            self.visited = []
+
+        def locator(self, selector):
+            assert selector == "a[href*='genome=37']"
+            return Links(self)
+
+        def goto(self, url, **kwargs):
+            self.url = url
+            self.visited.append(url)
+
+        def wait_for_timeout(self, milliseconds):
+            pass
+
+    page = Page()
+    service._ensure_cosmic_grch37(page)
+
+    assert page.visited == [
+        "https://cancer.sanger.ac.uk/cosmic/login?genome=37"
+    ]
+    service._verify_cosmic_grch37(page)
+
+
+def test_cosmic_rejects_result_when_grch37_is_not_selected(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path)
+
+    class Links:
+        def evaluate_all(self, script):
+            return [{"href": "?genome=37", "text": "GRCh37"}]
+
+    class Page:
+        url = "https://cancer.sanger.ac.uk/cosmic/mutation/overview?genome=38"
+
+        def locator(self, selector):
+            return Links()
+
+    with pytest.raises(RuntimeError, match="GRCh37"):
+        service._verify_cosmic_grch37(Page())
 
 
 def test_cosmic_lookup_retries_transient_render_failure(tmp_path, monkeypatch):
@@ -1265,6 +1346,44 @@ def test_franklin_computed_capture_uses_both_subtabs_and_skips_somatic(
         "ACMG Classification",
     ]
     assert [item["label"] for item in screenshots] == ["ACMG", "Oncogenic"]
+
+
+def test_franklin_subtab_switch_waits_for_render_buffer(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path)
+
+    class Locator:
+        def count(self):
+            return 1
+
+        def evaluate(self, script):
+            return True
+
+        def wait_for(self, **kwargs):
+            pass
+
+    class Page:
+        def __init__(self):
+            self.waits = []
+
+        def get_by_text(self, label, exact):
+            return Locator()
+
+        def locator(self, selector):
+            assert selector == "gnx-oncogenic-classification-app"
+            return Locator()
+
+        def evaluate(self, script):
+            pass
+
+        def wait_for_timeout(self, milliseconds):
+            self.waits.append(milliseconds)
+
+    page = Page()
+    service._activate_franklin_classification_subtab(
+        page, "Oncogenic Classification"
+    )
+
+    assert sum(page.waits) >= 1_000
 
 
 def test_browser_review_can_be_cancelled_before_opening_edge(tmp_path):

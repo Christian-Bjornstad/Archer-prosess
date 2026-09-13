@@ -50,7 +50,14 @@ class ProcessedWorkbookLoader:
         workbook = openpyxl.load_workbook(
             workbook_path, read_only=True, data_only=True
         )
+        persisted_run_date = ""
         try:
+            try:
+                persisted_run_date = self._text(
+                    workbook.custom_doc_props["VPMRunDate"].value
+                )
+            except KeyError:
+                pass
             if SELECTION_SHEET not in workbook.sheetnames:
                 raise ValueError(
                     f"This is not a current VPM review workbook: the "
@@ -130,7 +137,7 @@ class ProcessedWorkbookLoader:
         result = ProcessingResult(
             input_path=workbook_path,
             output_path=workbook_path,
-            run_date=timestamp.date().isoformat(),
+            run_date=persisted_run_date or timestamp.date().isoformat(),
             variants=variants,
             rules_applied=[rule.rule_id for rule in self.filter_engine.rules],
             started_at=timestamp,

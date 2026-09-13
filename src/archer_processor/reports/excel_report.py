@@ -7,10 +7,15 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook
+from openpyxl.packaging.custom import StringProperty
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from archer_processor.core.highlights import priority_warning, variant_highlight
+from archer_processor.core.highlights import (
+    is_automatic_database_skip,
+    priority_warning,
+    variant_highlight,
+)
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
 from archer_processor.core.sorting import variant_sort_key
 
@@ -111,6 +116,9 @@ class ExcelReportWriter:
     ) -> Path:
         evidence = evidence or {}
         workbook = Workbook()
+        workbook.custom_doc_props.append(
+            StringProperty(name="VPMRunDate", value=result.run_date)
+        )
         workbook.remove(workbook.active)
         self._raw_variant_sheet(
             workbook,
@@ -544,10 +552,14 @@ class ExcelReportWriter:
         *,
         include_selection: bool = False,
         database_skip_keys: set[str] | None = None,
+        include_database_evidence: bool = True,
+        preserve_variant_order: bool = False,
     ) -> None:
         ws = workbook.create_sheet(title)
         raw_columns = self._raw_columns(variants)
-        database_columns = self._database_columns(evidence)
+        database_columns = (
+            self._database_columns(evidence) if include_database_evidence else []
+        )
         headers = (
             (["Skip Database Search (X)"] if include_selection else [])
             + raw_columns
@@ -559,7 +571,11 @@ class ExcelReportWriter:
         evidence_columns = set(range(evidence_start, evidence_start + len(database_columns)))
         skip_keys = database_skip_keys or set()
 
-        sorted_variants = sorted(variants, key=variant_sort_key)
+        sorted_variants = (
+            list(variants)
+            if preserve_variant_order
+            else sorted(variants, key=variant_sort_key)
+        )
         for row_index, variant in enumerate(sorted_variants, start=2):
             evidence_by_database = self._evidence_by_database(evidence.get(self._key(variant), []))
             values = [
@@ -567,7 +583,7 @@ class ExcelReportWriter:
                     [
                         "X"
                         if self._key(variant) in skip_keys
-                        or variant_highlight(variant) in {"artifact", "artifact_light"}
+                        or is_automatic_database_skip(variant)
                         else ""
                     ]
                     if include_selection
@@ -575,7 +591,7 @@ class ExcelReportWriter:
                 ),
                 *[
                     self._raw_value(
-                        variant.af if column == "AF" else variant.raw.get(column)
+                        self._variant_raw_value(variant, column)
                     )
                     for column in raw_columns
                 ],
@@ -587,7 +603,10 @@ class ExcelReportWriter:
                 cell.alignment = Alignment(vertical="center", wrap_text=False)
                 raw_index = col_index - raw_offset - 1
                 if 0 <= raw_index < len(raw_columns) and raw_columns[raw_index] == "AF" and value not in [None, ""]:
-                    cell.number_format = "0.00%"
+                    cell.number_format = "0%"
+                    cell.font = Font(bold=True)
+                if 0 <= raw_index < len(raw_columns) and raw_columns[raw_index] == "Symbol":
+                    cell.font = Font(bold=True)
             if include_selection:
                 ws.cell(row_index, 1).fill = PatternFill(
                     "solid", fgColor=self.colors["yellow"]
@@ -625,7 +644,20 @@ class ExcelReportWriter:
             for column in variant.raw:
                 if column not in columns:
                     columns.append(column)
-        return columns
+        return columns or ["Sample", "Symbol", "HGVSc", "HGVSp", "AF"]
+
+    @staticmethod
+    def _variant_raw_value(variant: VariantRecord, column: str) -> Any:
+        if column == "AF":
+            return variant.af
+        if column in variant.raw:
+            return variant.raw.get(column)
+        return {
+            "Sample": variant.sample,
+            "Symbol": variant.symbol,
+            "HGVSc": variant.hgvsc,
+            "HGVSp": variant.hgvsp,
+        }.get(column)
 
     def _raw_value(self, value: Any) -> Any:
         if value is None:
