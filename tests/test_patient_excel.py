@@ -28,7 +28,7 @@ def test_patient_comment_and_long_hsmd_survive_regeneration(tmp_path):
     writer.write_patient(result, variant.patient_id, [variant], output, {})
     workbook = openpyxl.load_workbook(output)
     sheet = workbook["Oversikt"]
-    assert "E4:J7" in {str(area) for area in sheet.merged_cells.ranges}
+    assert "E4:K7" in {str(area) for area in sheet.merged_cells.ranges}
     assert sheet["E3"].value is None
     assert sheet["E4"].fill.fgColor.rgb == "00FFF3E8"
     sheet["E4"] = "Manuell vurdering\nBevares ved ny generering"
@@ -337,6 +337,29 @@ def test_patient_data_sheet_includes_artifacts_without_skip_column(tmp_path):
             openpyxl.utils.get_column_letter(report_column)
         ].hidden
         assert data.cell(data.max_row, hgvsc_column).value == artifact.hgvsc
+    finally:
+        workbook.close()
+
+
+def test_patient_overview_places_source_gnomad_af_after_database_columns(tmp_path):
+    result = VariantProcessor().process(
+        FIXTURE, "2026-09-14", tmp_path / "review.xlsx"
+    )
+    variant = result.variants[3]
+    output = tmp_path / "patient.xlsx"
+
+    PatientExcelReportWriter().write_patient(
+        result, variant.patient_id, [variant], output, {}
+    )
+
+    workbook = openpyxl.load_workbook(output)
+    try:
+        overview = workbook["Oversikt"]
+        headers = [overview.cell(10, column).value for column in range(1, 12)]
+        assert headers[-2:] == ["COSMIC", "gnomAD AF"]
+        assert overview["K11"].value == "0.00001"
+        assert overview.auto_filter.ref == "A10:K11"
+        assert overview.print_area == "'Oversikt'!$A$1:$K$16"
     finally:
         workbook.close()
 

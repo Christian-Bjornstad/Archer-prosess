@@ -27,6 +27,8 @@ def test_reader_parses_archer_tsv_columns():
     assert variants[0].patient_id == "26OUM00001"
     assert variants[0].transcript == "NM_004119.2"
     assert variants[3].af == 0.5333
+    assert variants[3].gnomad_af == 0.00001
+    assert variants[3].raw["gnomAD AF"] == "0.00001"
 
 
 def test_production_rules_and_boundaries():

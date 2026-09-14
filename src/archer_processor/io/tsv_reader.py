@@ -45,7 +45,12 @@ class ArcherTsvReader:
         ok, errors, _warnings = self.validate(path)
         if not ok:
             raise ValueError("; ".join(errors))
-        frame = pd.read_csv(path, sep="\t", low_memory=False)
+        frame = pd.read_csv(
+            path,
+            sep="\t",
+            low_memory=False,
+            converters={"gnomAD AF": str},
+        )
         return [
             self.row_to_variant(path, index + 2, row.to_dict())
             for index, row in frame.iterrows()
