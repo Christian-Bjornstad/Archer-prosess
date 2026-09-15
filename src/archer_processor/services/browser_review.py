@@ -6,6 +6,7 @@ import random
 import re
 import time
 from collections.abc import Callable, Iterable
+from copy import deepcopy
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -176,13 +177,8 @@ class BrowserReviewService:
                 f"{quote(cosmic_id, safe='')}"
             )
         if database == "OncoKB":
-            alteration = _protein_change(variant.hgvsp) or _cdna_change(variant.hgvsc)
-            if not variant.symbol or not alteration:
-                return ""
-            return (
-                "https://www.oncokb.org/gene/"
-                f"{quote(variant.symbol, safe='')}/somatic/{quote(alteration, safe='')}"
-            )
+            candidates = _oncokb_query_urls(variant)
+            return candidates[0] if candidates else ""
         if database == "ClinVar":
             query = variant.hgvsc or _review_query(variant)
             return (
@@ -489,21 +485,23 @@ class BrowserReviewService:
                             f"{variant.symbol} {_protein_change(variant.hgvsp) or _cdna_change(variant.hgvsc)}"
                         )
                     try:
-                        page.goto(
-                            query_url,
-                            wait_until="domcontentloaded",
-                            timeout=self.navigation_timeout_ms,
-                        )
                         if database == "OncoKB":
-                            self._wait_for_oncokb_result(page)
+                            results[key] = self._lookup_oncokb_variant(
+                                page, variant, artifact_directory
+                            )
                         else:
+                            page.goto(
+                                query_url,
+                                wait_until="domcontentloaded",
+                                timeout=self.navigation_timeout_ms,
+                            )
                             try:
                                 page.wait_for_load_state("networkidle", timeout=12_000)
                             except browser_timeout:
                                 page.wait_for_timeout(1_500)
-                        results[key] = self._capture_result(
-                            database, variant, page, artifact_directory
-                        )
+                            results[key] = self._capture_result(
+                                database, variant, page, artifact_directory
+                            )
                     except Exception as exc:
                         results[key] = DatabaseEvidence(
                             database=database,
@@ -523,6 +521,64 @@ class BrowserReviewService:
                     pass
         return results
 
+    def _lookup_oncokb_variant(
+        self,
+        page: Any,
+        variant: VariantRecord,
+        artifact_directory: Path,
+    ) -> DatabaseEvidence:
+        attempts: list[str] = []
+        transcript_mismatch = False
+        last_result = DatabaseEvidence(
+            "OncoKB", "invalid_query", "Cannot build an OncoKB web query."
+        )
+        for query_url in _oncokb_query_urls(variant):
+            attempts.append(query_url)
+            last_result = self._lookup_oncokb_url(
+                page, variant, query_url, artifact_directory
+            )
+            last_result.raw["query_attempts"] = list(attempts)
+            failure_kind = str(last_result.raw.get("failure_kind") or "")
+            transcript_mismatch = transcript_mismatch or (
+                failure_kind == ProviderFailureKind.IDENTITY_MISMATCH.value
+            )
+            if last_result.status == "found":
+                return last_result
+            if (
+                last_result.status not in {"not_found", "identity_mismatch"}
+                and failure_kind != ProviderFailureKind.IDENTITY_MISMATCH.value
+            ):
+                return last_result
+        if transcript_mismatch:
+            return DatabaseEvidence(
+                "OncoKB",
+                "manual_review",
+                "OncoKB transcript identity differed and the GRCh37 genomic "
+                "website fallback did not produce a verified variant result.",
+                accession=_review_query(variant),
+                url=last_result.url,
+                raw={
+                    "failure_kind": ProviderFailureKind.IDENTITY_MISMATCH.value,
+                    "query_attempts": attempts,
+                },
+            )
+        return last_result
+
+    def _lookup_oncokb_url(
+        self,
+        page: Any,
+        variant: VariantRecord,
+        query_url: str,
+        artifact_directory: Path,
+    ) -> DatabaseEvidence:
+        page.goto(
+            query_url,
+            wait_until="domcontentloaded",
+            timeout=self.navigation_timeout_ms,
+        )
+        self._wait_for_oncokb_result(page)
+        return self._capture_result("OncoKB", variant, page, artifact_directory)
+
     def _search_cosmic(
         self,
         variants: list[VariantRecord],
@@ -531,9 +587,27 @@ class BrowserReviewService:
         progress: Callable[[str], None] | None,
     ) -> dict[str, DatabaseEvidence]:
         """Capture the licensed COSMIC mutation page by Archer COSMICID."""
+        searchable_variants = [
+            variant for variant in variants if _cosmic_identifiers(variant.cosmic_id)
+        ]
+        results: dict[str, DatabaseEvidence] = {
+            self.variant_key(variant): DatabaseEvidence(
+                "COSMIC",
+                "not_applicable",
+                "ingen COSMIC-ID",
+                accession=variant.cosmic_id,
+                raw={
+                    "failure_kind": ProviderFailureKind.NOT_FOUND.value,
+                    "query_attempts": [],
+                },
+            )
+            for variant in variants
+            if not _cosmic_identifiers(variant.cosmic_id)
+        }
+        if not searchable_variants:
+            return results
         sync_browser, browser_error, _ = self._browser_api()
         artifact_directory.mkdir(parents=True, exist_ok=True)
-        results: dict[str, DatabaseEvidence] = {}
         with sync_browser() as runtime:
             try:
                 context = runtime.chromium.launch_persistent_context(
@@ -557,7 +631,7 @@ class BrowserReviewService:
                 )
                 self._ensure_cosmic_grch37(page)
                 if not self._try_saved_login("COSMIC", page):
-                    return {
+                    results.update({
                         self.variant_key(variant): DatabaseEvidence(
                             "COSMIC",
                             "login_required",
@@ -566,16 +640,17 @@ class BrowserReviewService:
                             accession=variant.cosmic_id,
                             url=page.url,
                         )
-                        for variant in variants
-                    }
+                        for variant in searchable_variants
+                    })
+                    return results
                 self._ensure_cosmic_grch37(page)
 
-                for index, variant in enumerate(variants, start=1):
+                for index, variant in enumerate(searchable_variants, start=1):
                     self._check_cancelled()
                     key = self.variant_key(variant)
                     if progress:
                         progress(
-                            f"COSMIC browser lookup {index}/{len(variants)}: "
+                            f"COSMIC browser lookup {index}/{len(searchable_variants)}: "
                             f"{variant.cosmic_id}"
                         )
                     try:
@@ -593,7 +668,7 @@ class BrowserReviewService:
                             accession=variant.cosmic_id,
                             url=self.query_url("COSMIC", variant),
                         )
-                    if index < len(variants):
+                    if index < len(searchable_variants):
                         self._wait_between_queries(page, "COSMIC", progress=progress)
             finally:
                 try:
@@ -628,7 +703,7 @@ class BrowserReviewService:
         for cosmic_id in identifiers:
             attempts.append(cosmic_id)
             if cosmic_id in self._cosmic_cache:
-                result = self._cosmic_cache[cosmic_id]
+                result = deepcopy(self._cosmic_cache[cosmic_id])
                 if progress:
                     progress(f"COSMIC cache hit: {cosmic_id}")
             else:
@@ -641,7 +716,7 @@ class BrowserReviewService:
                     progress=progress,
                 )
                 if result.status == "found":
-                    self._cosmic_cache[cosmic_id] = result
+                    self._cosmic_cache[cosmic_id] = deepcopy(result)
             result.raw["query_attempts"] = list(attempts)
             attempt_results.append(
                 {"query": cosmic_id, "status": result.status}
@@ -3695,6 +3770,49 @@ def _log_field(value: object, *, maximum: int = 160) -> str:
     return normalized[: maximum - 1].rstrip() + "…"
 
 
+def _oncokb_query_urls(variant: VariantRecord) -> list[str]:
+    candidates: list[str] = []
+    alteration = _protein_change(variant.hgvsp) or _cdna_change(variant.hgvsc)
+    if variant.symbol and alteration:
+        candidates.append(
+            "https://www.oncokb.org/gene/"
+            f"{quote(variant.symbol, safe='')}/somatic/{quote(alteration, safe='')}"
+        )
+    genomic_hgvs = format_mtbp_grch37(
+        variant.genomic_location, variant.ref_allele, variant.alt_allele
+    )
+    if genomic_hgvs.startswith("chr"):
+        genomic_hgvs = genomic_hgvs[3:]
+    if genomic_hgvs:
+        candidates.append(
+            "https://www.oncokb.org/hgvsg/"
+            f"{quote(genomic_hgvs, safe=':.')}?refGenome=GRCh37"
+        )
+    return list(dict.fromkeys(candidates))
+
+
+def _oncokb_page_matches_variant(
+    body_text: str, variant: VariantRecord, url: str
+) -> bool:
+    expected_hgvsg = format_mtbp_grch37(
+        variant.genomic_location, variant.ref_allele, variant.alt_allele
+    )
+    if expected_hgvsg.startswith("chr"):
+        expected_hgvsg = expected_hgvsg[3:]
+    if "/hgvsg/" in url.casefold() and expected_hgvsg:
+        normalized_url = url.replace("%3E", ">").replace("%3e", ">")
+        return (
+            f"/hgvsg/{expected_hgvsg}" in normalized_url
+            and "refgenome=grch37" in normalized_url.casefold()
+        )
+    compact = re.sub(r"[^A-Za-z0-9*]", "", body_text or "").casefold()
+    alteration = _protein_change(variant.hgvsp) or _cdna_change(variant.hgvsc)
+    expected = re.sub(
+        r"[^A-Za-z0-9*]", "", f"{variant.symbol}{alteration}"
+    ).casefold()
+    return bool(expected and expected in compact)
+
+
 def parse_oncokb_page(
     body_text: str, variant: VariantRecord, url: str
 ) -> DatabaseEvidence:
@@ -3741,6 +3859,15 @@ def parse_oncokb_page(
             "OncoKB", "not_found", f"No OncoKB web result for {page_identity}.",
             accession=page_identity, url=url,
             raw={"failure_kind": ProviderFailureKind.NOT_FOUND.value},
+        )
+    if not _oncokb_page_matches_variant(body_text, variant, url):
+        return DatabaseEvidence(
+            "OncoKB",
+            "identity_mismatch",
+            f"OncoKB page did not match the requested variant {page_identity}.",
+            accession=page_identity,
+            url=url,
+            raw={"failure_kind": ProviderFailureKind.IDENTITY_MISMATCH.value},
         )
     parts = [f"oncogenic={oncogenicity or 'unknown'}"]
     if biological_effect:

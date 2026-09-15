@@ -238,9 +238,9 @@ identitetskontroller der de er relevante.
 
 - [ ] Live-verifiser den nå dokumenterte /hgvsg/-nettsideruten med GRCh37
   mot våre transkriptavvik. Se research og testkrav ovenfor.
-- [ ] Hvis en dokumenterbar og identitetsverifisert nettlesersti finnes, ta
+- [x] Hvis en dokumenterbar og identitetsverifisert nettlesersti finnes, ta
   skjermbilde av det riktige resultatet; aldri bytt referanseaminosyre på gjetning.
-- [ ] Ellers vis «Transkriptavvik – manuell kontroll» med konkret forklaring og
+- [x] Ellers vis «Transkriptavvik – manuell kontroll» med konkret forklaring og
   lenke; skill dette fra «genet finnes ikke», uten gjentatte automatiske forsøk.
 
 Kontroll: NF1-/KDM6A-typen fra forrige probe, et gyldig treff og et ukjent gen.
@@ -251,7 +251,7 @@ Omfang: separate små snitt i browser_review.py. Avhengigheter: oppgave 1–3.
 
 - [ ] Behandle MTBP-gjenoppretting samlet per unik rapport-ID: én åpning og
   innhenting, deretter fordeling til variantene. Logg rapporter og varianter hver for seg.
-- [ ] Hopp over COSMIC-nettleserstart og nettbuffer når hele omfanget mangler
+- [x] Hopp over COSMIC-nettleserstart og nettbuffer når hele omfanget mangler
   COSMIC-ID; ingen venting etter lokale hopp-over-resultater.
 - [ ] Undersøk trygg gjenbruk av identiske kildeoppslag i samme kjøring med
   eksakt identitetsnøkkel, uavhengige evidensobjekter og stabile bildefiler.

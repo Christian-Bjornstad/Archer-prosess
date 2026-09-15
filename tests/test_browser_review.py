@@ -22,6 +22,7 @@ from archer_processor.services.browser_review import (
     _mtbp_screenshot_row_matches,
     _mtbp_unmapped_queries,
     _mtbp_variant_query,
+    _oncokb_query_urls,
     parse_franklin_page,
     parse_mtbp_report,
     parse_oncokb_page,
@@ -323,6 +324,26 @@ def test_cosmic_identifier_uses_first_archer_cosmic_id():
     assert _cosmic_numeric_id("") == ""
 
 
+def test_cosmic_without_any_input_ids_does_not_start_browser(tmp_path, monkeypatch):
+    variants = ArcherTsvReader().read(FIXTURE)[3:5]
+    for variant in variants:
+        variant.cosmic_id = ""
+    service = BrowserReviewService(profile_root=tmp_path)
+    monkeypatch.setattr(
+        service,
+        "_browser_api",
+        lambda: pytest.fail("COSMIC browser must not start without input IDs"),
+    )
+
+    results = service._search_cosmic(
+        variants, tmp_path / "cosmic", progress=None
+    )
+
+    assert set(results) == {service.variant_key(variant) for variant in variants}
+    assert all(evidence.status == "not_applicable" for evidence in results.values())
+    assert all(evidence.raw["query_attempts"] == [] for evidence in results.values())
+
+
 def test_cosmic_lookup_tries_each_identifier_until_verified_match(
     tmp_path, monkeypatch
 ):
@@ -402,6 +423,40 @@ def test_cosmic_stops_after_all_identifiers_miss(
     assert evidence.status == "not_found"
     assert evidence.accession == "COSV222"
     assert evidence.raw["query_attempts"] == ["COSM111", "COSV222"]
+
+
+def test_cosmic_cache_returns_independent_evidence_objects(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    first = ArcherTsvReader().read(FIXTURE)[3]
+    first.cosmic_id = "COSM10648"
+    second = replace(first, sample="second-patient-sample")
+    service = BrowserReviewService(profile_root=tmp_path)
+    calls = []
+
+    def lookup(page, candidate, query_url, artifact_directory, *, progress):
+        calls.append(candidate.cosmic_id)
+        return DatabaseEvidence(
+            "COSMIC",
+            "found",
+            "matched",
+            accession=candidate.cosmic_id,
+            raw={"screenshots": [{"path": "shared.png"}]},
+        )
+
+    monkeypatch.setattr(service, "_lookup_cosmic_with_retry", lookup)
+
+    first_result = service._lookup_cosmic_variant(
+        object(), first, tmp_path, progress=None
+    )
+    second_result = service._lookup_cosmic_variant(
+        object(), second, tmp_path, progress=None
+    )
+    second_result.raw["query_attempts"].append("mutated")
+
+    assert calls == ["COSM10648"]
+    assert first_result is not second_result
+    assert first_result.raw["query_attempts"] == ["COSM10648"]
 
 
 def test_cosmic_identifier_result_ignores_available_genomic_coordinates(
@@ -824,7 +879,7 @@ def test_cosmic_buffer_uses_shorter_delay_than_global_setting(
     assert "OncoKB: safety buffer" in progress[1]
 
 
-def test_oncokb_visible_page_parser_extracts_core_evidence():
+def test_oncokb_visible_page_parser_rejects_different_variant_content():
     variant = ArcherTsvReader().read(FIXTURE)[3]
     body = """
     BRAF V600E Somatic
@@ -840,10 +895,106 @@ def test_oncokb_visible_page_parser_extracts_core_evidence():
 
     evidence = parse_oncokb_page(body, variant, "https://www.oncokb.org/example")
 
+    assert evidence.status == "identity_mismatch"
+
+
+def test_oncokb_visible_page_parser_extracts_core_evidence_for_requested_variant():
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    body = """
+    TP53 R175H Somatic
+    Variant Overview
+    The TP53 R175H mutation is known to be oncogenic.
+    Mutation Effect
+    Oncogenicity
+    Oncogenic
+    Biological Effect
+    Gain-of-function
+    Highest Level of Evidence
+    """
+
+    evidence = parse_oncokb_page(
+        body, variant, "https://www.oncokb.org/gene/TP53/somatic/R175H"
+    )
+
     assert evidence.status == "found"
     assert evidence.clinical_significance == "Oncogenic"
     assert "mutation_effect=Gain-of-function" in evidence.summary
-    assert "known to be oncogenic" in evidence.summary
+
+
+def test_oncokb_queries_add_documented_grch37_hgvsg_fallback():
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+
+    assert _oncokb_query_urls(variant) == [
+        "https://www.oncokb.org/gene/TP53/somatic/R175H",
+        "https://www.oncokb.org/hgvsg/17:g.7578406G%3EA?refGenome=GRCh37",
+    ]
+
+
+def test_oncokb_fallback_runs_only_after_identity_failure(tmp_path, monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+    attempted = []
+
+    def lookup(page, candidate, url, artifact_directory):
+        attempted.append(url)
+        if "/gene/" in url:
+            return DatabaseEvidence(
+                "OncoKB",
+                "not_found",
+                "canonical transcript mismatch",
+                raw={"failure_kind": ProviderFailureKind.IDENTITY_MISMATCH.value},
+            )
+        return DatabaseEvidence("OncoKB", "found", "verified genomic result")
+
+    monkeypatch.setattr(service, "_lookup_oncokb_url", lookup)
+
+    evidence = service._lookup_oncokb_variant(object(), variant, tmp_path)
+
+    assert evidence.status == "found"
+    assert attempted == _oncokb_query_urls(variant)
+    assert evidence.raw["query_attempts"] == attempted
+
+
+def test_oncokb_transient_error_does_not_switch_query_identity(tmp_path, monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+    attempted = []
+
+    def lookup(page, candidate, url, artifact_directory):
+        attempted.append(url)
+        return DatabaseEvidence("OncoKB", "error", "provider unavailable")
+
+    monkeypatch.setattr(service, "_lookup_oncokb_url", lookup)
+
+    evidence = service._lookup_oncokb_variant(object(), variant, tmp_path)
+
+    assert evidence.status == "error"
+    assert attempted == [_oncokb_query_urls(variant)[0]]
+
+
+def test_oncokb_unresolved_transcript_mismatch_requires_manual_review(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+
+    def lookup(page, candidate, url, artifact_directory):
+        if "/gene/" in url:
+            return DatabaseEvidence(
+                "OncoKB",
+                "not_found",
+                "canonical transcript mismatch",
+                raw={"failure_kind": ProviderFailureKind.IDENTITY_MISMATCH.value},
+            )
+        return DatabaseEvidence("OncoKB", "not_found", "no genomic result")
+
+    monkeypatch.setattr(service, "_lookup_oncokb_url", lookup)
+
+    evidence = service._lookup_oncokb_variant(object(), variant, tmp_path)
+
+    assert evidence.status == "manual_review"
+    assert "transcript" in evidence.summary.casefold()
+    assert len(evidence.raw["query_attempts"]) == 2
 
 
 def test_oncokb_login_accepts_successful_redirect_after_click_error(tmp_path):
