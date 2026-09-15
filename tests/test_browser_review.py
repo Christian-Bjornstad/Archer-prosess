@@ -1290,6 +1290,22 @@ def test_franklin_computed_capture_uses_both_subtabs_and_skips_somatic(
             selected.append(self.label)
 
         def evaluate(self, script):
+            if "getBoundingClientRect" in script:
+                classification = self.label or "ACMG Classification"
+                return {
+                    "x": 16,
+                    "width": 1880,
+                    "height": 700,
+                    "viewport_width": 1920,
+                    "text": (
+                        f"{classification}\nSuggested Classification\n"
+                        + (
+                            "Likely Oncogenic"
+                            if classification == "Oncogenic Classification"
+                            else "Likely Pathogenic"
+                        )
+                    ),
+                }
             selected.append(self.label)
             return True
 
@@ -1312,7 +1328,11 @@ def test_franklin_computed_capture_uses_both_subtabs_and_skips_somatic(
                 "gnx-result-page",
                 "gnx-oncogenic-classification-app",
             }
-            return Locator()
+            label = {
+                "gnx-result-page": "ACMG Classification",
+                "gnx-oncogenic-classification-app": "Oncogenic Classification",
+            }.get(selector, "")
+            return Locator(label)
 
         def wait_for_timeout(self, milliseconds):
             pass
@@ -1348,29 +1368,66 @@ def test_franklin_computed_capture_uses_both_subtabs_and_skips_somatic(
     assert [item["label"] for item in screenshots] == ["ACMG", "Oncogenic"]
 
 
-def test_franklin_subtab_switch_waits_for_render_buffer(tmp_path):
+def test_franklin_subtab_switch_waits_until_oncogenic_panel_is_stable(tmp_path):
     service = BrowserReviewService(profile_root=tmp_path)
 
-    class Locator:
+    class TabLocator:
         def count(self):
             return 1
 
         def evaluate(self, script):
             return True
 
+    class PanelLocator:
+        def __init__(self):
+            self.snapshots = [
+                {
+                    "x": 1220,
+                    "width": 1880,
+                    "height": 700,
+                    "viewport_width": 1920,
+                    "text": "Oncogenic Classification\nSuggested Classification\nLikely Oncogenic",
+                },
+                {
+                    "x": 16,
+                    "width": 1880,
+                    "height": 700,
+                    "viewport_width": 1920,
+                    "text": "Oncogenic Classification\nSuggested Classification\nLikely Oncogenic",
+                },
+                {
+                    "x": 16,
+                    "width": 1880,
+                    "height": 700,
+                    "viewport_width": 1920,
+                    "text": "Oncogenic Classification\nSuggested Classification\nLikely Oncogenic",
+                },
+                {
+                    "x": 16,
+                    "width": 1880,
+                    "height": 700,
+                    "viewport_width": 1920,
+                    "text": "Oncogenic Classification\nSuggested Classification\nLikely Oncogenic",
+                },
+            ]
+
         def wait_for(self, **kwargs):
             pass
+
+        def evaluate(self, script):
+            return self.snapshots.pop(0)
 
     class Page:
         def __init__(self):
             self.waits = []
+            self.panel = PanelLocator()
 
         def get_by_text(self, label, exact):
-            return Locator()
+            return TabLocator()
 
         def locator(self, selector):
             assert selector == "gnx-oncogenic-classification-app"
-            return Locator()
+            return self.panel
 
         def evaluate(self, script):
             pass
@@ -1383,7 +1440,8 @@ def test_franklin_subtab_switch_waits_for_render_buffer(tmp_path):
         page, "Oncogenic Classification"
     )
 
-    assert sum(page.waits) >= 1_000
+    assert page.panel.snapshots == []
+    assert page.waits == [250, 250, 250]
 
 
 def test_browser_review_can_be_cancelled_before_opening_edge(tmp_path):
@@ -1488,11 +1546,29 @@ def test_franklin_classification_capture_ends_with_complete_de_novo_card(tmp_pat
     assert not any("Population" in item["label"] for item in screenshots)
 
 
-def test_franklin_overview_starts_above_visible_gene_header(tmp_path):
+def test_franklin_overview_uses_only_active_panel_layout(
+    tmp_path, monkeypatch
+):
     service = BrowserReviewService(
         profile_root=tmp_path, capture_validator=VALID_CAPTURE
     )
     captures = []
+    expanded_selectors = []
+
+    class ActivePanelLayout:
+        def __init__(self, selector):
+            self.selector = selector
+
+        def __enter__(self):
+            expanded_selectors.append(self.selector)
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    monkeypatch.setattr(
+        "archer_processor.services.browser_review.expanded_capture_layout",
+        lambda page, selector: ActivePanelLayout(selector),
+    )
 
     class Element:
         def __init__(self, box):
@@ -1534,9 +1610,11 @@ def test_franklin_overview_starts_above_visible_gene_header(tmp_path):
         Panel({"x": 100, "y": 150, "width": 900, "height": 600}),
         Element({"x": 100, "y": 360, "width": 900, "height": 100}),
         tmp_path / "overview.png",
+        panel_selector="gnx-oncogenic-classification-app",
         gene_symbol="TP53",
     )
 
+    assert expanded_selectors == ["gnx-oncogenic-classification-app"]
     assert captures[0]["clip"] == {
         "x": 38,
         "y": 66,
