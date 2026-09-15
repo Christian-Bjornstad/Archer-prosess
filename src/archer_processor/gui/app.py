@@ -9,8 +9,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QDate, QObject, Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QIcon, QPixmap
+from PyQt6.QtCore import QDate, QObject, Qt, QThread, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -76,6 +76,8 @@ from archer_processor.gui.theme import Palette, application_stylesheet
 from archer_processor.gui.widgets.navigation import NavigationRail
 from archer_processor.gui.widgets.run_status import RunStatusStrip
 from archer_processor.gui.widgets.status_matrix import StatusMatrix
+from archer_processor import __version__
+from archer_processor.services.run_journal import RunJournal
 
 
 AUTOMATIC_RETRYABLE_EVIDENCE_STATUSES = frozenset(
@@ -1044,6 +1046,8 @@ class MainWindow(QMainWindow):
         self._active_search_report_patient_ids: list[str] = []
         self.workbook_write_pending = False
         self._workbook_lock_warning_shown = False
+        self.run_journal: RunJournal | None = None
+        self._run_log_warning_shown = False
         self.setWindowTitle("VPM Tolkning")
         self.app_icon_path = (
             Path(__file__).resolve().parents[1] / "assets" / "vpm-tolkning-icon.png"
@@ -1289,8 +1293,16 @@ class MainWindow(QMainWindow):
         self.log.setMinimumHeight(120)
         self.log.setMaximumBlockCount(500)
         self.log.setPlaceholderText("No activity yet. Select a variant TSV to begin.")
+        log_actions = QHBoxLayout()
+        log_actions.addStretch()
+        self.open_log_folder_btn = QPushButton("Open full log folder")
+        self.open_log_folder_btn.setMinimumHeight(44)
+        self.open_log_folder_btn.setEnabled(False)
+        self.open_log_folder_btn.clicked.connect(self._open_run_log_folder)
+        log_actions.addWidget(self.open_log_folder_btn)
         activity_layout.addWidget(activity_help)
         activity_layout.addWidget(self.log, 1)
+        activity_layout.addLayout(log_actions)
         layout.addWidget(activity)
         layout.addStretch()
         self.import_scroll.setWidget(content)
@@ -1819,6 +1831,7 @@ class MainWindow(QMainWindow):
         if output_path.suffix.lower() != ".xlsx":
             output_path = output_path.with_suffix(".xlsx")
             self.output_edit.setText(str(output_path))
+        self._start_run_journal(output_path.parent, "processing")
         self._save_settings(silent=True)
         self._set_busy("Processing")
         worker = ProcessingWorker(
@@ -1917,6 +1930,12 @@ class MainWindow(QMainWindow):
             for database in databases
         )
         self._search_started_at = time.monotonic()
+        output_directory = (
+            self.result.output_path.parent
+            if self.result.output_path is not None
+            else Path(self.settings.default_output_dir)
+        )
+        self._start_run_journal(output_directory, "evidence")
         self._active_search_report_patient_ids = list(report_after_search or [])
         self._set_busy("Searching")
         self.search_btn.setText("Run Evidence Search")
@@ -2055,6 +2074,12 @@ class MainWindow(QMainWindow):
                 self._show_search_already_complete(databases)
                 return
         self._search_started_at = time.monotonic()
+        output_directory = (
+            self.result.output_path.parent
+            if self.result.output_path is not None
+            else Path(self.settings.default_output_dir)
+        )
+        self._start_run_journal(output_directory, "browser_evidence")
         self._set_busy("Browser lookups")
         worker = BrowserReviewWorker(
             variants,
@@ -2210,6 +2235,7 @@ class MainWindow(QMainWindow):
     def _load_processed_workbook(self, workbook_path: Path) -> None:
         if self.workbook_load_thread and self.workbook_load_thread.isRunning():
             return
+        self._start_run_journal(workbook_path.parent, "resume")
         self._set_busy("Loading workbook")
         self.run_progress.show()
         self.run_progress.title.setText("Loading processed workbook")
@@ -3000,7 +3026,30 @@ class MainWindow(QMainWindow):
     def _log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log.appendPlainText(f"[{timestamp}] {message}")
+        if self.run_journal is not None and not self.run_journal.record(message):
+            if not self._run_log_warning_shown:
+                self._run_log_warning_shown = True
+                self.log.appendPlainText(
+                    f"[{timestamp}] Full run log could not be written: "
+                    f"{self.run_journal.last_error}"
+                )
         self.status_bar.showMessage(message, 5000)
+
+    def _start_run_journal(self, output_directory: Path, run_mode: str) -> None:
+        if self.run_journal is not None:
+            self.run_journal.close()
+        self.run_journal = RunJournal.start(
+            Path(output_directory) / "vpm_run_logs",
+            run_mode=run_mode,
+            app_version=__version__,
+        )
+        self._run_log_warning_shown = False
+        self.open_log_folder_btn.setEnabled(not bool(self.run_journal.last_error))
+
+    def _open_run_log_folder(self) -> None:
+        if self.run_journal is None or self.run_journal.last_error:
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.run_journal.directory)))
 
     def _search_elapsed_text(self) -> str:
         if self._search_started_at is None:

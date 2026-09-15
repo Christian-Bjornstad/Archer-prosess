@@ -189,9 +189,9 @@ tests/test_browser_review.py; deretter én syntetisk MTBP-kjøring på jobb-PC.
 
 Omfang: liten logging-modul, gui/app.py og tester. Avhengigheter: ingen.
 
-- [ ] Skriv en full kjørelogg til godkjent resultatmappe uavhengig av de 500
+- [x] Skriv en full kjørelogg til godkjent resultatmappe uavhengig av de 500
   synlige linjene. Legg til «Åpne loggmappe»/kopiering av hele loggen.
-- [ ] Gi hver kjøring en ID og logg appversjon, kjøremåte, kilde, pasientindeks,
+- [x] Gi hver kjøring en ID og logg appversjon, kjøremåte, kilde, pasientindeks,
   variantreferanse, resultat, feilstadium, forsøk og tid. Behold lesbar tekst;
   lag JSONL for analyse med standardbiblioteket. Ingen passord eller sesjonsdata.
 - [ ] Vis avslutning med faktisk funnet, ikke funnet, manuell kontroll og uferdig;

@@ -88,6 +88,25 @@ def test_entire_evidence_page_scrolls_and_import_keeps_log(qt_app):
     window.close()
 
 
+def test_activity_log_keeps_complete_disk_history_beyond_visible_limit(
+    qt_app, tmp_path
+):
+    window = MainWindow()
+    window._start_run_journal(tmp_path, "evidence")
+
+    for index in range(525):
+        window._log(f"persistent event {index}")
+
+    assert window.log.blockCount() <= 500
+    assert window.run_journal is not None
+    disk_lines = window.run_journal.text_path.read_text(encoding="utf-8").splitlines()
+    assert len(disk_lines) == 525
+    assert "persistent event 0" in disk_lines[0]
+    assert "persistent event 524" in disk_lines[-1]
+    assert window.open_log_folder_btn.isEnabled()
+    window.close()
+
+
 def test_import_fields_do_not_overlap_in_short_window(qt_app):
     window = MainWindow()
     window.resize(1120, 720)
