@@ -105,8 +105,8 @@ Validated login-assisted workflow:
 
 ## Implemented browser foundation
 
-The application now includes a serial visible-Edge workflow with isolated,
-persistent provider profiles and optional passwords encrypted by Windows
+The application now includes a bounded-concurrency visible-Edge workflow with
+isolated, persistent provider profiles and optional passwords encrypted by Windows
 Credential Manager. OncoKB and Franklin web lookups have been tested end to end
 with synthetic data. Franklin resolves transcript HGVS through its search UI,
 checks returned identity, imports only the classification, and captures separate
@@ -114,11 +114,12 @@ computed-classification and prediction/population-frequency images. OncoKB waits
 for the client-rendered overview/mutation-effect evidence before capture. Each
 capture is represented in the structured JSON audit evidence.
 
-The full evidence workflow is patient-centric: it finishes the selected API/public
-sources, COSMIC, OncoKB, Franklin, and finally MTBP for one patient before restarting at
-the first source for the next patient. Public/API sources have no added delay. A
-fresh randomized safety delay is used only for signed-in website variants and
-provider changes (10-20 seconds by default). Completed patient evidence is
+The full evidence workflow is patient-centric: it finishes every selected source
+for one patient before starting the next. Franklin and MTBP each have an isolated
+lane while COSMIC, OncoKB and ClinVar remain serial in a third lane. Public/API
+sources have no added delay. A fresh randomized safety delay is used only for
+signed-in website variants (3-8 seconds by default); provider switches in the
+fast lane retain a fixed short buffer. Completed patient evidence is
 checkpointed into the workbook during long runs. MTBP allows five reports in the
 portal. After a report is validated and its evidence is persisted locally, the
 application deletes that exact `ARCHER-` report before submitting the next variant.

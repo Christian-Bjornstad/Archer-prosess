@@ -138,10 +138,13 @@ to be reused while keeping browser activity visible and auditable.
 
 ## Operational safeguards
 
-- Evidence searches run serially, one patient at a time.
-- Selected websites finish for one patient before the next patient begins.
-- Randomized safety buffers default to 10–20 seconds between browser actions.
-- MTBP runs last and has a separately configurable report timeout.
+- Patients run serially; all selected websites finish before the next patient begins.
+- Different providers use at most three parallel lanes: Franklin, MTBP, and a
+  serial fast-database lane for COSMIC, OncoKB, and ClinVar.
+- Variants within a provider remain serial and each provider keeps its isolated
+  Edge profile. The application never opens concurrent sessions to one provider.
+- Randomized safety buffers default to 3–8 seconds between variant lookups.
+- MTBP has a separately configurable report timeout.
 - MTBP submissions use application-generated pseudonymous identifiers only.
 - Completed patient evidence is saved throughout the run, not only at the end.
 - Cooperative cancellation is checked during provider loops, safety buffers,
@@ -321,5 +324,4 @@ boundaries are intentionally fail-closed and covered by regression tests whereve
 possible.
 
 See [capture and concurrency notes](docs/mtbp-capture-and-concurrency.md) for the
-MTBP fallback policy and why browser searches remain serial. Parallel browser
-processing has not been enabled.
+MTBP fallback policy and the bounded provider concurrency model.

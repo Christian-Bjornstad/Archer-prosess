@@ -24,18 +24,23 @@
 
 ## Bounded browser concurrency
 
-The normal Evidence run and the separate Browser Sources run now use two lanes
-per patient: MTBP runs alone while the remaining selected browser providers run
-serially in their canonical order. Each lane owns a separate service instance,
-and every provider still uses its own persistent Edge profile. There are never
-more than two browser lanes, and neither patients nor variants within a provider
-are parallelized.
+The normal Evidence run and the separate Browser Sources run now use up to three
+lanes per patient: Franklin runs alone, MTBP runs alone, and COSMIC, OncoKB and
+ClinVar share a serial fast-database lane in canonical order. Each lane owns a
+separate service instance, and every provider still uses its own persistent Edge
+profile. There are never more than three browser lanes, and neither patients nor
+variants within a provider are parallelized.
 
 Both lanes must finish before the next patient begins. Existing provider delays,
 backoff, pause/stop checks and queued checkpoint/report writes are preserved.
-Synthetic tests prove the two lanes overlap and that a single selected lane runs
-directly. A live Citrix run is still needed to measure the real elapsed-time gain
-and observe whether either portal changes its failure rate.
+Synthetic tests prove all three lanes overlap and that a single selected lane
+runs directly. A live Citrix run is still needed to measure the real elapsed-time
+gain and observe whether any portal changes its failure rate.
+
+The former two-lane cap was revised on 2026-09-15 after a four-patient run showed
+Franklin dominating the browser queue. Five provider lanes were considered but
+rejected for now: separating Franklin from the fast-database lane captures the
+largest expected gain without opening five Edge processes in Citrix.
 
 MTBP remains batched once per patient and its variant crops are derived locally,
 so concurrency does not add per-variant MTBP requests.
