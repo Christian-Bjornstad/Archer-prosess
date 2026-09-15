@@ -2,6 +2,8 @@ from dataclasses import replace
 from pathlib import Path
 
 import openpyxl
+import pytest
+from openpyxl import Workbook
 
 from archer_processor.core import (
     FilterEngine,
@@ -17,6 +19,24 @@ from archer_processor.services import DatabaseSearchService, load_database_skip_
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+
+
+def test_review_workbook_failed_save_preserves_last_good_file(tmp_path, monkeypatch):
+    result = VariantProcessor().process(FIXTURE, "2026-09-15", tmp_path / "review.xlsx")
+    output = tmp_path / "review.xlsx"
+    output.write_bytes(b"last-good-workbook")
+
+    def interrupted_save(self, candidate):
+        Path(candidate).write_bytes(b"partial-workbook")
+        raise OSError("network write interrupted")
+
+    monkeypatch.setattr(Workbook, "save", interrupted_save)
+
+    with pytest.raises(OSError, match="network write interrupted"):
+        ExcelReportWriter().write(result, output)
+
+    assert output.read_bytes() == b"last-good-workbook"
+    assert list(tmp_path.glob("*.tmp.xlsx")) == []
 
 
 def test_reader_parses_archer_tsv_columns():

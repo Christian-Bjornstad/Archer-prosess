@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import pytest
 from PIL import Image
@@ -185,6 +186,88 @@ def test_browser_review_logs_queryable_result_and_provider_summary(
     assert "total=1" in summary
     assert "not_found=1" in summary
     assert "retryable=0" in summary
+
+
+def test_browser_review_persists_terminal_failure_before_checkpoint(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(
+        profile_root=tmp_path,
+        request_delay_ms=0,
+        request_delay_max_ms=0,
+        provider_switch_delay_ms=0,
+    )
+    key = service.variant_key(variant)
+    checkpoints = []
+
+    monkeypatch.setattr(
+        service,
+        "_search_database",
+        lambda *args, **kwargs: {
+            key: DatabaseEvidence(
+                "OncoKB",
+                "error",
+                "site unavailable",
+                accession="TP53:R175H",
+                raw={"failure_stage": "waiting", "query_attempts": ["TP53:R175H"]},
+            )
+        },
+    )
+
+    service.search_variants(
+        [variant],
+        ["OncoKB"],
+        tmp_path / "evidence",
+        checkpoint=lambda result: checkpoints.append(
+            list((tmp_path / "evidence" / "oncokb").glob("*.audit.json"))
+        ),
+    )
+
+    assert len(checkpoints) == 1
+    assert len(checkpoints[0]) == 1
+    payload = json.loads(checkpoints[0][0].read_text(encoding="utf-8"))
+    assert payload["status"] == "error"
+    assert payload["retryable"] is True
+    assert payload["query_attempts"] == ["TP53:R175H"]
+
+
+def test_browser_review_audit_write_failure_keeps_result_and_checkpoint(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(
+        profile_root=tmp_path,
+        request_delay_ms=0,
+        request_delay_max_ms=0,
+        provider_switch_delay_ms=0,
+    )
+    key = service.variant_key(variant)
+    checkpoints = []
+    messages = []
+    monkeypatch.setattr(
+        service,
+        "_search_database",
+        lambda *args, **kwargs: {
+            key: DatabaseEvidence("OncoKB", "not_found", "no exact result")
+        },
+    )
+    monkeypatch.setattr(
+        "archer_processor.services.browser_review.write_evidence_audit",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk unavailable")),
+    )
+
+    results = service.search_variants(
+        [variant],
+        ["OncoKB"],
+        tmp_path / "evidence",
+        progress=messages.append,
+        checkpoint=checkpoints.append,
+    )
+
+    assert results[key][0].status == "not_found"
+    assert len(checkpoints) == 1
+    assert any("audit" in message.casefold() and "disk unavailable" in message for message in messages)
 
 
 def test_browser_resume_skips_completed_sources_and_checkpoints_each_provider(

@@ -25,6 +25,7 @@ from archer_processor.services.provider_failures import (
 from archer_processor.services.evidence_audit import (
     is_completed_evidence,
     persist_evidence_result,
+    write_evidence_audit,
 )
 from archer_processor.services.browser_popups import dismiss_known_overlays
 from archer_processor.services.capture_validation import (
@@ -290,18 +291,45 @@ class BrowserReviewService:
                     f"{len(pending_variants)}/{len(variant_list)} pending variant(s)"
                 )
             provider_started_at = time.monotonic()
+            provider_directory = artifact_root / database.lower().replace(" ", "-")
             database_results = self._search_database(
                 database,
                 pending_variants,
-                artifact_root / database.lower().replace(" ", "-"),
+                provider_directory,
                 progress=provider_progress,
                 prior_evidence=prior_evidence,
             )
+            provider_duration = time.monotonic() - provider_started_at
+            variants_by_key = {
+                self.variant_key(variant): variant for variant in pending_variants
+            }
+            for key, evidence in database_results.items():
+                variant = variants_by_key.get(key)
+                if variant is None:
+                    continue
+                query_attempts = evidence.raw.get("query_attempts", [])
+                try:
+                    write_evidence_audit(
+                        provider_directory,
+                        database,
+                        variant,
+                        evidence,
+                        query_attempts=(
+                            query_attempts if isinstance(query_attempts, list) else []
+                        ),
+                        duration_seconds=provider_duration,
+                    )
+                except OSError as exc:
+                    if progress:
+                        progress(
+                            f"{database}: audit could not be written; result remains "
+                            f"in memory for workbook checkpoint ({exc})"
+                        )
             self._report_provider_results(
                 database,
                 pending_variants,
                 database_results,
-                duration_seconds=time.monotonic() - provider_started_at,
+                duration_seconds=provider_duration,
                 progress=provider_progress,
             )
             for key, evidence in database_results.items():

@@ -142,8 +142,20 @@ class ExcelReportWriter:
         )
         for ws in workbook.worksheets:
             ws.sheet_view.showGridLines = False
+        return self._save_atomically(workbook, output_path)
+
+    @staticmethod
+    def _save_atomically(workbook: Workbook, output_path: Path) -> Path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        workbook.save(output_path)
+        temporary = output_path.with_name(
+            f"{output_path.stem}.{os.getpid()}.tmp.xlsx"
+        )
+        try:
+            workbook.save(temporary)
+            temporary.replace(output_path)
+        finally:
+            if temporary.exists() and temporary != output_path:
+                temporary.unlink(missing_ok=True)
         return output_path
 
     def _database_selection_sheet(
