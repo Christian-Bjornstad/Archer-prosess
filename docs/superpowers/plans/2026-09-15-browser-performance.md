@@ -29,8 +29,11 @@ The supplied four-patient log was measured from 09:00 onward:
   `error`, `timeout`, `session_lost`, or `partial_capture`. The batch-end third
   retry was removed.
 - Franklin records status and elapsed seconds for every transcript/genomic query
-  in the evidence audit and progress log. This makes the next live run capable of
-  locating the recurring 47-second wait before any timeout is shortened.
+  in the evidence audit and progress log. Timeout/error evidence also records the
+  exact last stage: page opening, search input, hg19/somatic selection, query
+  submission, route resolution, or classification rendering. This makes the next
+  live run capable of locating the recurring 47-second wait before any timeout is
+  shortened.
 - Default between-variant buffers are reduced from 10–20 to 3–8 seconds. Exact
   former default configurations migrate automatically; customized values remain
   unchanged. COSMIC keeps its explicit 3–8-second provider buffer.

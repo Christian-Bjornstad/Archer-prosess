@@ -1149,6 +1149,7 @@ class BrowserReviewService:
     ) -> DatabaseEvidence:
         _, _, browser_timeout = self._browser_api()
         last_text = ""
+        stage = "opening the Franklin search page"
         try:
             page.goto(
                 FRANKLIN_HOME_URL,
@@ -1156,14 +1157,19 @@ class BrowserReviewService:
                 timeout=self.navigation_timeout_ms,
             )
             dismiss_known_overlays(page)
+            stage = "waiting for the Franklin search input"
             search = page.locator(
                 "input[placeholder='Enter variant, gene or select an example above']"
             )
             search.wait_for(state="visible", timeout=self.navigation_timeout_ms)
+            stage = "selecting the hg19 somatic search mode"
             self._select_franklin_search_mode(page)
+            stage = "submitting the Franklin query"
             search.fill(query)
             search.press("Enter")
+            stage = "resolving the Franklin variant route"
             self._open_franklin_resolved_variant(page, variant)
+            stage = "waiting for the Franklin classification"
             for _ in range(60):
                 self._check_cancelled()
                 last_text = page.locator("body").inner_text()
@@ -1206,20 +1212,27 @@ class BrowserReviewService:
                     url=page.url,
                 )
             status = "error"
-            error = "Franklin returned 'Something went wrong'."
+            error = (
+                "Franklin returned 'Something went wrong'."
+                if "Something went wrong" in last_text
+                else "Franklin classification did not finish rendering within 60 seconds."
+            )
         except browser_timeout:
             status = "timeout"
-            error = "Franklin timed out while resolving the variant."
+            error = f"Franklin timed out while {stage}."
         except Exception as exc:
             status = "error"
-            error = str(exc)
+            error = f"Franklin failed while {stage}: {exc}"
         return DatabaseEvidence(
             "Franklin",
             status,
             error or "Franklin did not return a classification.",
             accession=query,
             url=page.url,
-            raw={"visible_text_preview": last_text[:12_000]},
+            raw={
+                "failure_stage": stage,
+                "visible_text_preview": last_text[:12_000],
+            },
         )
 
     @staticmethod

@@ -8,6 +8,7 @@ from archer_processor.core.models import DatabaseEvidence, VariantRecord
 from archer_processor.services.browser_review import (
     BrowserReviewCancelled,
     BrowserReviewService,
+    FRANKLIN_HOME_URL,
     _cosmic_identifier,
     _cosmic_identifiers,
     _cosmic_numeric_id,
@@ -1008,6 +1009,46 @@ def test_franklin_query_is_attempted_once_before_outer_retry(tmp_path, monkeypat
 
     assert evidence.status == "error"
     assert len(gotos) == 1
+
+
+def test_franklin_timeout_records_the_exact_failure_stage(tmp_path, monkeypatch):
+    variant = VariantRecord(
+        source_file=Path("synthetic.tsv"),
+        source_row=1,
+        sample="PATIENT_A",
+        symbol="LUC7L2",
+        hgvsc="NM_016019.4:c.784dup",
+    )
+    service = BrowserReviewService(profile_root=tmp_path)
+
+    class Search:
+        def wait_for(self, **kwargs):
+            raise TimeoutError("search input stayed hidden")
+
+    class Page:
+        url = FRANKLIN_HOME_URL
+
+        def goto(self, url, **kwargs):
+            pass
+
+        def locator(self, selector):
+            return Search()
+
+    monkeypatch.setattr(
+        service, "_browser_api", lambda: (object, Exception, TimeoutError)
+    )
+    monkeypatch.setattr(
+        "archer_processor.services.browser_review.dismiss_known_overlays",
+        lambda page: None,
+    )
+
+    evidence = service._search_franklin_query(
+        Page(), variant, "LUC7L2:c.784dup", tmp_path, progress=None
+    )
+
+    assert evidence.status == "timeout"
+    assert evidence.raw["failure_stage"] == "waiting for the Franklin search input"
+    assert "search input" in evidence.summary
 
 
 def test_franklin_retries_failed_patients_only_after_first_pass(tmp_path, monkeypatch):
