@@ -22,7 +22,10 @@ from archer_processor.services.provider_failures import (
     ProviderFailureKind,
     ProviderLookupError,
 )
-from archer_processor.services.evidence_audit import persist_evidence_result
+from archer_processor.services.evidence_audit import (
+    is_completed_evidence,
+    persist_evidence_result,
+)
 from archer_processor.services.browser_popups import dismiss_known_overlays
 from archer_processor.services.capture_validation import (
     CaptureValidation,
@@ -286,12 +289,20 @@ class BrowserReviewService:
                     f"Browser review: starting {database} for "
                     f"{len(pending_variants)}/{len(variant_list)} pending variant(s)"
                 )
+            provider_started_at = time.monotonic()
             database_results = self._search_database(
                 database,
                 pending_variants,
                 artifact_root / database.lower().replace(" ", "-"),
                 progress=provider_progress,
                 prior_evidence=prior_evidence,
+            )
+            self._report_provider_results(
+                database,
+                pending_variants,
+                database_results,
+                duration_seconds=time.monotonic() - provider_started_at,
+                progress=provider_progress,
             )
             for key, evidence in database_results.items():
                 results[key].append(evidence)
@@ -310,6 +321,58 @@ class BrowserReviewService:
                     progress=provider_progress,
                 )
         return results
+
+    def _report_provider_results(
+        self,
+        database: str,
+        variants: list[VariantRecord],
+        results: dict[str, DatabaseEvidence],
+        *,
+        duration_seconds: float,
+        progress: Callable[[str], None] | None,
+    ) -> None:
+        if progress is None:
+            return
+        status_counts: dict[str, int] = {}
+        retryable_count = 0
+        for variant in variants:
+            evidence = results.get(self.variant_key(variant))
+            if evidence is None:
+                continue
+            status = evidence.status.strip().casefold() or "unknown"
+            status_counts[status] = status_counts.get(status, 0) + 1
+            retryable = not is_completed_evidence(evidence)
+            retryable_count += int(retryable)
+            fields = [
+                "RESULT",
+                f"source={database}",
+                f"variant={_log_field(evidence.accession or _review_query(variant))}",
+                f"status={_log_field(status)}",
+                f"retryable={'yes' if retryable else 'no'}",
+            ]
+            failure_stage = str(evidence.raw.get("failure_stage") or "").strip()
+            if failure_stage:
+                fields.append(f"stage={_log_field(failure_stage)}")
+            if evidence.summary:
+                fields.append(f"reason={_log_field(evidence.summary, maximum=240)}")
+            progress(" | ".join(fields))
+
+        count_fields = [
+            f"{status}={count}"
+            for status, count in sorted(status_counts.items())
+        ]
+        progress(
+            " | ".join(
+                [
+                    "SUMMARY",
+                    f"source={database}",
+                    f"total={len(results)}",
+                    *count_fields,
+                    f"retryable={retryable_count}",
+                    f"duration={max(0.0, duration_seconds):.1f}s",
+                ]
+            )
+        )
 
     def _search_database(
         self,
@@ -877,6 +940,20 @@ class BrowserReviewService:
     def _wait_for_cosmic_result(self, page: Any) -> None:
         attempts = max(1, self.navigation_timeout_ms // 500)
         for _ in range(attempts):
+            try:
+                body_text = page.locator("body").inner_text()
+            except (AttributeError, TypeError):
+                body_text = ""
+            if "mutation not found" in body_text.casefold():
+                detail = re.search(
+                    r"The mutation with ID\s+\d+\s+was not found in our database\.",
+                    body_text,
+                    flags=re.IGNORECASE,
+                )
+                raise ProviderLookupError(
+                    ProviderFailureKind.NOT_FOUND,
+                    detail.group(0) if detail else "COSMIC mutation was not found.",
+                )
             try:
                 self._cosmic_section(page, "Overview")
                 self._cosmic_section(page, "Tissue distribution")
@@ -3470,7 +3547,14 @@ class BrowserReviewService:
             body_text = page.locator("body").inner_text()
             if "Variant Overview" in body_text and "Mutation Effect" in body_text:
                 return
-            if "Page not found" in body_text or "An error has occurred" in body_text:
+            lowered = body_text.casefold()
+            if (
+                "page not found" in lowered
+                or "an error has occurred" in lowered
+                or "we do not have any information for this gene" in lowered
+                or "reference amino acid at position" in lowered
+                or re.search(r"\binvalid\s+somatic\b", body_text, re.IGNORECASE)
+            ):
                 return
             page.wait_for_timeout(500)
         raise TimeoutError("OncoKB did not finish rendering the variant result.")
@@ -3557,6 +3641,14 @@ def _cosmic_source_url(current_url: str, cosmic_id: str | None) -> str:
     return current_url
 
 
+def _log_field(value: object, *, maximum: int = 160) -> str:
+    """Keep progress events single-line and stable enough to filter or parse."""
+    normalized = " ".join(str(value or "").replace("|", "/").split())
+    if len(normalized) <= maximum:
+        return normalized
+    return normalized[: maximum - 1].rstrip() + "…"
+
+
 def parse_oncokb_page(
     body_text: str, variant: VariantRecord, url: str
 ) -> DatabaseEvidence:
@@ -3564,10 +3656,36 @@ def parse_oncokb_page(
     biological_effect = _after_heading(body_text, "Biological Effect")
     overview = _between(body_text, "Variant Overview", "Mutation Effect")
     page_identity = f"{variant.symbol} {_protein_change(variant.hgvsp)}".strip()
+    canonical_mismatch = re.search(
+        r"[^\n]*The reference amino acid at position\s+\d+\s+is\s+[^\n]+?"
+        r"on the OncoKB canonical transcript\.?",
+        body_text,
+        flags=re.IGNORECASE,
+    )
+    if canonical_mismatch:
+        detail = " ".join(canonical_mismatch.group(0).split())
+        return DatabaseEvidence(
+            "OncoKB",
+            "not_found",
+            f"OncoKB canonical transcript mismatch for {page_identity}: {detail}",
+            accession=page_identity,
+            url=url,
+            raw={"failure_kind": ProviderFailureKind.IDENTITY_MISMATCH.value},
+        )
+    if "we do not have any information for this gene" in body_text.casefold():
+        return DatabaseEvidence(
+            "OncoKB",
+            "not_found",
+            f"OncoKB has no information for gene {variant.symbol}.",
+            accession=page_identity,
+            url=url,
+            raw={"failure_kind": ProviderFailureKind.NOT_FOUND.value},
+        )
     if not oncogenicity and "Variant Overview" not in body_text:
         return DatabaseEvidence(
             "OncoKB", "not_found", f"No OncoKB web result for {page_identity}.",
             accession=page_identity, url=url,
+            raw={"failure_kind": ProviderFailureKind.NOT_FOUND.value},
         )
     parts = [f"oncogenic={oncogenicity or 'unknown'}"]
     if biological_effect:

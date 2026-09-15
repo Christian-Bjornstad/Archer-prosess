@@ -26,7 +26,10 @@ from archer_processor.services.browser_review import (
     parse_oncokb_page,
 )
 from archer_processor.services.capture_validation import CaptureValidation
-from archer_processor.services.provider_failures import ProviderFailureKind
+from archer_processor.services.provider_failures import (
+    ProviderFailureKind,
+    ProviderLookupError,
+)
 
 
 VALID_CAPTURE = lambda _: CaptureValidation(True, "ok", 800, 500, 10.0)
@@ -142,6 +145,46 @@ def test_browser_review_reports_provider_with_progress(tmp_path, monkeypatch):
 
     assert seen[0][0] == "Franklin"
     assert "starting" in seen[0][1].casefold()
+
+
+def test_browser_review_logs_queryable_result_and_provider_summary(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(
+        profile_root=tmp_path,
+        request_delay_ms=0,
+        request_delay_max_ms=0,
+        provider_switch_delay_ms=0,
+    )
+    messages = []
+
+    monkeypatch.setattr(
+        service,
+        "_search_database",
+        lambda database, variants, artifact_directory, *, progress, prior_evidence=None: {
+            service.variant_key(variant): DatabaseEvidence(
+                database,
+                "not_found",
+                "No OncoKB web result for the requested variant.",
+            )
+        },
+    )
+
+    service.search_variants(
+        [variant], ["OncoKB"], tmp_path / "audit", progress=messages.append
+    )
+
+    result = next(message for message in messages if message.startswith("RESULT |"))
+    summary = next(message for message in messages if message.startswith("SUMMARY |"))
+    assert "source=OncoKB" in result
+    assert "status=not_found" in result
+    assert "retryable=no" in result
+    assert "reason=No OncoKB web result" in result
+    assert "source=OncoKB" in summary
+    assert "total=1" in summary
+    assert "not_found=1" in summary
+    assert "retryable=0" in summary
 
 
 def test_browser_resume_skips_completed_sources_and_checkpoints_each_provider(
@@ -551,6 +594,35 @@ def test_cosmic_ready_check_uses_sections_instead_of_duplicate_headings(
     service._wait_for_cosmic_result(Page())
 
 
+def test_cosmic_ready_check_stops_immediately_when_mutation_is_not_found(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path, navigation_timeout_ms=45_000)
+
+    class Body:
+        def inner_text(self):
+            return (
+                "Mutation not found\n"
+                "The mutation with ID 211028 was not found in our database."
+            )
+
+    class Page:
+        waits = []
+
+        def locator(self, selector):
+            assert selector == "body"
+            return Body()
+
+        def wait_for_timeout(self, milliseconds):
+            self.waits.append(milliseconds)
+
+    page = Page()
+    with pytest.raises(ProviderLookupError) as raised:
+        service._wait_for_cosmic_result(page)
+
+    assert getattr(raised.value, "kind", None) == ProviderFailureKind.NOT_FOUND
+    assert "211028" in str(raised.value)
+    assert page.waits == []
+
+
 def test_oncokb_rejects_cookie_banner_before_capture(tmp_path):
     service = BrowserReviewService(profile_root=tmp_path)
 
@@ -779,6 +851,65 @@ def test_oncokb_waits_for_client_rendered_variant_content(tmp_path):
     page = Page()
     service._wait_for_oncokb_result(page)
     assert page.body.calls == 2
+
+
+@pytest.mark.parametrize(
+    "terminal_text",
+    [
+        "We do not have any information for this gene",
+        (
+            "NF1\nY2285Tfs*5\nInvalid\nSomatic\n"
+            "The reference amino acid at position 2285 is N instead of Y "
+            "on the OncoKB canonical transcript."
+        ),
+    ],
+)
+def test_oncokb_wait_recognizes_terminal_no_result_pages(tmp_path, terminal_text):
+    service = BrowserReviewService(profile_root=tmp_path, navigation_timeout_ms=45_000)
+
+    class Body:
+        def inner_text(self):
+            return terminal_text
+
+    class Page:
+        url = "https://www.oncokb.org/gene/NF1/somatic/Y2285Tfs*5"
+        waits = []
+
+        def locator(self, selector):
+            assert selector == "body"
+            return Body()
+
+        def wait_for_timeout(self, milliseconds):
+            self.waits.append(milliseconds)
+
+    page = Page()
+    service._wait_for_oncokb_result(page)
+
+    assert page.waits == []
+
+
+def test_oncokb_parser_explains_canonical_transcript_mismatch():
+    variant = VariantRecord(
+        source_file=Path("synthetic.tsv"),
+        source_row=1,
+        sample="SYNTHETIC",
+        symbol="NF1",
+        hgvsc="NM_001042492.2:c.6852_6855del",
+        hgvsp="p.Tyr2285ThrfsTer5",
+    )
+    body = (
+        "NF1\nY2285Tfs*5\nInvalid\nSomatic\n"
+        "NF1 Y2285Tfs*5: The reference amino acid at position 2285 is N "
+        "instead of Y on the OncoKB canonical transcript."
+    )
+
+    evidence = parse_oncokb_page(
+        body, variant, "https://www.oncokb.org/gene/NF1/somatic/Y2285Tfs*5"
+    )
+
+    assert evidence.status == "not_found"
+    assert "canonical transcript" in evidence.summary
+    assert evidence.raw["failure_kind"] == ProviderFailureKind.IDENTITY_MISMATCH
 
 
 def test_franklin_visible_page_parser_returns_only_classification():
