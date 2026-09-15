@@ -576,7 +576,39 @@ class BrowserReviewService:
             wait_until="domcontentloaded",
             timeout=self.navigation_timeout_ms,
         )
-        self._wait_for_oncokb_result(page)
+        try:
+            self._wait_for_oncokb_result(page)
+        except TimeoutError as exc:
+            artifact_directory.mkdir(parents=True, exist_ok=True)
+            base_path = self._screenshot_path(artifact_directory, "OncoKB", variant)
+            diagnostic_path = base_path.with_name(f"{base_path.stem}-render-timeout.png")
+            visible_text = ""
+            capture_error = ""
+            try:
+                visible_text = page.locator("body").inner_text()[:12_000]
+            except Exception as text_exc:
+                capture_error = f"text: {text_exc}"
+            try:
+                page.screenshot(path=str(diagnostic_path), full_page=False)
+            except Exception as screenshot_exc:
+                capture_error = " ; ".join(
+                    part for part in (capture_error, f"screenshot: {screenshot_exc}") if part
+                )
+                diagnostic_path = Path()
+            return DatabaseEvidence(
+                "OncoKB",
+                "error",
+                f"OncoKB did not finish rendering the variant result ({exc}).",
+                accession=_review_query(variant),
+                url=page.url,
+                raw={
+                    "failure_kind": ProviderFailureKind.TRANSIENT.value,
+                    "failure_stage": "result_rendering",
+                    "visible_text_preview": visible_text,
+                    "diagnostic_screenshot": str(diagnostic_path),
+                    "diagnostic_capture_error": capture_error,
+                },
+            )
         return self._capture_result("OncoKB", variant, page, artifact_directory)
 
     def _search_cosmic(
@@ -1589,7 +1621,7 @@ class BrowserReviewService:
             cleanup_status = cleanup.get("status") if isinstance(cleanup, dict) else ""
             analysis_id = str(prior.raw.get("analysis_id") or "")
             if analysis_id.startswith("ARCHER-") and (
-                prior.status in {"timeout", "partial_capture"}
+                prior.status in {"timeout", "partial_capture", "submission_unknown"}
                 or (
                     prior.status == "found"
                     and cleanup_status not in {"deleted", "already_absent"}
@@ -1666,7 +1698,8 @@ class BrowserReviewService:
             (variant, results[self.variant_key(variant)])
             for variant in variants
             if self.variant_key(variant) in results
-            and results[self.variant_key(variant)].status == "timeout"
+            and results[self.variant_key(variant)].status
+            in {"timeout", "submission_unknown"}
             and results[self.variant_key(variant)].raw.get("analysis_id")
         ]
         if pending:
@@ -1776,7 +1809,7 @@ class BrowserReviewService:
                     if report_count != 1:
                         if progress:
                             progress(f"MTBP: late report is still pending ({analysis_id})")
-                        if timed_out.status == "timeout":
+                        if timed_out.status in {"timeout", "submission_unknown"}:
                             recovered[self.variant_key(variant)] = timed_out
                         elif timed_out.status == "partial_capture":
                             if report_count == 0:
@@ -1949,6 +1982,14 @@ class BrowserReviewService:
             + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-")
             + batch_digest
         )
+        query_attempts = {
+            self.variant_key(variant): list(
+                initial_query_attempts[self.variant_key(variant)]
+            )
+            for variant, _ in query_pairs
+        }
+        failure_stage = "browser_startup"
+        submission_clicked = False
         context = None
         try:
             with sync_browser() as runtime:
@@ -1973,6 +2014,7 @@ class BrowserReviewService:
                             "MTBP: using previously validated GRCh37 fallback for "
                             f"{len(learned_fallback_keys)} variant(s)"
                         )
+                failure_stage = "login_navigation"
                 self._goto_with_retries(page, self.login_url("MTBP"))
                 if not self._session_authenticated("MTBP", page):
                     self._try_saved_login("MTBP", page)
@@ -1992,6 +2034,7 @@ class BrowserReviewService:
                         },
                     }
 
+                failure_stage = "report_capacity_preflight"
                 preflight_cleanup = self._cleanup_stale_mtbp_reports(
                     page,
                     progress=progress,
@@ -1999,12 +2042,6 @@ class BrowserReviewService:
                 )
                 self._goto_with_retries(page, self.login_url("MTBP"))
                 active_pairs = list(query_pairs)
-                query_attempts = {
-                    self.variant_key(variant): list(
-                        initial_query_attempts[self.variant_key(variant)]
-                    )
-                    for variant, query in query_pairs
-                }
                 fallback_keys = set(learned_fallback_keys)
                 validation_round = 0
                 while active_pairs:
@@ -2022,10 +2059,27 @@ class BrowserReviewService:
                         run_analysis_id,
                         submitted_queries,
                     )
-                    page.locator("#run-analysis").click()
+                    analysis_id = run_analysis_id
+                    failure_stage = "submission_acceptance"
+                    run_button = page.locator("#run-analysis")
+                    button_visible = run_button.is_visible()
+                    button_enabled = run_button.is_enabled()
+                    if progress:
+                        progress(
+                            "MTBP SUBMISSION | "
+                            f"analysis_id={analysis_id} | queries={len(submitted_queries)} | "
+                            f"button_visible={'yes' if button_visible else 'no'} | "
+                            f"button_enabled={'yes' if button_enabled else 'no'} | "
+                            f"url={page.url}"
+                        )
+                    if not button_visible or not button_enabled:
+                        raise RuntimeError(
+                            "MTBP submission button was not ready; no new batch was clicked."
+                        )
+                    run_button.click()
+                    submission_clicked = True
                     validation_text = self._wait_for_mtbp_acceptance(page)
                     if not validation_text:
-                        analysis_id = run_analysis_id
                         break
                     unmapped = _mtbp_unmapped_queries(validation_text)
                     rejected_pairs = [
@@ -2094,6 +2148,7 @@ class BrowserReviewService:
                 if not active_pairs:
                     return results
                 if "/queue/" in page.url:
+                    failure_stage = "report_polling"
                     if progress:
                         progress(
                             "MTBP: analysis queued; waiting up to "
@@ -2107,6 +2162,7 @@ class BrowserReviewService:
                     )
                 if progress:
                     progress("MTBP: report ready; validating returned variants")
+                failure_stage = "report_capture"
                 body_text = page.locator("body").inner_text(timeout=self.navigation_timeout_ms)
                 version_tooltip = page.locator("[data-tooltip-html*='VEP:']")
                 if version_tooltip.count():
@@ -2263,26 +2319,74 @@ class BrowserReviewService:
                 key = self.variant_key(variant)
                 if key in results:
                     continue
-                results[key] = DatabaseEvidence(
-                    "MTBP",
-                    "error",
-                    "An MTBP page operation timed out before report polling completed. "
-                    f"The remote report may still be available in Reports List: {exc}",
-                    accession=query,
-                    url=current_url,
+                if failure_stage == "submission_acceptance" and submission_clicked:
+                    evidence = _mtbp_uncertain_submission_evidence(
+                        variant,
+                        query,
+                        analysis_id,
+                        query_attempts.get(key, [query]),
+                        current_url,
+                        exc,
+                    )
+                else:
+                    evidence = DatabaseEvidence(
+                        "MTBP",
+                        "error",
+                        "An MTBP page operation timed out before report polling completed. "
+                        f"The remote report may still be available in Reports List: {exc}",
+                        accession=query,
+                        url=current_url,
+                        raw={
+                            "analysis_id": analysis_id,
+                            "submitted_query": query,
+                            "query_attempts": query_attempts.get(key, [query]),
+                            "failure_stage": failure_stage,
+                        },
+                    )
+                self._write_audit(
+                    evidence,
+                    self._screenshot_path(
+                        artifact_directory, "MTBP", variant
+                    ).with_suffix(".audit.json"),
                 )
+                results[key] = evidence
         except Exception as exc:
+            current_url = context.pages[0].url if context and context.pages else self.login_url("MTBP")
             for variant, query in query_pairs:
                 key = self.variant_key(variant)
                 if key in results:
                     continue
-                results[key] = DatabaseEvidence(
-                    "MTBP",
-                    "error",
-                    f"MTBP browser lookup failed: {exc}",
-                    accession=query,
-                    url=self.login_url("MTBP"),
+                if failure_stage == "submission_acceptance" and submission_clicked:
+                    evidence = _mtbp_uncertain_submission_evidence(
+                        variant,
+                        query,
+                        analysis_id,
+                        query_attempts.get(key, [query]),
+                        current_url,
+                        exc,
+                    )
+                else:
+                    status = "partial_capture" if failure_stage == "report_capture" else "error"
+                    evidence = DatabaseEvidence(
+                        "MTBP",
+                        status,
+                        f"MTBP browser lookup failed while {failure_stage}: {exc}",
+                        accession=query,
+                        url=current_url,
+                        raw={
+                            "analysis_id": analysis_id,
+                            "submitted_query": query,
+                            "query_attempts": query_attempts.get(key, [query]),
+                            "failure_stage": failure_stage,
+                        },
+                    )
+                self._write_audit(
+                    evidence,
+                    self._screenshot_path(
+                        artifact_directory, "MTBP", variant
+                    ).with_suffix(".audit.json"),
                 )
+                results[key] = evidence
         finally:
             if context is not None:
                 try:
@@ -2346,7 +2450,7 @@ class BrowserReviewService:
                 "No app-generated ARCHER report could be removed; delete an older "
                 "report manually in the MTBP Reports List."
             )
-        return {
+        outcome = {
             "status": "deleted_stale" if deleted else "retained",
             "trigger": "capacity" if deleted else "none",
             "deleted_stale_reports": deleted,
@@ -2355,6 +2459,15 @@ class BrowserReviewService:
             "remaining_reports": remaining,
             "remaining_archer_reports": generated_count,
         }
+        if progress:
+            progress(
+                "MTBP PREFLIGHT | "
+                f"reports={remaining} | archer_reports={generated_count} | "
+                f"protected_reports={len(protected)} | "
+                f"available_slots={max(0, MTBP_REPORT_LIMIT - remaining)} | "
+                f"cleanup={outcome['status']}"
+            )
+        return outcome
 
     def _finalize_mtbp_report(
         self,
@@ -2366,7 +2479,8 @@ class BrowserReviewService:
         for audit_path, evidence in audit_records:
             self._write_audit(evidence, audit_path)
         fully_captured = bool(audit_records) and all(
-            evidence.status == "found" and evidence.raw.get("screenshots")
+            evidence.status == "not_found"
+            or (evidence.status == "found" and evidence.raw.get("screenshots"))
             for _, evidence in audit_records
         )
         if fully_captured:
@@ -4410,6 +4524,34 @@ def _mtbp_variant_query(variant: VariantRecord) -> str:
         except ValueError:
             return ""
     return ""
+
+
+def _mtbp_uncertain_submission_evidence(
+    variant: VariantRecord,
+    query: str,
+    analysis_id: str,
+    query_attempts: list[str],
+    url: str,
+    error: Exception,
+) -> DatabaseEvidence:
+    """Persist enough identity to reconcile an MTBP click with an unknown outcome."""
+    return DatabaseEvidence(
+        "MTBP",
+        "submission_unknown",
+        "MTBP did not confirm whether the patient batch was accepted. New MTBP "
+        "submissions are paused until this exact analysis ID is reconciled in "
+        f"Reports List ({error}).",
+        accession=query or _review_query(variant),
+        url=url,
+        raw={
+            "analysis_id": analysis_id,
+            "submitted_query": query,
+            "query_attempts": list(query_attempts),
+            "failure_stage": "submission_acceptance",
+            "submitted_at": datetime.now(timezone.utc).isoformat(),
+            "remote_report_recovery": {"status": "pending"},
+        },
+    )
 
 
 def _mtbp_genomic_query(variant: VariantRecord) -> str:

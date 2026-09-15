@@ -24,6 +24,7 @@ from archer_processor.services.browser_review import (
     _mtbp_retry_query,
     _mtbp_screenshot_row_matches,
     _mtbp_unmapped_queries,
+    _mtbp_uncertain_submission_evidence,
     _mtbp_variant_query,
     _oncokb_query_urls,
     parse_franklin_page,
@@ -3152,6 +3153,114 @@ def test_mtbp_resume_does_not_duplicate_report_when_recovery_is_unavailable(
     assert results[key].raw["analysis_id"] == "ARCHER-pending"
 
 
+def test_mtbp_ambiguous_submission_preserves_recovery_identity(tmp_path):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+
+    evidence = _mtbp_uncertain_submission_evidence(
+        variant,
+        variant.hgvsc,
+        "ARCHER-uncertain",
+        [variant.hgvsc],
+        "https://mtbp.org/analyse/",
+        TimeoutError("no redirect"),
+    )
+
+    assert evidence.status == "submission_unknown"
+    assert evidence.raw["analysis_id"] == "ARCHER-uncertain"
+    assert evidence.raw["query_attempts"] == [variant.hgvsc]
+    assert evidence.raw["failure_stage"] == "submission_acceptance"
+    assert evidence.raw["remote_report_recovery"]["status"] == "pending"
+
+
+def test_oncokb_render_timeout_keeps_diagnostic_capture(tmp_path, monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+
+    class Body:
+        def inner_text(self, **kwargs):
+            return "OncoKB page shell without variant evidence"
+
+    class Page:
+        url = "https://www.oncokb.org/gene/TP53/R175H"
+
+        def __init__(self):
+            self.captures = []
+
+        def goto(self, url, **kwargs):
+            self.url = url
+
+        def locator(self, selector):
+            assert selector == "body"
+            return Body()
+
+        def screenshot(self, **kwargs):
+            self.captures.append(kwargs)
+
+    page = Page()
+    monkeypatch.setattr(
+        service,
+        "_wait_for_oncokb_result",
+        lambda candidate_page: (_ for _ in ()).throw(TimeoutError("slow render")),
+    )
+
+    evidence = service._lookup_oncokb_url(
+        page,
+        variant,
+        "https://www.oncokb.org/gene/TP53/R175H",
+        tmp_path / "oncokb",
+    )
+
+    assert evidence.status == "error"
+    assert evidence.raw["failure_stage"] == "result_rendering"
+    assert evidence.raw["failure_kind"] == "transient"
+    assert "page shell" in evidence.raw["visible_text_preview"]
+    assert evidence.raw["diagnostic_screenshot"].endswith(".png")
+    assert len(page.captures) == 1
+
+
+def test_mtbp_resume_recovers_ambiguous_submission_before_new_submission(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+    key = service.variant_key(variant)
+    prior = DatabaseEvidence(
+        "MTBP",
+        "submission_unknown",
+        "acceptance uncertain",
+        raw={"analysis_id": "ARCHER-uncertain"},
+    )
+    recovered_calls = []
+
+    def recover(pending, artifact_directory, *, progress):
+        recovered_calls.extend(pending)
+        return {
+            key: DatabaseEvidence(
+                "MTBP",
+                "found",
+                "recovered",
+                raw={"remote_report_cleanup": {"status": "deleted"}},
+            )
+        }
+
+    monkeypatch.setattr(service, "_recover_mtbp_timeouts", recover)
+    monkeypatch.setattr(
+        service,
+        "_search_mtbp_batch",
+        lambda *args, **kwargs: pytest.fail("uncertain submission must not be duplicated"),
+    )
+
+    result = service._search_mtbp(
+        [variant],
+        tmp_path / "mtbp",
+        progress=None,
+        prior_evidence={key: [prior]},
+    )
+
+    assert recovered_calls == [(variant, prior)]
+    assert result[key].status == "found"
+
+
 def test_mtbp_new_batch_protects_unavailable_retained_report(tmp_path, monkeypatch):
     variants = ArcherTsvReader().read(FIXTURE)[3:5]
     service = BrowserReviewService(profile_root=tmp_path)
@@ -3637,6 +3746,42 @@ def test_mtbp_finalization_retains_incomplete_report_for_recovery(
     assert evidence.raw["remote_report_cleanup"] == outcome
 
 
+def test_mtbp_finalization_deletes_complete_report_with_legitimate_not_found(
+    tmp_path, monkeypatch
+):
+    service = BrowserReviewService(profile_root=tmp_path)
+    found = DatabaseEvidence(
+        "MTBP",
+        "found",
+        "matched",
+        raw={"analysis_id": "ARCHER-mixed", "screenshots": [{"path": "saved.png"}]},
+    )
+    not_found = DatabaseEvidence(
+        "MTBP",
+        "not_found",
+        "no matching row",
+        raw={"analysis_id": "ARCHER-mixed", "screenshots": []},
+    )
+    (tmp_path / "mtbp").mkdir()
+    records = [
+        (tmp_path / "mtbp" / "found.audit.json", found),
+        (tmp_path / "mtbp" / "not-found.audit.json", not_found),
+    ]
+    deleted = []
+    monkeypatch.setattr(
+        service,
+        "_delete_mtbp_report",
+        lambda page, analysis_id: deleted.append(analysis_id)
+        or {"status": "deleted", "message": "deleted"},
+    )
+
+    outcome = service._finalize_mtbp_report(object(), "ARCHER-mixed", records)
+
+    assert outcome["status"] == "deleted"
+    assert deleted == ["ARCHER-mixed"]
+    assert all(item.raw["remote_report_cleanup"]["status"] == "deleted" for _, item in records)
+
+
 def test_mtbp_preflight_removes_only_one_safe_report_at_capacity(tmp_path):
     service = BrowserReviewService(profile_root=tmp_path)
     reports = [
@@ -3667,6 +3812,26 @@ def test_mtbp_preflight_keeps_archer_reports_below_capacity(tmp_path):
     assert outcome["status"] == "retained"
     assert outcome["remaining_reports"] == 4
     assert outcome["remaining_archer_reports"] == 1
+
+
+def test_mtbp_preflight_logs_capacity_and_protected_report_counts(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path)
+    page = _FakeMtbpReportsPage(
+        ["manual-1", "ARCHER-incomplete", "manual-2"]
+    )
+    messages = []
+
+    outcome = service._cleanup_stale_mtbp_reports(
+        page,
+        progress=messages.append,
+        protected_analysis_ids={"ARCHER-incomplete"},
+    )
+
+    assert outcome["remaining_reports"] == 3
+    assert messages == [
+        "MTBP PREFLIGHT | reports=3 | archer_reports=1 | protected_reports=1 | "
+        "available_slots=2 | cleanup=retained"
+    ]
 
 
 def test_mtbp_preflight_never_deletes_protected_incomplete_report(tmp_path):

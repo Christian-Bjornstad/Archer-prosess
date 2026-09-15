@@ -209,18 +209,33 @@ def _merge_evidence_results(target: dict, incoming: dict) -> None:
 def _evidence_completion_summary(
     evidence: dict[str, list[DatabaseEvidence]],
 ) -> str:
-    counts = {"found": 0, "not_found": 0, "manual_review": 0, "unfinished": 0}
+    counts = {
+        "found_complete": 0,
+        "found_incomplete": 0,
+        "not_found": 0,
+        "not_applicable": 0,
+        "manual_review": 0,
+        "deferred": 0,
+        "unfinished": 0,
+    }
     for items in evidence.values():
         for item in items:
             status = item.status.strip().casefold()
             if status == "found":
-                counts["found"] += 1
+                counts[
+                    "found_complete" if is_completed_evidence(item) else "found_incomplete"
+                ] += 1
             elif status == "not_found":
                 counts["not_found"] += 1
+            elif status == "not_applicable":
+                counts["not_applicable"] += 1
             elif status in {"manual", "manual_review"}:
                 counts["manual_review"] += 1
+            elif status == "deferred":
+                counts["deferred"] += 1
             elif not is_completed_evidence(item):
                 counts["unfinished"] += 1
+    counts["total"] = sum(counts.values())
     return " | ".join(
         ["RUN SUMMARY", *(f"{key}={value}" for key, value in counts.items())]
     )
@@ -718,6 +733,9 @@ class BrowserReviewWorker(QObject):
         # Evidence collected across all retry passes within this worker's run;
         # used so retry passes never repeat lookups that already succeeded.
         self._pass_evidence: dict[str, list[DatabaseEvidence]] = {}
+        self._paused_database_reasons: dict[str, str] = {}
+        self._consecutive_provider_failures: dict[str, int] = {}
+        self._provider_state_lock = threading.Lock()
         self._owner_thread: QThread | None = None
 
     def run(self) -> None:
@@ -755,6 +773,10 @@ class BrowserReviewWorker(QObject):
                     services=lane_services,
                 )
                 _merge_evidence_results(all_evidence, patient_evidence)
+                # Audit records are persisted by each provider result.  The much
+                # heavier network-workbook checkpoint is intentionally coalesced
+                # until all parallel lanes for this patient have finished.
+                self.patient_finished.emit(patient_evidence)
                 self.status.emit(f"{prefix}: browser sources complete")
                 self.progress.emit(patient_index, len(patients), f"Completed {patient_id}")
                 if patient_index < len(patients):
@@ -793,15 +815,44 @@ class BrowserReviewWorker(QObject):
         *,
         services: dict[str, BrowserReviewService] | None = None,
     ) -> dict[str, list[DatabaseEvidence]]:
-        lanes = self._database_lanes()
+        with self._provider_state_lock:
+            paused = dict(self._paused_database_reasons)
+        lanes = [
+            (lane_name, [database for database in databases if database not in paused])
+            for lane_name, databases in self._database_lanes()
+        ]
+        lanes = [(lane_name, databases) for lane_name, databases in lanes if databases]
+        deferred_evidence: dict[str, list[DatabaseEvidence]] = {}
+        for variant in patient_variants:
+            key = BrowserReviewService.variant_key(variant)
+            deferred_evidence[key] = [
+                DatabaseEvidence(
+                    database,
+                    "deferred",
+                    f"{database} was paused for this run: {reason}",
+                    raw={
+                        "failure_stage": "provider_circuit_breaker",
+                        "deferred_reason": reason,
+                    },
+                )
+                for database, reason in paused.items()
+                if database in self.databases
+            ]
+            for evidence in deferred_evidence[key]:
+                self.status.emit(
+                    f"{prefix}: RESULT | source={evidence.database} | "
+                    f"variant={variant.hgvsc or variant.hgvsp} | status=deferred | "
+                    "retryable=yes | stage=provider_circuit_breaker"
+                )
         if not lanes:
-            return {}
+            return deferred_evidence
 
         lane_states = {lane_name: {} for lane_name, _ in lanes}
         active_services = services or {
             lane_name: self._build_service() for lane_name, _ in lanes
         }
         patient_evidence: dict[str, list[DatabaseEvidence]] = {}
+        _merge_evidence_results(patient_evidence, deferred_evidence)
         if len(lanes) == 1:
             lane_name, databases = lanes[0]
             result = self._run_patient_lane(
@@ -861,6 +912,54 @@ class BrowserReviewWorker(QObject):
             databases=databases,
             pass_evidence=pass_evidence,
         )
+        unresolved_mtbp_report = next(
+            (
+                item
+                for items in result.values()
+                for item in items
+                if item.database == "MTBP"
+                and str(item.raw.get("analysis_id") or "").startswith("ARCHER-")
+                and not is_completed_evidence(item)
+            ),
+            None,
+        )
+        if unresolved_mtbp_report is not None:
+            reason = unresolved_mtbp_report.summary or "remote report is unresolved"
+            with self._provider_state_lock:
+                self._paused_database_reasons.setdefault("MTBP", reason)
+            self.status.emit(
+                f"{prefix}: PROVIDER PAUSED | source=MTBP | "
+                "reason=unresolved remote report; later patients will be deferred"
+            )
+        oncokb_items = [
+            item
+            for items in result.values()
+            for item in items
+            if item.database == "OncoKB"
+        ]
+        if oncokb_items:
+            failed = all(
+                item.status.strip().casefold()
+                in AUTOMATIC_RETRYABLE_EVIDENCE_STATUSES
+                for item in oncokb_items
+            )
+            with self._provider_state_lock:
+                consecutive = (
+                    self._consecutive_provider_failures.get("OncoKB", 0) + 1
+                    if failed
+                    else 0
+                )
+                self._consecutive_provider_failures["OncoKB"] = consecutive
+                if consecutive >= 2:
+                    self._paused_database_reasons.setdefault(
+                        "OncoKB",
+                        "two consecutive patient-level rendering or provider failures",
+                    )
+            if failed and consecutive >= 2:
+                self.status.emit(
+                    f"{prefix}: PROVIDER PAUSED | source=OncoKB | "
+                    "reason=two consecutive patient failures; later patients will be deferred"
+                )
         elapsed = time.monotonic() - started_at
         self.status.emit(f"{prefix}: {lane_name} complete ({elapsed:.1f}s)")
         return result
@@ -968,7 +1067,7 @@ class BrowserReviewWorker(QObject):
                 )
             ),
             completed_sources=completed_sources,
-            checkpoint=self.patient_finished.emit,
+            checkpoint=None,
             prior_evidence=prior_evidence,
         )
 

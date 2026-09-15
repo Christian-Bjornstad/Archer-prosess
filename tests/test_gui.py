@@ -801,8 +801,217 @@ def test_evidence_completion_summary_distinguishes_manual_and_unfinished():
     }
 
     assert _evidence_completion_summary(evidence) == (
-        "RUN SUMMARY | found=1 | not_found=1 | manual_review=1 | unfinished=1"
+        "RUN SUMMARY | found_complete=1 | found_incomplete=0 | not_found=1 | "
+        "not_applicable=0 | manual_review=1 | deferred=0 | unfinished=1 | total=4"
     )
+
+
+def test_evidence_completion_summary_counts_incomplete_found_and_not_applicable():
+    evidence = {
+        "a": [
+            DatabaseEvidence(
+                "MTBP",
+                "found",
+                raw={
+                    "analysis_id": "ARCHER-incomplete",
+                    "remote_report_cleanup": {"status": "retained_incomplete"},
+                },
+            )
+        ],
+        "b": [DatabaseEvidence("COSMIC", "not_applicable")],
+        "c": [DatabaseEvidence("MTBP", "deferred")],
+    }
+
+    assert _evidence_completion_summary(evidence) == (
+        "RUN SUMMARY | found_complete=0 | found_incomplete=1 | not_found=0 | "
+        "not_applicable=1 | manual_review=0 | deferred=1 | unfinished=0 | total=3"
+    )
+
+
+def test_browser_worker_pauses_mtbp_after_ambiguous_submission_and_defers_next_patient(
+    qt_app, tmp_path, monkeypatch
+):
+    base = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-15",
+        tmp_path / "review.xlsx",
+    ).variants[0]
+    variants = [
+        replace(base, sample="26OUM90001_VPM"),
+        replace(base, sample="26OUM90002_VPM"),
+    ]
+    worker = BrowserReviewWorker(
+        variants,
+        ["MTBP"],
+        tmp_path / "evidence",
+        replace(AppSettings(), browser_delay_seconds=0, browser_delay_max_seconds=0),
+    )
+    calls = []
+    finished = []
+
+    class Service:
+        def search_variants(self, batch, databases, *args, **kwargs):
+            calls.append(batch[0].patient_id)
+            variant = batch[0]
+            key = BrowserReviewService.variant_key(variant)
+            return {
+                key: [
+                    DatabaseEvidence(
+                        "MTBP",
+                        "submission_unknown",
+                        "Submission could not be reconciled.",
+                        raw={"analysis_id": "ARCHER-uncertain"},
+                    )
+                ]
+            }
+
+    monkeypatch.setattr(worker, "_build_service", lambda: Service())
+    worker.finished.connect(finished.append)
+
+    worker.run()
+
+    assert calls == [variants[0].patient_id]
+    result = finished[0]
+    first_key = BrowserReviewService.variant_key(variants[0])
+    second_key = BrowserReviewService.variant_key(variants[1])
+    assert result[first_key][0].status == "submission_unknown"
+    assert result[second_key][0].status == "deferred"
+
+
+def test_browser_worker_checkpoints_workbook_once_after_all_patient_lanes(
+    qt_app, tmp_path, monkeypatch
+):
+    variant = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-15",
+        tmp_path / "review.xlsx",
+    ).variants[0]
+    key = BrowserReviewService.variant_key(variant)
+    worker = BrowserReviewWorker(
+        [variant],
+        ["COSMIC", "OncoKB", "Franklin"],
+        tmp_path / "evidence",
+        replace(AppSettings(), browser_delay_seconds=0, browser_delay_max_seconds=0),
+    )
+    checkpoints = []
+
+    class Service:
+        def search_variants(self, batch, databases, *args, checkpoint=None, **kwargs):
+            partial = {
+                key: [DatabaseEvidence(database, "found", "ok") for database in databases]
+            }
+            if checkpoint is not None:
+                checkpoint(partial)
+            return partial
+
+    monkeypatch.setattr(worker, "_build_service", lambda: Service())
+    worker.patient_finished.connect(checkpoints.append)
+
+    worker.run()
+
+    assert len(checkpoints) == 1
+    assert {item.database for item in checkpoints[0][key]} == {
+        "COSMIC",
+        "OncoKB",
+        "Franklin",
+    }
+
+
+def test_browser_worker_pauses_mtbp_after_incomplete_retained_report(
+    qt_app, tmp_path, monkeypatch
+):
+    base = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-15",
+        tmp_path / "review.xlsx",
+    ).variants[0]
+    variants = [
+        replace(base, sample="26OUM91001_VPM"),
+        replace(base, sample="26OUM91002_VPM"),
+    ]
+    worker = BrowserReviewWorker(
+        variants,
+        ["MTBP"],
+        tmp_path / "evidence",
+        replace(AppSettings(), browser_delay_seconds=0, browser_delay_max_seconds=0),
+    )
+    calls = []
+    finished = []
+
+    class Service:
+        def search_variants(self, batch, databases, *args, **kwargs):
+            calls.append(batch[0].patient_id)
+            variant = batch[0]
+            return {
+                BrowserReviewService.variant_key(variant): [
+                    DatabaseEvidence(
+                        "MTBP",
+                        "found",
+                        "captured from incomplete patient report",
+                        raw={
+                            "analysis_id": "ARCHER-incomplete",
+                            "screenshots": [{"path": "saved.png", "url": ""}],
+                            "remote_report_cleanup": {
+                                "status": "retained_incomplete"
+                            },
+                        },
+                    )
+                ]
+            }
+
+    monkeypatch.setattr(worker, "_build_service", lambda: Service())
+    worker.finished.connect(finished.append)
+
+    worker.run()
+
+    assert calls == [variants[0].patient_id]
+    second_key = BrowserReviewService.variant_key(variants[1])
+    assert finished[0][second_key][0].status == "deferred"
+
+
+def test_browser_worker_pauses_oncokb_after_two_consecutive_patient_failures(
+    qt_app, tmp_path, monkeypatch
+):
+    base = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-15",
+        tmp_path / "review.xlsx",
+    ).variants[0]
+    variants = [
+        replace(base, sample=f"26OUM9200{index}_VPM") for index in range(1, 4)
+    ]
+    worker = BrowserReviewWorker(
+        variants,
+        ["OncoKB"],
+        tmp_path / "evidence",
+        replace(AppSettings(), browser_delay_seconds=0, browser_delay_max_seconds=0),
+    )
+    calls = []
+    finished = []
+
+    class Service:
+        def search_variants(self, batch, databases, *args, **kwargs):
+            calls.append(batch[0].patient_id)
+            variant = batch[0]
+            return {
+                BrowserReviewService.variant_key(variant): [
+                    DatabaseEvidence("OncoKB", "error", "render timeout")
+                ]
+            }
+
+    monkeypatch.setattr(worker, "_build_service", lambda: Service())
+    worker.finished.connect(finished.append)
+
+    worker.run()
+
+    assert calls == [
+        variants[0].patient_id,
+        variants[0].patient_id,
+        variants[1].patient_id,
+        variants[1].patient_id,
+    ]
+    third_key = BrowserReviewService.variant_key(variants[2])
+    assert finished[0][third_key][0].status == "deferred"
 
 
 def test_processed_workbook_can_resume_into_review_pages(qt_app, tmp_path, monkeypatch):

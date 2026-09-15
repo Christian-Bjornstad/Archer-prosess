@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -94,10 +95,35 @@ class RunJournal:
 
 
 def _structured_message_fields(message: str) -> dict[str, str]:
-    parts = [part.strip() for part in message.split("|")]
-    if len(parts) < 2 or parts[0] not in {"RESULT", "SUMMARY", "PENDING"}:
+    extracted: dict[str, str] = {}
+    patient = re.match(
+        r"Patient\s+(\d+)/(\d+)\s+\(([^)]+)\)"
+        r"(?:\s+[^A-Za-z0-9\s]\s+([^:]+))?:\s+",
+        message,
+    )
+    if patient is not None:
+        extracted.update(
+            {
+                "patient_index": patient.group(1),
+                "patient_total": patient.group(2),
+                "patient_id": patient.group(3),
+            }
+        )
+        if patient.group(4):
+            extracted["lane"] = patient.group(4).strip()
+        event_text = message[patient.end() :]
+    else:
+        event_text = message
+    match = re.match(
+        r"(RESULT|SUMMARY|PENDING|RUN SUMMARY|WORKBOOK WRITE|MTBP PREFLIGHT|"
+        r"MTBP SUBMISSION|PROVIDER PAUSED)\s*\|",
+        event_text,
+    )
+    if match is None:
         return {}
-    extracted = {"event_type": parts[0]}
+    structured_message = event_text[match.start(1) :]
+    parts = [part.strip() for part in structured_message.split("|")]
+    extracted["event_type"] = parts[0].replace(" ", "_")
     for part in parts[1:]:
         if "=" not in part:
             continue

@@ -31,6 +31,8 @@ RETRYABLE_EVIDENCE_STATUSES = frozenset(
         "token_required",
         "layout_changed",
         "transient",
+        "submission_unknown",
+        "deferred",
     }
 )
 COMPLETED_EVIDENCE_STATUSES = frozenset(
