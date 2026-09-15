@@ -14,6 +14,8 @@ from archer_processor.services.browser_review import (
     _cosmic_identifiers,
     _cosmic_numeric_id,
     _cosmic_source_url,
+    _clinvar_identity,
+    _clinvar_queries,
     _expanded_capture_box,
     _franklin_queries,
     _mtbp_genomic_query,
@@ -1710,6 +1712,186 @@ def test_clinvar_capture_is_cropped_to_title_and_classification_summary(tmp_path
         "width": 1000,
         "height": 410,
     }
+
+
+def test_clinvar_queries_use_transcript_then_precise_grch37_position():
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+
+    assert _clinvar_queries(variant) == [
+        "NM_000546.6:c.524G>A",
+        "17[chr] AND 7578406[chrpos37]",
+    ]
+
+
+def test_clinvar_identity_requires_requested_change_and_grch37_location():
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    matching = (
+        "NM_000546.6(TP53):c.524G>A (p.Arg175His)\n"
+        "Location\n17: 7578406 (GRCh37)"
+    )
+    wrong_allele = (
+        "NM_000546.6(TP53):c.524G>T (p.Arg175Leu)\n"
+        "Location\n17: 7578406 (GRCh37)"
+    )
+
+    accepted = _clinvar_identity(matching, variant)
+    rejected = _clinvar_identity(wrong_allele, variant)
+
+    assert accepted.accepted
+    assert accepted.basis == "exact_transcript_grch37"
+    assert not rejected.accepted
+
+
+def test_clinvar_search_uses_browser_without_database_api(tmp_path, monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+
+    class Context:
+        pages = [object()]
+
+        def close(self):
+            pass
+
+    class Runtime:
+        chromium = None
+
+        def __init__(self):
+            self.chromium = self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def launch_persistent_context(self, *args, **kwargs):
+            return Context()
+
+    monkeypatch.setattr(
+        service, "_browser_api", lambda: (lambda: Runtime(), Exception, TimeoutError)
+    )
+    monkeypatch.setattr(
+        "archer_processor.services.database_search.DatabaseSearchService.search_variant",
+        lambda *args, **kwargs: pytest.fail("ClinVar database API must not be called"),
+    )
+    monkeypatch.setattr(
+        service,
+        "_lookup_clinvar_variant",
+        lambda page, candidate, directory: DatabaseEvidence(
+            "ClinVar", "found", "website result"
+        ),
+        raising=False,
+    )
+
+    results = service._search_clinvar([variant], tmp_path, progress=None)
+
+    assert results[service.variant_key(variant)].status == "found"
+
+
+def test_clinvar_website_lookup_verifies_redirected_variant_before_capture(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+    body = (
+        "NM_000546.6(TP53):c.524G>A (p.Arg175His)\n"
+        "Variation ID: 12374 Accession: VCV000012374.86\n"
+        "Location\n17: 7578406 (GRCh37)"
+    )
+
+    class Body:
+        def inner_text(self, **kwargs):
+            return body
+
+    class Links:
+        def evaluate_all(self, script):
+            return []
+
+    class Page:
+        url = ""
+
+        def goto(self, url, **kwargs):
+            self.url = "https://www.ncbi.nlm.nih.gov/clinvar/variation/12374/"
+
+        def locator(self, selector):
+            if selector == "body":
+                return Body()
+            assert selector == "a[href*='/clinvar/variation/']"
+            return Links()
+
+    captured = []
+    monkeypatch.setattr(
+        service,
+        "_capture_clinvar_result",
+        lambda requested, seed, page, directory: (captured.append(seed), seed)[1],
+    )
+
+    evidence = service._lookup_clinvar_variant(Page(), variant, tmp_path)
+
+    assert evidence.status == "found"
+    assert evidence.accession == "VCV000012374.86"
+    assert evidence.raw["assembly_verified"] == "GRCh37"
+    assert evidence.raw["query_attempts"] == ["NM_000546.6:c.524G>A"]
+    assert len(captured) == 1
+
+
+def test_clinvar_website_lookup_uses_exact_row_from_grch37_fallback(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+    exact_url = "https://www.ncbi.nlm.nih.gov/clinvar/variation/12374/"
+    exact_body = (
+        "NM_000546.6(TP53):c.524G>A (p.Arg175His)\n"
+        "Variation ID: 12374 Accession: VCV000012374.86\n"
+        "Location\n17: 7578406 (GRCh37)"
+    )
+
+    class Locator:
+        def __init__(self, page, selector):
+            self.page = page
+            self.selector = selector
+
+        def inner_text(self, **kwargs):
+            return exact_body if self.page.url == exact_url else "Search results"
+
+        def evaluate_all(self, script):
+            if "chrpos37" not in self.page.last_query:
+                return []
+            return [
+                {
+                    "text": "NM_000546.6(TP53):c.524G>T (p.Arg175Leu)",
+                    "href": "https://www.ncbi.nlm.nih.gov/clinvar/variation/182963/",
+                },
+                {
+                    "text": "NM_000546.6(TP53):c.524G>A (p.Arg175His)",
+                    "href": exact_url,
+                },
+            ]
+
+    class Page:
+        url = ""
+        last_query = ""
+
+        def goto(self, url, **kwargs):
+            self.url = url
+            self.last_query = url
+
+        def locator(self, selector):
+            return Locator(self, selector)
+
+    page = Page()
+    monkeypatch.setattr(
+        service,
+        "_capture_clinvar_result",
+        lambda requested, seed, page, directory: seed,
+    )
+
+    evidence = service._lookup_clinvar_variant(page, variant, tmp_path)
+
+    assert evidence.status == "found"
+    assert page.url == exact_url
+    assert evidence.raw["query_attempts"] == _clinvar_queries(variant)
 
 
 def test_franklin_primary_capture_uses_full_page(tmp_path):

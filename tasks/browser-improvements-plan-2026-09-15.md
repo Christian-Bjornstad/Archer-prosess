@@ -223,9 +223,9 @@ browser_review.py/variant_identity.py med tester. Avhengigheter: oppgave 2–3.
 
 - [ ] Undersøk nettsidens HGVS-søk, resultatliste og variantkort på representative
   SNV-er, delesjoner, duplikasjoner og transkriptversjoner.
-- [ ] Verifiser eksakt GRCh37-lokus og alleler fra nettsidens innhold før innhenting;
+- [x] Verifiser eksakt GRCh37-lokus og alleler fra nettsidens innhold før innhenting;
   avklar indelrepresentasjoner. Koordinattreff alene er utilstrekkelig.
-- [ ] Fjern E-utilities fra aktiv nettleserflyt og test at den ikke kaller noen
+- [x] Fjern E-utilities fra aktiv nettleserflyt og test at den ikke kaller noen
   database-API. Uavklarte treff får konkret årsak og kontrollbehov.
 
 Kontroll: positive/negative treff, feil allel på samme posisjon, flere treff,

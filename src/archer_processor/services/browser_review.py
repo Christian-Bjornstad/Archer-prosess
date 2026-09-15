@@ -902,15 +902,9 @@ class BrowserReviewService:
         *,
         progress: Callable[[str], None] | None,
     ) -> dict[str, DatabaseEvidence]:
-        """Resolve ClinVar through E-utilities, then capture its summary card."""
-        from archer_processor.services.database_search import DatabaseSearchService
-        from archer_processor.services.settings import AppSettings
-
+        """Resolve and verify ClinVar entirely through its public website."""
         sync_browser, browser_error, _ = self._browser_api()
         artifact_directory.mkdir(parents=True, exist_ok=True)
-        api_service = DatabaseSearchService(
-            AppSettings(clinvar_api_key=self.clinvar_api_key)
-        )
         results: dict[str, DatabaseEvidence] = {}
         with sync_browser() as runtime:
             try:
@@ -936,39 +930,18 @@ class BrowserReviewService:
                             f"ClinVar browser lookup {index}/{len(variants)}: "
                             f"{variant.hgvsc or variant.display_name}"
                         )
-                    api_evidence = api_service.search_variant(variant, ["ClinVar"])[0]
-                    if api_evidence.status != "found" or not api_evidence.url:
-                        results[key] = api_evidence
-                        continue
-                    if api_evidence.raw.get("assembly_verified") != "GRCh37":
-                        api_evidence.status = "verification_required"
-                        api_evidence.summary = (
-                            "ClinVar result was not captured because its exact GRCh37 "
-                            "identity was not verified."
-                        )
-                        results[key] = api_evidence
-                        continue
                     try:
-                        page.goto(
-                            api_evidence.url,
-                            wait_until="domcontentloaded",
-                            timeout=self.navigation_timeout_ms,
-                        )
-                        results[key] = self._capture_clinvar_result(
-                            variant,
-                            api_evidence,
-                            page,
-                            artifact_directory,
+                        results[key] = self._lookup_clinvar_variant(
+                            page, variant, artifact_directory
                         )
                     except Exception as exc:
                         results[key] = DatabaseEvidence(
                             database="ClinVar",
                             status="error",
-                            summary=f"ClinVar summary capture failed: {exc}",
-                            accession=api_evidence.accession,
-                            clinical_significance=api_evidence.clinical_significance,
-                            url=api_evidence.url,
-                            raw={**api_evidence.raw},
+                            summary=f"ClinVar website lookup failed: {exc}",
+                            accession=_review_query(variant),
+                            url=page.url,
+                            raw={"failure_stage": "website lookup"},
                         )
                     if index < len(variants):
                         self._wait_between_queries(page, "ClinVar", progress=progress)
@@ -978,6 +951,87 @@ class BrowserReviewService:
                 except browser_error:
                     pass
         return results
+
+    def _lookup_clinvar_variant(
+        self,
+        page: Any,
+        variant: VariantRecord,
+        artifact_directory: Path,
+    ) -> DatabaseEvidence:
+        attempts: list[str] = []
+        for query in _clinvar_queries(variant):
+            attempts.append(query)
+            query_url = (
+                "https://www.ncbi.nlm.nih.gov/clinvar/?term="
+                f"{quote(query, safe='')}"
+            )
+            page.goto(
+                query_url,
+                wait_until="domcontentloaded",
+                timeout=self.navigation_timeout_ms,
+            )
+            body_text = page.locator("body").inner_text(
+                timeout=self.navigation_timeout_ms
+            )
+            if "/clinvar/variation/" not in page.url:
+                links = page.locator(
+                    "a[href*='/clinvar/variation/']"
+                ).evaluate_all(
+                    "nodes => nodes.map(node => ({"
+                    "text: node.innerText.trim(), href: node.href}))"
+                )
+                candidates = _matching_clinvar_links(links, variant)
+                if len(candidates) > 1:
+                    return DatabaseEvidence(
+                        "ClinVar",
+                        "manual_review",
+                        "ClinVar returned multiple exact-looking website rows; "
+                        "manual selection is required.",
+                        accession=_review_query(variant),
+                        url=page.url,
+                        raw={"query_attempts": attempts},
+                    )
+                if not candidates:
+                    continue
+                page.goto(
+                    candidates[0],
+                    wait_until="domcontentloaded",
+                    timeout=self.navigation_timeout_ms,
+                )
+                body_text = page.locator("body").inner_text(
+                    timeout=self.navigation_timeout_ms
+                )
+            verification = _clinvar_identity(body_text, variant)
+            if not verification.accepted:
+                continue
+            accession_match = re.search(
+                r"Accession:\s*(VCV\d+(?:\.\d+)?)", body_text, re.IGNORECASE
+            )
+            evidence = DatabaseEvidence(
+                "ClinVar",
+                "found",
+                "ClinVar website result verified against transcript/cDNA and GRCh37 location.",
+                accession=accession_match.group(1) if accession_match else "",
+                url=page.url,
+                raw={
+                    "assembly_verified": "GRCh37",
+                    "identity_verification": asdict(verification),
+                    "query_attempts": list(attempts),
+                },
+            )
+            captured = self._capture_clinvar_result(
+                variant, evidence, page, artifact_directory
+            )
+            captured.raw["query_attempts"] = list(attempts)
+            return captured
+        return DatabaseEvidence(
+            "ClinVar",
+            "not_found",
+            "No exact ClinVar website result matched the requested variant on GRCh37.",
+            accession=_review_query(variant),
+            url=page.url,
+            raw={"query_attempts": attempts},
+        )
 
     def _capture_clinvar_result(
         self,
@@ -3811,6 +3865,77 @@ def _oncokb_page_matches_variant(
         r"[^A-Za-z0-9*]", "", f"{variant.symbol}{alteration}"
     ).casefold()
     return bool(expected and expected in compact)
+
+
+def _clinvar_queries(variant: VariantRecord) -> list[str]:
+    queries: list[str] = []
+    if variant.hgvsc:
+        queries.append(variant.hgvsc.strip())
+    identity = genomic_identity(variant)
+    if identity:
+        queries.append(
+            f"{identity.chromosome}[chr] AND "
+            f"{identity.position}[chrpos37]"
+        )
+    return list(dict.fromkeys(query for query in queries if query))
+
+
+def _clinvar_identity(body_text: str, variant: VariantRecord) -> IdentityVerification:
+    expected = genomic_identity(variant)
+    if expected is None:
+        return IdentityVerification(False, "none", "GRCh37 input identity is incomplete.")
+    compact = re.sub(r"\s+", "", body_text or "").casefold()
+    location = f"{expected.chromosome}:{expected.position}(grch37)".casefold()
+    if location not in compact:
+        return IdentityVerification(
+            False, "grch37_location", "ClinVar page did not show the requested GRCh37 location."
+        )
+    cdna = _cdna_change(variant.hgvsc).casefold()
+    symbol = (variant.symbol or "").casefold()
+    transcript = (variant.hgvsc or "").split(":", 1)[0].strip().casefold()
+    if not cdna or cdna not in compact or not symbol or symbol not in compact:
+        return IdentityVerification(
+            False, "variant_change", "ClinVar page did not show the requested gene and cDNA change."
+        )
+    if transcript and transcript in compact:
+        return IdentityVerification(
+            True,
+            "exact_transcript_grch37",
+            "Transcript cDNA and GRCh37 location matched.",
+            expected,
+        )
+    return IdentityVerification(
+        True,
+        "gene_cdna_grch37",
+        "Gene, cDNA change, and GRCh37 location matched.",
+        expected,
+    )
+
+
+def _matching_clinvar_links(
+    links: object, variant: VariantRecord
+) -> list[str]:
+    if not isinstance(links, list):
+        return []
+    cdna = _cdna_change(variant.hgvsc).casefold()
+    symbol = (variant.symbol or "").casefold()
+    transcript = (variant.hgvsc or "").split(":", 1)[0].strip().casefold()
+    candidates: list[str] = []
+    for item in links:
+        if not isinstance(item, dict):
+            continue
+        text = re.sub(r"\s+", "", str(item.get("text") or "")).casefold()
+        href = str(item.get("href") or "").strip()
+        if (
+            href
+            and cdna
+            and cdna in text
+            and symbol
+            and symbol in text
+            and (not transcript or transcript in text)
+        ):
+            candidates.append(href)
+    return list(dict.fromkeys(candidates))
 
 
 def parse_oncokb_page(
