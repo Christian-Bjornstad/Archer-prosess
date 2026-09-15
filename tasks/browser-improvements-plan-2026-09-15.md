@@ -221,7 +221,7 @@ arbeidsbok og journal. Pause/stopp i GUI skal svare under lagring.
 Omfang: først lesende DOM-undersøkelse, deretter eget implementeringssnitt i
 browser_review.py/variant_identity.py med tester. Avhengigheter: oppgave 2–3.
 
-- [ ] Undersøk nettsidens HGVS-søk, resultatliste og variantkort på representative
+- [x] Undersøk nettsidens HGVS-søk, resultatliste og variantkort på representative
   SNV-er, delesjoner, duplikasjoner og transkriptversjoner.
 - [x] Verifiser eksakt GRCh37-lokus og alleler fra nettsidens innhold før innhenting;
   avklar indelrepresentasjoner. Koordinattreff alene er utilstrekkelig.
@@ -236,7 +236,7 @@ ingen treff, treg side og verifiserte skjermbilder. Mål kostnaden i nettleserti
 Omfang: DOM-undersøkelse og eget snitt. Avhengigheter: oppgave 2 og 4s
 identitetskontroller der de er relevante.
 
-- [ ] Live-verifiser den nå dokumenterte /hgvsg/-nettsideruten med GRCh37
+- [x] Live-verifiser den nå dokumenterte /hgvsg/-nettsideruten med GRCh37
   mot våre transkriptavvik. Se research og testkrav ovenfor.
 - [x] Hvis en dokumenterbar og identitetsverifisert nettlesersti finnes, ta
   skjermbilde av det riktige resultatet; aldri bytt referanseaminosyre på gjetning.
@@ -244,6 +244,16 @@ identitetskontroller der de er relevante.
   lenke; skill dette fra «genet finnes ikke», uten gjentatte automatiske forsøk.
 
 Kontroll: NF1-/KDM6A-typen fra forrige probe, et gyldig treff og et ukjent gen.
+
+Live-kontroll 15. september 2026: NF1 `chr17:29665751 CACTT/C` åpnet som
+`17:g.29665752_29665755del`, viste `NF1 Y2264Tfs*5` og verifisert
+`Likely Oncogenic / Likely Loss-of-function`. KDM6A `X:g.44935972T>A` beholdt
+GRCh37 i URL og sidebrødsmule, men ga ingen variantseksjon; dette skal derfor
+forbli manuell kontroll. ClinVar viste 0 direkte treff for eldre
+`NM_001127208.2:c.3812dup`, mens GRCh37-lokussøket åpnet VCV003013093.3 med
+`NM_001127208.3:c.3812dup`, riktig TET2, duplikasjon og GRCh37-lokus. Direkte
+HGVS-søk ble også kontrollert for en delesjon uten treff; reservebanen må aldri
+godkjenne kun en koordinat uten gen+cDNA/allelkontrollen.
 
 ### 6. Fjern unødvendig venting — etter korrekthet og målinger
 
