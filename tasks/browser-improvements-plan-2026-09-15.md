@@ -204,13 +204,13 @@ Loggsvikt skal varsles uten å miste allerede innhentet evidens.
 
 Omfang: deles i to små snitt. Avhengigheter: oppgave 2 for måling.
 
-- [ ] Først: lagre alle utfall, inkludert timeout og ikke funnet, per variant/kilde
+- [x] Først: lagre alle utfall, inkludert timeout og ikke funnet, per variant/kilde
   før neste oppslag. Bruk eksisterende audit-format konsekvent med varighet og
   gjenopptakskontekst; ingen tap ved stopp midt i en database.
-- [ ] Deretter: én seriell bakgrunnsskriver for Excel med eget datasnapshot;
+- [x] Deretter: én seriell bakgrunnsskriver for Excel med eget datasnapshot;
   skriv til midlertidig fil og erstatt målfil først etter vellykket lagring.
   Bevar siste gode fil ved lås/nettverksbrudd og siste evidens i journalen.
-- [ ] Mål antall og varighet av Excel-skrivinger før eventuell sammenslåing av
+- [x] Mål antall og varighet av Excel-skrivinger før eventuell sammenslåing av
   nærliggende lagringsforespørsler. Rapportgenerering venter på korrekt versjon.
 
 Kontroll: avbryt etter variant 2/5, åpne Excel-lås, simuler diskfeil, gjenlast
@@ -249,7 +249,7 @@ Kontroll: NF1-/KDM6A-typen fra forrige probe, et gyldig treff og et ukjent gen.
 
 Omfang: separate små snitt i browser_review.py. Avhengigheter: oppgave 1–3.
 
-- [ ] Behandle MTBP-gjenoppretting samlet per unik rapport-ID: én åpning og
+- [x] Behandle MTBP-gjenoppretting samlet per unik rapport-ID: én åpning og
   innhenting, deretter fordeling til variantene. Logg rapporter og varianter hver for seg.
 - [x] Hopp over COSMIC-nettleserstart og nettbuffer når hele omfanget mangler
   COSMIC-ID; ingen venting etter lokale hopp-over-resultater.

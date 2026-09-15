@@ -1706,6 +1706,7 @@ class BrowserReviewService:
         sync_browser, browser_error, browser_timeout = self._browser_api()
         recovered: dict[str, DatabaseEvidence] = {}
         report_captures: dict[str, Path | None] = {}
+        report_pages: dict[str, tuple[str, list[dict[str, Any]], str]] = {}
         report_audits: dict[str, list[tuple[Path, DatabaseEvidence]]] = {}
         with sync_browser() as runtime:
             context = runtime.chromium.launch_persistent_context(
@@ -1726,11 +1727,6 @@ class BrowserReviewService:
                 for variant, timed_out in pending:
                     self._check_cancelled()
                     analysis_id = str(timed_out.raw.get("analysis_id") or "")
-                    self._goto_with_retries(page, MTBP_REPORTS_URL, attempts=2)
-                    report_link = page.get_by_role(
-                        "link", name=analysis_id, exact=True
-                    )
-                    report_count = report_link.count()
                     if timed_out.status == "found":
                         if any(str(item.raw.get("analysis_id") or "") == analysis_id
                                and item.status != "found" for _, item in pending):
@@ -1740,6 +1736,16 @@ class BrowserReviewService:
                             ))
                             recovered[self.variant_key(variant)] = timed_out
                             continue
+                    if analysis_id in report_pages:
+                        report_count = 1
+                        report_link = None
+                    else:
+                        self._goto_with_retries(page, MTBP_REPORTS_URL, attempts=2)
+                        report_link = page.get_by_role(
+                            "link", name=analysis_id, exact=True
+                        )
+                        report_count = report_link.count()
+                    if timed_out.status == "found":
                         if report_count == 0:
                             cleanup = {
                                 "status": "already_absent",
@@ -1779,28 +1785,48 @@ class BrowserReviewService:
                                 }
                             recovered[self.variant_key(variant)] = timed_out
                         continue
-                    report_link.click()
-                    page.wait_for_url(
-                        re.compile(r"https://mtbp\.org/patients/.+/report/\d+/?"),
-                        timeout=self.navigation_timeout_ms,
-                    )
-                    body_text = page.locator("body").inner_text(
-                        timeout=self.navigation_timeout_ms
-                    )
-                    version_tooltip = page.locator("[data-tooltip-html*='VEP:']")
-                    if version_tooltip.count():
-                        version_html = (
-                            version_tooltip.first.get_attribute("data-tooltip-html")
-                            or ""
+                    if analysis_id in report_pages:
+                        body_text, report_rows, report_url = report_pages[analysis_id]
+                    else:
+                        if progress:
+                            matching_variants = sum(
+                                str(item.raw.get("analysis_id") or "") == analysis_id
+                                for _, item in pending
+                            )
+                            progress(
+                                f"MTBP: opening retained report {analysis_id} for "
+                                f"{matching_variants} variant(s)"
+                            )
+                        assert report_link is not None
+                        report_link.click()
+                        page.wait_for_url(
+                            re.compile(r"https://mtbp\.org/patients/.+/report/\d+/?"),
+                            timeout=self.navigation_timeout_ms,
                         )
-                        body_text += "\n" + re.sub(
-                            r"<br\s*/?>", "\n", version_html, flags=re.IGNORECASE
+                        body_text = page.locator("body").inner_text(
+                            timeout=self.navigation_timeout_ms
+                        )
+                        version_tooltip = page.locator("[data-tooltip-html*='VEP:']")
+                        if version_tooltip.count():
+                            version_html = (
+                                version_tooltip.first.get_attribute("data-tooltip-html")
+                                or ""
+                            )
+                            body_text += "\n" + re.sub(
+                                r"<br\s*/?>", "\n", version_html, flags=re.IGNORECASE
+                            )
+                        report_rows = self._extract_mtbp_rows(page)
+                        report_url = page.url
+                        report_pages[analysis_id] = (
+                            body_text,
+                            report_rows,
+                            report_url,
                         )
                     evidence = parse_mtbp_report(
                         body_text,
-                        self._extract_mtbp_rows(page),
+                        report_rows,
                         [variant],
-                        page.url,
+                        report_url,
                         cancer_type=self.mtbp_cancer_type,
                     )[self.variant_key(variant)]
                     evidence.accession = timed_out.accession
@@ -1861,7 +1887,10 @@ class BrowserReviewService:
                     ))
                     recovered[self.variant_key(variant)] = evidence
                     if progress:
-                        progress(f"MTBP: recovered late report ({analysis_id})")
+                        progress(
+                            f"MTBP: recovered variant {variant.hgvsc or variant.hgvsp} "
+                            f"from retained report ({analysis_id})"
+                        )
                 # A patient report is shared: never delete it after capturing
                 # just the first variant in a resumed batch.
                 for analysis_id, audit_records in report_audits.items():

@@ -4,6 +4,7 @@ import sys
 import random
 import threading
 import time
+from copy import deepcopy
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -474,6 +475,7 @@ class DatabaseWorker(QObject):
         except Exception as exc:
             self.failed.emit(str(exc))
 
+
     def _browser_lanes(self) -> list[tuple[str, list[str]]]:
         return _browser_database_lanes(self.browser_databases)
 
@@ -607,6 +609,40 @@ class DatabaseWorker(QObject):
             chunk = min(0.25, remaining)
             time.sleep(chunk)
             remaining -= chunk
+
+
+class WorkbookWriteWorker(QObject):
+    finished = pyqtSignal(object)
+    failed = pyqtSignal(object)
+
+    def __init__(
+        self,
+        result: ProcessingResult,
+        evidence: dict[str, list[DatabaseEvidence]],
+        *,
+        hide_excluded: bool,
+        database_skip_keys: set[str],
+    ) -> None:
+        super().__init__()
+        self.result = deepcopy(result)
+        self.evidence = deepcopy(evidence)
+        self.hide_excluded = bool(hide_excluded)
+        self.database_skip_keys = set(database_skip_keys)
+
+    def run(self) -> None:
+        try:
+            if self.result.output_path is None:
+                raise RuntimeError("Evidence workbook output path is missing.")
+            path = ExcelReportWriter().write(
+                self.result,
+                self.result.output_path,
+                self.evidence,
+                self.hide_excluded,
+                self.database_skip_keys,
+            )
+            self.finished.emit(path)
+        except Exception as exc:
+            self.failed.emit(exc)
 
 
 class BrowserLoginWorker(QObject):
@@ -1049,6 +1085,12 @@ class MainWindow(QMainWindow):
         self.database_skip_keys: set[str] = set()
         self.report_outcomes: dict[str, PatientReportOutcome] = {}
         self.processing_thread: QThread | None = None
+        self.workbook_write_thread: QThread | None = None
+        self.workbook_write_worker: WorkbookWriteWorker | None = None
+        self._workbook_write_requested = False
+        self._background_workbook_error: Exception | None = None
+        self._background_workbook_path: Path | None = None
+        self._workbook_write_started_at: float | None = None
         self.workbook_load_thread: QThread | None = None
         self.patient_report_thread: QThread | None = None
         self.patient_report_worker: PatientReportWorker | None = None
@@ -1064,6 +1106,7 @@ class MainWindow(QMainWindow):
         self._search_started_at: float | None = None
         self._operation_active = False
         self._active_search_report_patient_ids: list[str] = []
+        self._pending_report_after_workbook: list[str] = []
         self.workbook_write_pending = False
         self._workbook_lock_warning_shown = False
         self.run_journal: RunJournal | None = None
@@ -2014,23 +2057,21 @@ class MainWindow(QMainWindow):
     def _database_finished(self, evidence: dict) -> None:
         report_patient_ids = list(self._active_search_report_patient_ids)
         self._active_search_report_patient_ids = []
+        self._pending_report_after_workbook = report_patient_ids
         _merge_evidence_results(self.evidence, evidence)
         self._log(_evidence_completion_summary(self.evidence))
         self._refresh_operations_cockpit()
-        workbook_saved = self._try_write_evidence_workbook(show_errors=False)
-        if workbook_saved and self.result and self.result.output_path:
-            self._log(f"Evidence workbook updated: {self.result.output_path}")
+        self._queue_evidence_workbook_write()
         self._set_ready()
         self._complete_run_progress("Evidence search complete")
         self.search_btn.setText("Run Evidence Search")
         self._log(
             f"Patient-by-patient evidence search complete ({self._search_elapsed_text()})"
         )
-        if report_patient_ids and workbook_saved:
-            self._start_patient_reports(report_patient_ids)
-        elif report_patient_ids:
+        if report_patient_ids:
             self._log(
-                "Prioriterte rapporter venter til evidensarbeidsboken kan lagres."
+                "Prioriterte rapporter venter på siste lagrede versjon av "
+                "evidensarbeidsboken."
             )
 
     def _database_patient_finished(self, patient_evidence: dict) -> None:
@@ -2680,9 +2721,80 @@ class MainWindow(QMainWindow):
         )
 
     def _auto_rewrite_workbook(self) -> None:
-        if self._try_write_evidence_workbook(show_errors=False):
-            if self.result and self.result.output_path:
-                self._log(f"Evidence workbook updated: {self.result.output_path}")
+        self._queue_evidence_workbook_write()
+
+    def _queue_evidence_workbook_write(self) -> None:
+        if not self.result or not self.result.output_path:
+            return
+        if self.workbook_write_thread is not None:
+            self._workbook_write_requested = True
+            return
+        self._workbook_write_requested = False
+        self._background_workbook_error = None
+        self._background_workbook_path = None
+        worker = WorkbookWriteWorker(
+            self.result,
+            self.evidence,
+            hide_excluded=self.hide_excluded.isChecked(),
+            database_skip_keys=self.database_skip_keys,
+        )
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._background_workbook_saved)
+        worker.failed.connect(self._background_workbook_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._background_workbook_thread_finished)
+        self.workbook_write_pending = True
+        self._workbook_write_started_at = time.monotonic()
+        self.workbook_write_thread = thread
+        self.workbook_write_worker = worker
+        thread.start()
+
+    def _background_workbook_saved(self, path: Path) -> None:
+        self._background_workbook_path = Path(path)
+
+    def _background_workbook_failed(self, exc: Exception) -> None:
+        self._background_workbook_error = exc
+
+    def _background_workbook_thread_finished(self) -> None:
+        error = self._background_workbook_error
+        saved_path = self._background_workbook_path
+        write_again = self._workbook_write_requested
+        duration = (
+            max(0.0, time.monotonic() - self._workbook_write_started_at)
+            if self._workbook_write_started_at is not None
+            else 0.0
+        )
+        self.workbook_write_thread = None
+        self.workbook_write_worker = None
+        self._workbook_write_requested = False
+        self._workbook_write_started_at = None
+        if error is None and saved_path is not None:
+            self.workbook_write_pending = False
+            self._workbook_lock_warning_shown = False
+            self._log(
+                "WORKBOOK WRITE | status=completed | "
+                f"duration_seconds={duration:.3f} | path={saved_path}"
+            )
+        elif error is not None:
+            self.workbook_write_pending = True
+            self._log(
+                "WORKBOOK WRITE | status=failed | "
+                f"duration_seconds={duration:.3f} | error_type={type(error).__name__}"
+            )
+            self._report_workbook_write_error(error, show_errors=False)
+        if write_again:
+            self._queue_evidence_workbook_write()
+            return
+        if error is None and saved_path is not None:
+            patient_ids = list(self._pending_report_after_workbook)
+            self._pending_report_after_workbook = []
+            if patient_ids:
+                self._start_patient_reports(patient_ids)
 
     def _try_write_evidence_workbook(self, *, show_errors: bool) -> bool:
         try:

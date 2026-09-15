@@ -15,6 +15,7 @@ from archer_processor.gui.app import (
     DatabaseWorker,
     MainWindow,
     PatientReportWorker,
+    WorkbookWriteWorker,
     _browser_database_lanes,
     _completed_evidence_sources,
     _evidence_completion_summary,
@@ -472,8 +473,8 @@ def test_priority_completion_starts_reports_only_after_workbook_is_saved(
     monkeypatch.setattr(window, "_refresh_operations_cockpit", lambda: None)
     monkeypatch.setattr(
         window,
-        "_try_write_evidence_workbook",
-        lambda *, show_errors: events.append("saved") or True,
+        "_queue_evidence_workbook_write",
+        lambda: events.append("queued"),
     )
     monkeypatch.setattr(window, "_set_ready", lambda: events.append("ready"))
     monkeypatch.setattr(window, "_complete_run_progress", lambda title: None)
@@ -487,11 +488,52 @@ def test_priority_completion_starts_reports_only_after_workbook_is_saved(
 
     window._database_finished({})
 
-    assert events == [
-        "saved",
-        "ready",
-        ("reports", ["26OUM00001", "26OUM00002"]),
+    assert events == ["queued", "ready"]
+    assert window._pending_report_after_workbook == [
+        "26OUM00001",
+        "26OUM00002",
     ]
+
+
+def test_successful_background_save_releases_pending_patient_reports(
+    qt_app, tmp_path, monkeypatch
+):
+    window = MainWindow()
+    window._pending_report_after_workbook = ["26OUM00001"]
+    window._background_workbook_path = tmp_path / "review.xlsx"
+    reports = []
+    logs = []
+    window._workbook_write_started_at = time.monotonic() - 2
+    monkeypatch.setattr(window, "_log", logs.append)
+    monkeypatch.setattr(window, "_start_patient_reports", reports.append)
+
+    window._background_workbook_thread_finished()
+
+    assert reports == [["26OUM00001"]]
+    assert window._pending_report_after_workbook == []
+    assert "WORKBOOK WRITE | status=completed | duration_seconds=" in logs[0]
+
+
+def test_coalesced_workbook_save_does_not_release_reports_until_latest_snapshot(
+    qt_app, tmp_path, monkeypatch
+):
+    window = MainWindow()
+    window._pending_report_after_workbook = ["26OUM00001"]
+    window._background_workbook_path = tmp_path / "review.xlsx"
+    window._workbook_write_requested = True
+    events = []
+    monkeypatch.setattr(window, "_log", lambda message: None)
+    monkeypatch.setattr(
+        window, "_queue_evidence_workbook_write", lambda: events.append("queued")
+    )
+    monkeypatch.setattr(
+        window, "_start_patient_reports", lambda patient_ids: events.append("reports")
+    )
+
+    window._background_workbook_thread_finished()
+
+    assert events == ["queued"]
+    assert window._pending_report_after_workbook == ["26OUM00001"]
 
 
 def test_report_summary_uses_exact_norwegian_categories(qt_app, tmp_path):
@@ -655,6 +697,46 @@ def test_locked_workbook_shows_warning_without_raising(qt_app, tmp_path, monkeyp
     assert len(warnings) == 1
     assert warnings[0][1] == "Workbook is open in Excel"
     assert "Evidence remains available in the app" in window.log.toPlainText()
+
+
+def test_background_workbook_worker_owns_evidence_snapshot(tmp_path):
+    result = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-15",
+        tmp_path / "review.xlsx",
+    )
+    key = f"{result.variants[0].sample}|{result.variants[0].hgvsc}"
+    evidence = {key: [DatabaseEvidence("ClinVar", "found", "original")]}
+
+    worker = WorkbookWriteWorker(
+        result,
+        evidence,
+        hide_excluded=False,
+        database_skip_keys=set(),
+    )
+    evidence[key][0].summary = "mutated after queue"
+
+    assert worker.evidence[key][0].summary == "original"
+
+
+def test_background_workbook_queue_coalesces_while_writer_is_active(qt_app, tmp_path):
+    window = MainWindow()
+    window.result = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-15",
+        tmp_path / "review.xlsx",
+    )
+
+    class ActiveThread:
+        def isRunning(self):
+            return True
+
+    window.workbook_write_thread = ActiveThread()
+
+    window._queue_evidence_workbook_write()
+    window._queue_evidence_workbook_write()
+
+    assert window._workbook_write_requested is True
 
 
 def test_completed_search_status_remains_visible(qt_app):

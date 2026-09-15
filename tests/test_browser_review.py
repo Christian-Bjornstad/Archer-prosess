@@ -10,6 +10,7 @@ from archer_processor.services.browser_review import (
     BrowserReviewCancelled,
     BrowserReviewService,
     FRANKLIN_HOME_URL,
+    MTBP_REPORTS_URL,
     _cosmic_identifier,
     _cosmic_identifiers,
     _cosmic_numeric_id,
@@ -3393,6 +3394,7 @@ def test_mtbp_late_recovery_opens_existing_report_without_form_submission(
     assert recovered[service.variant_key(variant)].raw["remote_report_cleanup"]["status"] == "deleted"
     assert deleted == [analysis_id]
     assert visited[0] == service.login_url("MTBP")
+    assert visited.count(MTBP_REPORTS_URL) == 1
 
 
 class _FakeMtbpDialog:
