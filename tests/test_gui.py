@@ -15,6 +15,7 @@ from archer_processor.gui.app import (
     DatabaseWorker,
     MainWindow,
     PatientReportWorker,
+    _browser_database_lanes,
     _completed_evidence_sources,
     _protected_remote_evidence_sources,
 )
@@ -763,7 +764,7 @@ def test_browser_worker_passes_restored_evidence_to_provider_resume(
     assert received == [{key: [prior]}]
 
 
-def test_browser_worker_overlaps_mtbp_with_serial_other_provider_lane(
+def test_browser_worker_runs_franklin_mtbp_and_fast_providers_in_parallel(
     qt_app, tmp_path, monkeypatch
 ):
     variant = VariantProcessor().process(
@@ -778,7 +779,7 @@ def test_browser_worker_overlaps_mtbp_with_serial_other_provider_lane(
         tmp_path / "evidence",
         AppSettings(),
     )
-    rendezvous = threading.Barrier(2, timeout=2)
+    rendezvous = threading.Barrier(3, timeout=2)
     calls = []
     calls_lock = threading.Lock()
 
@@ -804,15 +805,26 @@ def test_browser_worker_overlaps_mtbp_with_serial_other_provider_lane(
     )
 
     assert {tuple(databases) for _, databases in calls} == {
-        ("COSMIC", "Franklin"),
+        ("COSMIC",),
+        ("Franklin",),
         ("MTBP",),
     }
-    assert len({thread_name for thread_name, _ in calls}) == 2
+    assert len({thread_name for thread_name, _ in calls}) == 3
     assert {item.database for item in evidence[key]} == {
         "COSMIC",
         "Franklin",
         "MTBP",
     }
+
+
+def test_browser_database_lanes_keep_fast_providers_serial_in_canonical_order():
+    assert _browser_database_lanes(
+        ["MTBP", "ClinVar", "Franklin", "OncoKB", "COSMIC"]
+    ) == [
+        ("fast databases", ["COSMIC", "OncoKB", "ClinVar"]),
+        ("Franklin", ["Franklin"]),
+        ("MTBP", ["MTBP"]),
+    ]
 
 
 def test_browser_worker_uses_direct_path_when_only_one_lane_is_selected(
@@ -846,6 +858,63 @@ def test_browser_worker_uses_direct_path_when_only_one_lane_is_selected(
 
     assert observed == [(calling_thread, ["MTBP"])]
     assert evidence[key][0].database == "MTBP"
+
+
+def test_browser_worker_does_not_retry_identity_mismatch(qt_app, tmp_path):
+    variant = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-07",
+        tmp_path / "identity.xlsx",
+    ).variants[0]
+    key = f"{variant.sample}|{variant.hgvsc}"
+    worker = BrowserReviewWorker(
+        [variant], ["Franklin"], tmp_path / "evidence", AppSettings()
+    )
+    calls = []
+
+    class Service:
+        def search_variants(self, *args, **kwargs):
+            calls.append(1)
+            return {
+                key: [
+                    DatabaseEvidence(
+                        "Franklin", "identity_mismatch", "wrong variant"
+                    )
+                ]
+            }
+
+    worker._search_patient_with_retries(
+        Service(), variant.patient_id, [variant], 1, "Patient 1"
+    )
+
+    assert len(calls) == 1
+
+
+def test_browser_worker_caps_transient_failure_at_one_retry(
+    qt_app, tmp_path, monkeypatch
+):
+    variant = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-07",
+        tmp_path / "timeout.xlsx",
+    ).variants[0]
+    key = f"{variant.sample}|{variant.hgvsc}"
+    worker = BrowserReviewWorker(
+        [variant], ["Franklin"], tmp_path / "evidence", AppSettings()
+    )
+    calls = []
+
+    class Service:
+        def search_variants(self, *args, **kwargs):
+            calls.append(1)
+            return {key: [DatabaseEvidence("Franklin", "timeout", "slow site")]}
+
+    service = Service()
+    monkeypatch.setattr(worker, "_build_service", lambda: service)
+
+    worker.run()
+
+    assert len(calls) == 2
 
 
 def test_resume_keeps_unverified_and_partial_evidence_pending():
@@ -1064,7 +1133,7 @@ def test_database_diagnostics_cover_token_and_manual_statuses(qt_app):
     assert diagnostics["ClinVar"].startswith("browser summary capture")
 
 
-def test_main_database_worker_overlaps_mtbp_with_other_browser_sources(
+def test_main_database_worker_runs_three_browser_lanes_in_parallel(
     qt_app, tmp_path, monkeypatch
 ):
     variant = VariantProcessor().process(
@@ -1080,7 +1149,7 @@ def test_main_database_worker_overlaps_mtbp_with_other_browser_sources(
         tmp_path / "evidence",
         AppSettings(),
     )
-    rendezvous = threading.Barrier(2, timeout=2)
+    rendezvous = threading.Barrier(3, timeout=2)
     calls = []
     calls_lock = threading.Lock()
 
@@ -1106,10 +1175,11 @@ def test_main_database_worker_overlaps_mtbp_with_other_browser_sources(
     )
 
     assert {tuple(databases) for _, databases in calls} == {
-        ("COSMIC", "Franklin"),
+        ("COSMIC",),
+        ("Franklin",),
         ("MTBP",),
     }
-    assert len({thread_name for thread_name, _ in calls}) == 2
+    assert len({thread_name for thread_name, _ in calls}) == 3
     assert {item.database for item in evidence[key]} == {
         "COSMIC",
         "Franklin",
@@ -1236,18 +1306,11 @@ def test_database_worker_completes_all_sources_before_next_patient(
     worker.progress.connect(lambda current, total, detail: progress.append((current, total, detail)))
     worker.run()
 
-    assert events == [
-        (variants[0].patient_id, "OncoKB"),
-        (variants[0].patient_id, "COSMIC"),
-        (variants[0].patient_id, "Franklin"),
-        (variants[0].patient_id, "ClinVar"),
-        (variants[0].patient_id, "MTBP"),
-        (variants[1].patient_id, "OncoKB"),
-        (variants[1].patient_id, "COSMIC"),
-        (variants[1].patient_id, "Franklin"),
-        (variants[1].patient_id, "ClinVar"),
-        (variants[1].patient_id, "MTBP"),
-    ]
+    expected_databases = {"OncoKB", "COSMIC", "Franklin", "ClinVar", "MTBP"}
+    assert {patient for patient, _ in events[:5]} == {variants[0].patient_id}
+    assert {database for _, database in events[:5]} == expected_databases
+    assert {patient for patient, _ in events[5:]} == {variants[1].patient_id}
+    assert {database for _, database in events[5:]} == expected_databases
     assert len(finished) == 1
     assert all(len(items) == 5 for items in finished[0].values())
     assert progress[0][:2] == (0, 2)
@@ -1256,7 +1319,7 @@ def test_database_worker_completes_all_sources_before_next_patient(
     assert 10 <= sum(slept) <= 20
     assert all(delay <= 0.25 for delay in slept)
     assert report_events == []
-    assert prior_snapshots == [restored_evidence] * 4
+    assert prior_snapshots == [restored_evidence] * 6
 
 
 def test_stop_search_requests_safe_interruption_and_keeps_status(

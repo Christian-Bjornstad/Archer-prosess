@@ -24,8 +24,8 @@ class AppSettings:
     mtbp_email: str = ""
     mtbp_password: str = field(default="", repr=False, metadata={"persist": False})
     database_workers: int = 1
-    browser_delay_seconds: int = 10
-    browser_delay_max_seconds: int = 20
+    browser_delay_seconds: int = 3
+    browser_delay_max_seconds: int = 8
     browser_background: bool = True
     mtbp_timeout_minutes: int = 20
     search_included_only: bool = True
@@ -64,7 +64,7 @@ class AppSettings:
             settings = cls(**{key: value for key, value in data.items() if key in persisted_fields})
         except Exception:
             return cls()
-        # Migrate former defaults to the new 10-20 second website-only range while
+        # Migrate former defaults to the new 3-8 second website-only range while
         # preserving any delay range the user actually customized.
         legacy_fixed_delay = (
             "browser_delay_max_seconds" not in data
@@ -72,11 +72,11 @@ class AppSettings:
         )
         former_default_range = (
             (settings.browser_delay_seconds, settings.browser_delay_max_seconds)
-            in {(15, 30), (5, 15)}
+            in {(15, 30), (10, 20), (5, 15)}
         )
         if legacy_fixed_delay or former_default_range:
-            settings.browser_delay_seconds = 10
-            settings.browser_delay_max_seconds = 20
+            settings.browser_delay_seconds = 3
+            settings.browser_delay_max_seconds = 8
         if int(data.get("artifact_catalog_version", 0) or 0) < 2:
             legacy_hgvsc = {
                 "NM_004119.2:c.1419-4dup",

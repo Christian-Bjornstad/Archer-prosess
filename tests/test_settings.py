@@ -8,6 +8,13 @@ def test_automated_edge_runs_minimized_by_default():
     assert AppSettings().browser_background is True
 
 
+def test_default_browser_delay_range_is_three_to_eight_seconds():
+    settings = AppSettings()
+
+    assert settings.browser_delay_seconds == 3
+    assert settings.browser_delay_max_seconds == 8
+
+
 def test_external_history_workbook_is_not_persisted(tmp_path, monkeypatch):
     config_path = tmp_path / "config.json"
     monkeypatch.setattr(AppSettings, "config_path", classmethod(lambda cls: config_path))
@@ -135,8 +142,8 @@ def test_legacy_fixed_browser_delay_migrates_to_new_range(tmp_path, monkeypatch)
 
     loaded = AppSettings.load()
 
-    assert loaded.browser_delay_seconds == 10
-    assert loaded.browser_delay_max_seconds == 20
+    assert loaded.browser_delay_seconds == 3
+    assert loaded.browser_delay_max_seconds == 8
 
 
 def test_former_default_browser_delay_range_migrates(tmp_path, monkeypatch):
@@ -158,8 +165,8 @@ def test_former_default_browser_delay_range_migrates(tmp_path, monkeypatch):
 
     loaded = AppSettings.load()
 
-    assert loaded.browser_delay_seconds == 10
-    assert loaded.browser_delay_max_seconds == 20
+    assert loaded.browser_delay_seconds == 3
+    assert loaded.browser_delay_max_seconds == 8
 
 
 def test_recent_default_browser_delay_range_migrates(tmp_path, monkeypatch):
@@ -181,8 +188,31 @@ def test_recent_default_browser_delay_range_migrates(tmp_path, monkeypatch):
 
     loaded = AppSettings.load()
 
-    assert loaded.browser_delay_seconds == 10
-    assert loaded.browser_delay_max_seconds == 20
+    assert loaded.browser_delay_seconds == 3
+    assert loaded.browser_delay_max_seconds == 8
+
+
+def test_previous_default_browser_delay_range_migrates(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(AppSettings, "config_path", classmethod(lambda cls: config_path))
+    monkeypatch.setattr(
+        "archer_processor.services.settings.credentials.get_saved_password",
+        lambda provider, username: "",
+    )
+    config_path.write_text(
+        json.dumps(
+            {
+                "browser_delay_seconds": 10,
+                "browser_delay_max_seconds": 20,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = AppSettings.load()
+
+    assert loaded.browser_delay_seconds == 3
+    assert loaded.browser_delay_max_seconds == 8
 
 
 def test_legacy_four_artifact_defaults_migrate_to_fragmentation_v2_catalog(

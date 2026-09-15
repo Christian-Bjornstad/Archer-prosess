@@ -890,6 +890,7 @@ def test_franklin_falls_back_after_identity_mismatch(tmp_path, monkeypatch):
     )
     service = BrowserReviewService(profile_root=tmp_path)
     calls = []
+    progress_messages = []
 
     def attempt(page, current_variant, query, artifact_directory, *, progress):
         calls.append(query)
@@ -899,12 +900,25 @@ def test_franklin_falls_back_after_identity_mismatch(tmp_path, monkeypatch):
     monkeypatch.setattr(service, "_search_franklin_query", attempt, raising=False)
 
     evidence = service._resolve_franklin_queries(
-        object(), variant, tmp_path / "franklin", progress=None
+        object(), variant, tmp_path / "franklin", progress=progress_messages.append
     )
 
     assert evidence.status == "found"
     assert calls == ["LUC7L2:c.784dup", "chr7-139097298 T>TC"]
     assert evidence.raw["query_attempts"] == calls
+    assert [item["status"] for item in evidence.raw["query_timings"]] == [
+        "identity_mismatch",
+        "found",
+    ]
+    assert all(item["duration_seconds"] >= 0 for item in evidence.raw["query_timings"])
+    assert any(
+        "identity_mismatch" in message and "completed in" in message
+        for message in progress_messages
+    )
+    assert any(
+        "found" in message and "completed in" in message
+        for message in progress_messages
+    )
 
 
 def test_franklin_skips_fallback_after_verified_primary_result(tmp_path, monkeypatch):
@@ -1051,6 +1065,116 @@ def test_franklin_retries_failed_patients_only_after_first_pass(tmp_path, monkey
 
     assert calls == ["PATIENT_A", "PATIENT_B", "PATIENT_A", "PATIENT_B"]
     assert all(evidence.status == "found" for evidence in results.values())
+
+
+def test_franklin_default_runs_only_one_failed_pass(tmp_path, monkeypatch):
+    variant = VariantRecord(
+        source_file=Path("synthetic.tsv"),
+        source_row=1,
+        sample="PATIENT_A",
+        symbol="LUC7L2",
+        hgvsc="NM_016019.4:c.784dup",
+        genomic_location="chr7:139097298",
+        ref_allele="T",
+        alt_allele="TC",
+    )
+    service = BrowserReviewService(profile_root=tmp_path)
+    calls = []
+
+    class Context:
+        pages = [object()]
+
+        def close(self):
+            pass
+
+    class Runtime:
+        chromium = None
+
+        def __init__(self):
+            self.chromium = self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def launch_persistent_context(self, *args, **kwargs):
+            return Context()
+
+    def resolve(page, current_variant, artifact_directory, *, progress):
+        calls.append(current_variant.sample)
+        return DatabaseEvidence("Franklin", "error", "temporary failure")
+
+    monkeypatch.setattr(
+        service, "_browser_api", lambda: (lambda: Runtime(), Exception, TimeoutError)
+    )
+    monkeypatch.setattr(service, "_resolve_franklin_queries", resolve)
+    monkeypatch.setattr(service, "_wait_between_queries", lambda *args, **kwargs: None)
+
+    service._search_franklin([variant], tmp_path / "franklin", progress=None)
+
+    assert calls == ["PATIENT_A"]
+
+
+def test_browser_service_default_delay_range_is_three_to_eight_seconds(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path)
+
+    assert service.request_delay_ms == 3_000
+    assert service.request_delay_max_ms == 8_000
+
+
+@pytest.mark.parametrize("status", ["not_found", "identity_mismatch"])
+def test_franklin_does_not_repeat_terminal_results(
+    tmp_path, monkeypatch, status
+):
+    variant = VariantRecord(
+        source_file=Path("synthetic.tsv"),
+        source_row=1,
+        sample="PATIENT_A",
+        symbol="LUC7L2",
+        hgvsc="NM_016019.4:c.784dup",
+        genomic_location="chr7:139097298",
+        ref_allele="T",
+        alt_allele="TC",
+    )
+    service = BrowserReviewService(profile_root=tmp_path, franklin_attempts=3)
+    calls = []
+
+    class Context:
+        pages = [object()]
+
+        def close(self):
+            pass
+
+    class Runtime:
+        chromium = None
+
+        def __init__(self):
+            self.chromium = self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def launch_persistent_context(self, *args, **kwargs):
+            return Context()
+
+    def resolve(page, current_variant, artifact_directory, *, progress):
+        calls.append(current_variant.sample)
+        return DatabaseEvidence("Franklin", status, "terminal result")
+
+    monkeypatch.setattr(
+        service, "_browser_api", lambda: (lambda: Runtime(), Exception, TimeoutError)
+    )
+    monkeypatch.setattr(service, "_resolve_franklin_queries", resolve)
+    monkeypatch.setattr(service, "_wait_between_queries", lambda *args, **kwargs: None)
+
+    service._search_franklin([variant], tmp_path / "franklin", progress=None)
+
+    assert calls == ["PATIENT_A"]
 
 
 def test_franklin_category_titles_wait_for_nonempty_de_novo(tmp_path):

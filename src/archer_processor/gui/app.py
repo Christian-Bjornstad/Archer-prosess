@@ -78,6 +78,11 @@ from archer_processor.gui.widgets.run_status import RunStatusStrip
 from archer_processor.gui.widgets.status_matrix import StatusMatrix
 
 
+AUTOMATIC_RETRYABLE_EVIDENCE_STATUSES = frozenset(
+    {"error", "timeout", "session_lost", "partial_capture"}
+)
+
+
 class ProcessingWorker(QObject):
     finished = pyqtSignal(object)
     failed = pyqtSignal(str)
@@ -176,14 +181,16 @@ def _variants_grouped_by_patient(variants) -> list[tuple[str, list]]:
 
 def _browser_database_lanes(databases: list[str]) -> list[tuple[str, list[str]]]:
     requested = set(databases)
-    other_databases = [
+    fast_databases = [
         database
         for database in BROWSER_DATABASES
-        if database in requested and database != "MTBP"
+        if database in requested and database not in {"Franklin", "MTBP"}
     ]
     lanes: list[tuple[str, list[str]]] = []
-    if other_databases:
-        lanes.append(("other databases", other_databases))
+    if fast_databases:
+        lanes.append(("fast databases", fast_databases))
+    if "Franklin" in requested:
+        lanes.append(("Franklin", ["Franklin"]))
     if "MTBP" in requested:
         lanes.append(("MTBP", ["MTBP"]))
     return lanes
@@ -241,7 +248,8 @@ def _failed_search_variants(
         by_database = {item.database: item for item in evidence.get(key, [])}
         if any(
             database in by_database
-            and not is_completed_evidence(by_database[database])
+            and by_database[database].status.strip().casefold()
+            in AUTOMATIC_RETRYABLE_EVIDENCE_STATUSES
             for database in databases
         ):
             failed.append(variant)
@@ -463,7 +471,7 @@ class DatabaseWorker(QObject):
             return patient_evidence
 
         with ThreadPoolExecutor(
-            max_workers=2, thread_name_prefix="database-browser"
+            max_workers=len(lanes), thread_name_prefix="database-browser"
         ) as executor:
             futures = [
                 executor.submit(
@@ -694,11 +702,6 @@ class BrowserReviewWorker(QObject):
                             chunk = min(0.25, remaining)
                             time.sleep(chunk)
                             remaining -= chunk
-            final_retry_evidence = self._final_failed_pass(all_evidence, patients)
-            if final_retry_evidence:
-                _merge_evidence_results(all_evidence, final_retry_evidence)
-                _merge_evidence_results(self._pass_evidence, final_retry_evidence)
-                self.patient_finished.emit(final_retry_evidence)
             self.finished.emit(all_evidence)
         except BrowserReviewCancelled:
             self.cancelled.emit()
@@ -741,7 +744,7 @@ class BrowserReviewWorker(QObject):
             _merge_evidence_results(patient_evidence, result)
         else:
             with ThreadPoolExecutor(
-                max_workers=2, thread_name_prefix="browser-review"
+                max_workers=len(lanes), thread_name_prefix="browser-review"
             ) as executor:
                 futures = {
                     executor.submit(
@@ -800,12 +803,12 @@ class BrowserReviewWorker(QObject):
         databases: list[str] | None = None,
         pass_evidence: dict[str, list[DatabaseEvidence]] | None = None,
     ) -> dict[str, list[DatabaseEvidence]]:
-        """Search one patient, then retry failed lookups once before moving on.
+        """Search one patient, then retry transient lookup failures once.
 
         The first pass collects everything; if any variant/source pair ends in a
-        retryable state (site down, timeout, lost session), a single immediate
-        retry pass runs for just those lookups. Anything still failing afterwards
-        is left for the batch-end pass or the manual rerun button.
+        transient state (site down, timeout, lost session), a single immediate
+        retry pass runs for just those lookups. Terminal identity and availability
+        results are retained for a later user-initiated run.
         """
         active_databases = list(
             self.databases if databases is None else databases
@@ -848,7 +851,7 @@ class BrowserReviewWorker(QObject):
         if still_failed:
             self.status.emit(
                 f"{prefix}: {len(still_failed)} lookup(s) still failing after "
-                "retry; a final pass runs after the last patient"
+                "retry; start evidence search again later to retry them"
             )
         return patient_evidence
 
@@ -895,52 +898,6 @@ class BrowserReviewWorker(QObject):
             checkpoint=self.patient_finished.emit,
             prior_evidence=prior_evidence,
         )
-
-    def _final_failed_pass(
-        self,
-        all_evidence: dict[str, list[DatabaseEvidence]],
-        patients: list[tuple[str, list]],
-    ) -> dict[str, list[DatabaseEvidence]]:
-        """One last pass over every still-failed lookup once the batch completes."""
-        all_variants = [
-            variant for _, patient_variants in patients for variant in patient_variants
-        ]
-        evidence_snapshot: dict[str, list[DatabaseEvidence]] = {
-            key: list(items) for key, items in all_evidence.items()
-        }
-        for key, items in self._pass_evidence.items():
-            _merge_evidence_results(evidence_snapshot, {key: list(items)})
-        failed = _failed_search_variants(
-            all_variants, evidence_snapshot, self.databases
-        )
-        if not failed:
-            return {}
-        self.status.emit(
-            f"Batch complete: running one final pass for {len(failed)} "
-            "still-failed lookup(s)"
-        )
-        service = self._build_service()
-        final_evidence: dict[str, list[DatabaseEvidence]] = {
-            BrowserReviewService.variant_key(variant): [] for variant in failed
-        }
-        for patient_id, patient_variants in _variants_grouped_by_patient(failed):
-            original_index = self.patient_indexes.get(patient_id, 1)
-            pass_prefix = f"Patient {original_index} ({patient_id}) (final pass)"
-            _merge_evidence_results(
-                final_evidence,
-                self._run_search_pass(
-                    service, patient_id, patient_variants, original_index, pass_prefix
-                ),
-            )
-        still_failed = _failed_search_variants(
-            failed, final_evidence, self.databases
-        )
-        if still_failed:
-            self.status.emit(
-                f"{len(still_failed)} lookup(s) remain unresolved; use 'Rerun "
-                "Failed Sources' to try again later."
-            )
-        return final_evidence
 
     def _build_service(self) -> BrowserReviewService:
         return BrowserReviewService(

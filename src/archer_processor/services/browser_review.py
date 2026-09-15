@@ -54,6 +54,8 @@ PROVIDER_SWITCH_DELAY_MS = 3_000
 # fast and the site has no per-query throttle at this cadence.
 COSMIC_REQUEST_DELAY_MS = 3_000
 COSMIC_REQUEST_DELAY_MAX_MS = 8_000
+DEFAULT_REQUEST_DELAY_MS = 3_000
+DEFAULT_REQUEST_DELAY_MAX_MS = 8_000
 
 _AMINO_ACID_3_TO_1 = {
     "Ala": "A", "Arg": "R", "Asn": "N", "Asp": "D", "Cys": "C",
@@ -77,12 +79,12 @@ class MtbpReportTimeout(TimeoutError):
 
 
 class BrowserReviewService:
-    """Run serial, visible website reviews in isolated persistent Edge profiles.
+    """Run one provider lane in an isolated persistent Edge profile.
 
     Passwords are entered directly into each provider's page. The application
     retains only the provider browser profile (cookies/local storage), never the
-    password itself. Browser sources are deliberately serial and separate from
-    the HTTP/API search service.
+    password itself. Calls within a lane are serial; the GUI may overlap lanes
+    for different providers while keeping patients and per-provider variants serial.
     """
 
     def __init__(
@@ -102,9 +104,9 @@ class BrowserReviewService:
         franklin_password: str = "",
         mtbp_email: str = "",
         mtbp_password: str = "",
-        franklin_attempts: int = 3,
-        request_delay_ms: int = 10_000,
-        request_delay_max_ms: int | None = 20_000,
+        franklin_attempts: int = 1,
+        request_delay_ms: int = DEFAULT_REQUEST_DELAY_MS,
+        request_delay_max_ms: int | None = DEFAULT_REQUEST_DELAY_MAX_MS,
         provider_switch_delay_ms: int = PROVIDER_SWITCH_DELAY_MS,
         stop_requested: Callable[[], bool] | None = None,
         pause_wait: Callable[[], None] | None = None,
@@ -1029,12 +1031,7 @@ class BrowserReviewService:
                         }
 
                 pending = list(variants)
-                retryable_statuses = {
-                    "identity_mismatch",
-                    "timeout",
-                    "not_found",
-                    "error",
-                }
+                retryable_statuses = {"timeout", "error"}
                 for pass_index in range(1, self.franklin_attempts + 1):
                     retry_variants: list[VariantRecord] = []
                     for index, variant in enumerate(pending, start=1):
@@ -1088,6 +1085,7 @@ class BrowserReviewService:
     ) -> DatabaseEvidence:
         started_at = time.monotonic()
         query_attempts: list[str] = []
+        query_timings: list[dict[str, str | float]] = []
         queries = _franklin_queries(variant)
         evidence = DatabaseEvidence(
             "Franklin",
@@ -1099,6 +1097,7 @@ class BrowserReviewService:
             query_attempts.append(query)
             if progress and query_index > 1:
                 progress(f"Franklin: retrying with GRCh37 genomic query {query}")
+            query_started_at = time.monotonic()
             evidence = self._search_franklin_query(
                 page,
                 variant,
@@ -1106,6 +1105,19 @@ class BrowserReviewService:
                 artifact_directory,
                 progress=progress,
             )
+            query_elapsed = time.monotonic() - query_started_at
+            query_timings.append(
+                {
+                    "query": query,
+                    "status": evidence.status,
+                    "duration_seconds": round(query_elapsed, 3),
+                }
+            )
+            if progress:
+                progress(
+                    f"Franklin: {evidence.status} completed in "
+                    f"{query_elapsed:.1f}s"
+                )
             if evidence.status == "found":
                 break
             if evidence.status not in {
@@ -1116,6 +1128,7 @@ class BrowserReviewService:
             }:
                 break
         evidence.raw["query_attempts"] = list(query_attempts)
+        evidence.raw["query_timings"] = query_timings
         return persist_evidence_result(
             artifact_directory,
             "Franklin",
