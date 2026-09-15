@@ -2497,79 +2497,10 @@ class BrowserReviewService:
             state="visible", timeout=self.navigation_timeout_ms
         )
         page.evaluate("window.scrollTo(0, window.scrollY)")
-        self._wait_for_franklin_panel_stable(
-            page,
-            page.locator(target_selector),
-            label,
-        )
-
-    def _wait_for_franklin_panel_stable(
-        self,
-        page: Any,
-        panel: Any,
-        label: str,
-    ) -> None:
-        """Wait for Franklin's sliding classification panel to finish rendering."""
-        stable_samples = 0
-        previous_fingerprint: tuple | None = None
-        attempts = max(1, self.navigation_timeout_ms // 250)
-        label_text = label.casefold()
-        classification_terms = (
-            ("benign", "uncertain significance", "oncogenic")
-            if label == "Oncogenic Classification"
-            else ("benign", "uncertain significance", "pathogenic")
-        )
-        for attempt in range(attempts):
-            self._check_cancelled()
-            snapshot = panel.evaluate(
-                """el => {
-                    const rect = el.getBoundingClientRect();
-                    return {
-                        x: rect.x,
-                        width: rect.width,
-                        height: rect.height,
-                        viewport_width: window.innerWidth,
-                        text: el.innerText || ''
-                    };
-                }"""
-            )
-            text = " ".join(str(snapshot.get("text", "")).split()).casefold()
-            viewport_width = max(1.0, float(snapshot.get("viewport_width", 0) or 0))
-            x = float(snapshot.get("x", 0) or 0)
-            width = float(snapshot.get("width", 0) or 0)
-            height = float(snapshot.get("height", 0) or 0)
-            panel_content = text.replace(label_text, "", 1)
-            content_ready = (
-                label_text in text
-                and "suggested classification" in text
-                and any(term in panel_content for term in classification_terms)
-            )
-            position_ready = (
-                width > 0
-                and height > 0
-                and x <= max(48.0, viewport_width * 0.05)
-                and x + width >= viewport_width * 0.75
-            )
-            fingerprint = (
-                round(x),
-                round(width),
-                round(height),
-                text,
-            )
-            if content_ready and position_ready and fingerprint == previous_fingerprint:
-                stable_samples += 1
-            elif content_ready and position_ready:
-                stable_samples = 1
-            else:
-                stable_samples = 0
-            previous_fingerprint = fingerprint
-            if stable_samples >= 3:
-                return
-            if attempt + 1 < attempts:
-                page.wait_for_timeout(250)
-        raise IncompleteCaptureError(
-            CaptureValidation(False, "classification_panel_unstable", 0, 0, 0.0)
-        )
+        # Franklin briefly leaves the previous Angular panel visible after the
+        # subtab changes. A fixed render buffer avoids capturing those old pixels
+        # without rejecting valid narrow/two-column classification layouts.
+        page.wait_for_timeout(1_000)
 
     def _wait_for_nonempty_category_titles(
         self,

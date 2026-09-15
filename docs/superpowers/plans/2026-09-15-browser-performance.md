@@ -52,7 +52,8 @@ live wall time must be measured rather than inferred from summed log durations.
 
 - Do not parallelize variants or open two concurrent sessions against the same
   website/account.
-- Do not reduce Franklin classification stability waits or screenshot validation.
+- Keep Franklin's fixed one-second classification-tab render buffer and screenshot
+  validation. Do not gate valid captures on provider-layout width heuristics.
 - Do not change COSMIC's explicit GRCh37 verification.
 - Do not guess a new Franklin route from stale browser history.
 - A provider failure must not discard evidence completed by another lane.

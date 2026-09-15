@@ -1569,7 +1569,9 @@ def test_franklin_computed_capture_uses_both_subtabs_and_skips_somatic(
     assert [item["label"] for item in screenshots] == ["ACMG", "Oncogenic"]
 
 
-def test_franklin_subtab_switch_waits_until_oncogenic_panel_is_stable(tmp_path):
+def test_franklin_subtab_switch_uses_fixed_render_buffer_for_narrow_valid_panel(
+    tmp_path,
+):
     service = BrowserReviewService(profile_root=tmp_path)
 
     class TabLocator:
@@ -1580,43 +1582,13 @@ def test_franklin_subtab_switch_waits_until_oncogenic_panel_is_stable(tmp_path):
             return True
 
     class PanelLocator:
-        def __init__(self):
-            self.snapshots = [
-                {
-                    "x": 1220,
-                    "width": 1880,
-                    "height": 700,
-                    "viewport_width": 1920,
-                    "text": "Oncogenic Classification\nSuggested Classification\nLikely Oncogenic",
-                },
-                {
-                    "x": 16,
-                    "width": 1880,
-                    "height": 700,
-                    "viewport_width": 1920,
-                    "text": "Oncogenic Classification\nSuggested Classification\nLikely Oncogenic",
-                },
-                {
-                    "x": 16,
-                    "width": 1880,
-                    "height": 700,
-                    "viewport_width": 1920,
-                    "text": "Oncogenic Classification\nSuggested Classification\nLikely Oncogenic",
-                },
-                {
-                    "x": 16,
-                    "width": 1880,
-                    "height": 700,
-                    "viewport_width": 1920,
-                    "text": "Oncogenic Classification\nSuggested Classification\nLikely Oncogenic",
-                },
-            ]
-
         def wait_for(self, **kwargs):
             pass
 
         def evaluate(self, script):
-            return self.snapshots.pop(0)
+            raise AssertionError(
+                "A valid Franklin panel must not be rejected by a width/text heuristic"
+            )
 
     class Page:
         def __init__(self):
@@ -1641,8 +1613,7 @@ def test_franklin_subtab_switch_waits_until_oncogenic_panel_is_stable(tmp_path):
         page, "Oncogenic Classification"
     )
 
-    assert page.panel.snapshots == []
-    assert page.waits == [250, 250, 250]
+    assert page.waits == [1_000]
 
 
 def test_browser_review_can_be_cancelled_before_opening_edge(tmp_path):
