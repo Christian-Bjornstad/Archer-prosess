@@ -175,11 +175,11 @@ kilden midlertidig og merk den uferdig.
 
 Omfang: browser_review.py og nettlesertester. Avhengigheter: ingen.
 
-- [ ] Reproduser already_absent fra detaljrapport og krev bekreftet Reports List
+- [x] Reproduser already_absent fra detaljrapport og krev bekreftet Reports List
   før fravær eller sletting kan konkluderes. Vent på at listen er ferdig lastet.
-- [ ] Beskytt rapport-ID-er med ufullstendig innhenting på tvers av pasienter og
+- [x] Beskytt rapport-ID-er med ufullstendig innhenting på tvers av pasienter og
   omstart; slett bare rapporter som er bekreftet trygge å fjerne, ved behov.
-- [ ] Verifiser at en delvis fanget rapport fortsatt kan gjenopptas etter at neste
+- [x] Verifiser at en delvis fanget rapport fortsatt kan gjenopptas etter at neste
   pasient er behandlet. Sletting skal bare skje etter kontrollert lokal lagring.
 
 Kontroll: falsk fraværstilstand, full kapasitet, delvis rapport og omstart i

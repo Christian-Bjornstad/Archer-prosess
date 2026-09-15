@@ -1488,8 +1488,16 @@ class BrowserReviewService:
                     "MTBP: submitting one combined patient report with "
                     f"{len(pending_variants)} variant(s)"
                 )
+            protected_analysis_ids = {
+                str(evidence.raw.get("analysis_id") or "")
+                for evidence in results.values()
+                if str(evidence.raw.get("analysis_id") or "").startswith("ARCHER-")
+            }
+            batch_kwargs: dict[str, Any] = {"progress": progress}
+            if protected_analysis_ids:
+                batch_kwargs["protected_analysis_ids"] = protected_analysis_ids
             current = self._search_mtbp_batch(
-                pending_variants, artifact_directory, progress=progress
+                pending_variants, artifact_directory, **batch_kwargs
             )
             for evidence in current.values():
                 evidence.url = ""
@@ -1721,6 +1729,7 @@ class BrowserReviewService:
         artifact_directory: Path,
         *,
         progress: Callable[[str], None] | None,
+        protected_analysis_ids: set[str] | None = None,
     ) -> dict[str, DatabaseEvidence]:
         """Submit one pseudonymous MTBP analysis and parse its report."""
         results: dict[str, DatabaseEvidence] = {}
@@ -1800,6 +1809,7 @@ class BrowserReviewService:
                 preflight_cleanup = self._cleanup_stale_mtbp_reports(
                     page,
                     progress=progress,
+                    protected_analysis_ids=protected_analysis_ids,
                 )
                 self._goto_with_retries(page, self.login_url("MTBP"))
                 active_pairs = list(query_pairs)
@@ -2113,6 +2123,7 @@ class BrowserReviewService:
         page: Any,
         *,
         progress: Callable[[str], None] | None,
+        protected_analysis_ids: set[str] | None = None,
     ) -> dict[str, Any]:
         """Free one slot from app-generated reports or refuse safely."""
         self._goto_with_retries(page, MTBP_REPORTS_URL)
@@ -2127,12 +2138,18 @@ class BrowserReviewService:
             str(generated.nth(index).get_attribute("data-patient-name") or "")
             for index in range(generated_count)
         ]
+        protected = protected_analysis_ids or set()
         for analysis_id in generated_ids:
+            if remaining < MTBP_REPORT_LIMIT:
+                break
+            if analysis_id in protected:
+                continue
             outcome = self._delete_mtbp_report(page, analysis_id)
             if outcome.get("status") not in {"deleted", "already_absent"}:
                 failed.append(analysis_id)
                 continue
             deleted.append(analysis_id)
+            remaining = page.locator("button.delete-patient").count()
             if progress:
                 progress(f"MTBP: removed old app report {analysis_id}")
         remaining = page.locator("button.delete-patient").count()
@@ -2148,6 +2165,7 @@ class BrowserReviewService:
             "trigger": "capacity" if deleted else "none",
             "deleted_stale_reports": deleted,
             "failed_deletions": failed,
+            "protected_reports": sorted(protected),
             "remaining_reports": remaining,
             "remaining_archer_reports": generated_count,
         }
@@ -2188,7 +2206,7 @@ class BrowserReviewService:
                 "message": "Only ARCHER-prefixed reports may be deleted automatically.",
             }
         try:
-            if not page.url.startswith(MTBP_REPORTS_URL):
+            if page.url.rstrip("/") != MTBP_REPORTS_URL.rstrip("/"):
                 self._goto_with_retries(page, MTBP_REPORTS_URL)
             report_link = page.get_by_role("link", name=analysis_id, exact=True)
             report_count = report_link.count()

@@ -2735,6 +2735,41 @@ def test_mtbp_resume_does_not_duplicate_report_when_recovery_is_unavailable(
     assert results[key].raw["analysis_id"] == "ARCHER-pending"
 
 
+def test_mtbp_new_batch_protects_unavailable_retained_report(tmp_path, monkeypatch):
+    variants = ArcherTsvReader().read(FIXTURE)[3:5]
+    service = BrowserReviewService(profile_root=tmp_path)
+    retained_key = service.variant_key(variants[0])
+    retained = DatabaseEvidence(
+        "MTBP",
+        "timeout",
+        "pending",
+        raw={"analysis_id": "ARCHER-protected"},
+    )
+    captured_protection = []
+
+    monkeypatch.setattr(
+        service,
+        "_recover_mtbp_timeouts",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("Edge unavailable")),
+    )
+
+    def submit(batch, artifact_directory, *, progress, protected_analysis_ids):
+        captured_protection.extend(protected_analysis_ids)
+        variant = batch[0]
+        return {service.variant_key(variant): DatabaseEvidence("MTBP", "not_found", "")}
+
+    monkeypatch.setattr(service, "_search_mtbp_batch", submit)
+
+    service._search_mtbp(
+        variants,
+        tmp_path / "mtbp",
+        progress=None,
+        prior_evidence={retained_key: [retained]},
+    )
+
+    assert captured_protection == ["ARCHER-protected"]
+
+
 def test_mtbp_resume_resubmits_partial_capture_only_after_confirmed_absence(
     tmp_path, monkeypatch
 ):
@@ -3077,6 +3112,26 @@ def test_mtbp_delete_is_idempotent_when_exact_report_is_already_absent(tmp_path)
     assert page.reports == ["manual-report"]
 
 
+def test_mtbp_delete_reopens_report_list_from_detail_page(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path)
+    analysis_id = "ARCHER-on-detail-page"
+    page = _FakeMtbpReportsPage(["manual-report", analysis_id])
+    page.url = "https://mtbp.org/patients/42/sample/7/report/9/"
+    visited = []
+
+    def open_reports(candidate_page, url, **kwargs):
+        visited.append(url)
+        candidate_page.goto(url)
+
+    service._goto_with_retries = open_reports
+
+    outcome = service._delete_mtbp_report(page, analysis_id)
+
+    assert visited == ["https://mtbp.org/patients/"]
+    assert outcome["status"] == "deleted"
+    assert page.reports == ["manual-report"]
+
+
 def test_mtbp_resume_retries_failed_cleanup_without_resubmitting(
     tmp_path, monkeypatch
 ):
@@ -3164,7 +3219,7 @@ def test_mtbp_finalization_retains_incomplete_report_for_recovery(
     assert evidence.raw["remote_report_cleanup"] == outcome
 
 
-def test_mtbp_preflight_removes_all_old_archer_reports(tmp_path):
+def test_mtbp_preflight_removes_only_one_safe_report_at_capacity(tmp_path):
     service = BrowserReviewService(profile_root=tmp_path)
     reports = [
         "manual-1",
@@ -3177,27 +3232,40 @@ def test_mtbp_preflight_removes_all_old_archer_reports(tmp_path):
 
     outcome = service._cleanup_stale_mtbp_reports(page, progress=None)
 
-    assert page.reports == ["manual-1", "manual-2"]
+    assert page.reports == ["manual-1", "ARCHER-old-2", "manual-2", "ARCHER-old-3"]
     assert outcome["status"] == "deleted_stale"
-    assert outcome["deleted_stale_reports"] == [
-        "ARCHER-old-1",
-        "ARCHER-old-2",
-        "ARCHER-old-3",
-    ]
-    assert outcome["remaining_reports"] == 2
+    assert outcome["deleted_stale_reports"] == ["ARCHER-old-1"]
+    assert outcome["remaining_reports"] == 4
 
 
-def test_mtbp_preflight_removes_archer_reports_even_below_capacity(tmp_path):
+def test_mtbp_preflight_keeps_archer_reports_below_capacity(tmp_path):
     service = BrowserReviewService(profile_root=tmp_path)
     reports = ["manual-1", "ARCHER-pending", "manual-2", "manual-3"]
     page = _FakeMtbpReportsPage(reports)
 
     outcome = service._cleanup_stale_mtbp_reports(page, progress=None)
 
-    assert page.reports == ["manual-1", "manual-2", "manual-3"]
-    assert outcome["status"] == "deleted_stale"
-    assert outcome["remaining_reports"] == 3
-    assert outcome["remaining_archer_reports"] == 0
+    assert page.reports == reports
+    assert outcome["status"] == "retained"
+    assert outcome["remaining_reports"] == 4
+    assert outcome["remaining_archer_reports"] == 1
+
+
+def test_mtbp_preflight_never_deletes_protected_incomplete_report(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path)
+    page = _FakeMtbpReportsPage(
+        ["manual-1", "ARCHER-incomplete", "manual-2", "ARCHER-safe", "manual-3"]
+    )
+
+    outcome = service._cleanup_stale_mtbp_reports(
+        page,
+        progress=None,
+        protected_analysis_ids={"ARCHER-incomplete"},
+    )
+
+    assert "ARCHER-incomplete" in page.reports
+    assert "ARCHER-safe" not in page.reports
+    assert outcome["deleted_stale_reports"] == ["ARCHER-safe"]
 
 
 def test_mtbp_preflight_refuses_to_delete_five_manual_reports(tmp_path):
