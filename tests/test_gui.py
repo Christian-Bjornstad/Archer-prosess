@@ -17,6 +17,7 @@ from archer_processor.gui.app import (
     PatientReportWorker,
     _browser_database_lanes,
     _completed_evidence_sources,
+    _pending_source_counts,
     _protected_remote_evidence_sources,
 )
 from archer_processor.gui.status_model import (
@@ -29,8 +30,9 @@ from archer_processor.gui.status_model import (
 )
 from archer_processor.gui.widgets.status_matrix import StatusMatrix
 from archer_processor.gui.widgets.run_status import RunStatusStrip
+from archer_processor.io import ArcherTsvReader
 from archer_processor.reports import ExcelReportWriter, PatientReportOutcome
-from archer_processor.services import DatabaseSearchService
+from archer_processor.services import BrowserReviewService, DatabaseSearchService
 from archer_processor.services import AppSettings
 
 
@@ -371,6 +373,23 @@ def test_pending_search_scope_can_be_limited_to_selected_patients(qt_app, tmp_pa
 
     assert pending
     assert {variant.patient_id for variant in pending} == {target_patient}
+
+
+def test_pending_source_counts_explains_resume_scope_per_database():
+    variants = ArcherTsvReader().read(Path(__file__).parent / "fixtures" / "sample_variants.tsv")[:2]
+    first_key = BrowserReviewService.variant_key(variants[0])
+    second_key = BrowserReviewService.variant_key(variants[1])
+    completed = {
+        (first_key, "OncoKB"),
+        (first_key, "ClinVar"),
+        (second_key, "ClinVar"),
+    }
+
+    counts = _pending_source_counts(
+        variants, ["OncoKB", "ClinVar", "MTBP"], completed
+    )
+
+    assert counts == {"OncoKB": 1, "ClinVar": 0, "MTBP": 2}
 
 
 def test_priority_action_starts_only_selected_patient_scope(qt_app, tmp_path, monkeypatch):

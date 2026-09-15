@@ -214,6 +214,21 @@ def _completed_evidence_sources(
     return completed
 
 
+def _pending_source_counts(
+    variants,
+    databases: list[str],
+    completed_sources: set[tuple[str, str]],
+) -> dict[str, int]:
+    return {
+        database: sum(
+            (BrowserReviewService.variant_key(variant), database)
+            not in completed_sources
+            for variant in variants
+        )
+        for database in databases
+    }
+
+
 def _protected_remote_evidence_sources(
     evidence: dict[str, list[DatabaseEvidence]],
 ) -> set[tuple[str, str]]:
@@ -1909,6 +1924,19 @@ class MainWindow(QMainWindow):
             f"Resume-aware scope for {scope_label}: "
             f"{len(variants)}/{len(eligible_variants)} variant(s), "
             f"{pending_units}/{total_units} source lookup(s) pending"
+        )
+        pending_by_source = _pending_source_counts(
+            eligible_variants, databases, completed_sources
+        )
+        self._log(
+            " | ".join(
+                [
+                    "PENDING",
+                    f"scope={scope_label}",
+                    f"total={pending_units}",
+                    *(f"{database}={count}" for database, count in pending_by_source.items()),
+                ]
+            )
         )
         worker = DatabaseWorker(
             variants,
