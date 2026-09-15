@@ -1,7 +1,7 @@
 # Plan: Mer pålitelig nettsidekjøring på jobb-PC
 
-Status: undersøkt og klar for gjennomføring senere. Ingen av oppgavene nedenfor
-er implementert i denne planleggingsrunden.
+Status: implementering pågår på `fix/run-diagnostics-recovery`. Oppgavene krysses
+av først etter automatisert verifikasjon; jobb-PC-kontroller står åpne til de er kjørt.
 
 ## Rammer
 
@@ -46,6 +46,130 @@ er implementert i denne planleggingsrunden.
    om at hele resume-runden blir 2–3 minutter er ikke verifisert.
 
 ## Prioritert oppgaveliste
+
+## Tillegg: målrettede reserve-søk, undersøkt 15. september 2026
+
+### Hva researchen faktisk bekrefter
+
+- OncoKB dokumenterer en **nettsiderute**, ikke bare et API, på
+  `/hgvsg/{genomisk-HGVS}?refGenome=GRCh37`. Dette gir en konkret kandidat
+  for transkriptavvik. Dokumentert eksempel er
+  `https://www.oncokb.org/hgvsg/7:g.140453136A%3ET?refGenome=GRCh37`.
+  Ruten er dokumentert, men avvikstilfellene våre er ikke live-verifisert via
+  denne ruten ennå. [OncoKBs offisielle FAQ](https://faq.oncokb.org/technical).
+- ClinVar dokumenterer nettsidesøk med cDNA og genomisk område filtrert med
+  `[chrpos37]`. Dette kan brukes til å finne kandidater uten E-utilities;
+  søket alene beviser ikke at allelene er riktige.
+  [NCBIs lenkeveiledning](https://www.ncbi.nlm.nih.gov/clinvar/docs/linking/).
+- NCBI forklarer at indeler kan ha forskjellige posisjonsrepresentasjoner.
+  Ulik råposisjon er derfor ikke alltid ulik variant, men lik posisjon er
+  heller ikke nok til å godkjenne et treff.
+  [ClinVar FAQ](https://www.ncbi.nlm.nih.gov/clinvar/docs/faq/).
+- Koden har allerede Franklin-reserve fra gen+cDNA til genomiske alleler.
+  MTBP erstatter bare uttrykk nettsiden eksplisitt avviser, med eksisterende
+  GRCh37/HGVS-konvertering. Behold disse prinsippene; ikke bygg dem om samlet.
+- COSMIC begrenses etter brukerens krav til COSMIC-ID-er fra input.
+  Flere oppgitte ID-er kan prøves i rekkefølge; ingen gen-, protein- eller
+  koordinatsøk som reserve. Ikke konstruer nye ID-er.
+
+### Søkeoppskrift per kilde
+
+| Kilde | Første søk | Tillatt reserve | Når vi stopper |
+| --- | --- | --- | --- |
+| Franklin | Behold dagens gen+cDNA | Dagens eksakte genomiske GRCh37-uttrykk fra input | Verifisert variant med nødvendige bilder, eller uttømt kandidatliste |
+| COSMIC | Første unike oppgitte COSMIC-ID | Neste unike oppgitte COSMIC-ID ved manglende/feil treff | Verifisert ID/GRCh37-treff; ingen ID gir lokalt «ikke aktuelt» |
+| ClinVar | Transkript-HGVS fra input når tilgjengelig | Ett presist GRCh37-lokussøk; gjennomgå kandidatkort og alleler | Eksakt identitet; ellers «ikke funnet» eller «manuell kontroll» |
+| OncoKB | Gen+protein som i dag | Dokumentert HGVSg-nettsiderute med GRCh37 ved transkriptavvik/variant uten treff | Riktig variant; ellers konkret kontrollårsak, ikke gjettet protein |
+| MTBP | Dagens transkript-/variantuttrykk i pasientbatch | Genomisk HGVS kun for eksplisitt avviste uttrykk | Akseptert rapport gjenopptas; ikke opprett ny rapport ved vanlig venting |
+
+Manglende felt gjør at kandidaten utelates. ClinVar kan starte med lokussøk
+når transkriptet mangler. OncoKBs genomiske reserve aktiveres først etter
+live-test av normal SNV, transkriptavvik og indel. Et ukjent gen skal ikke
+utløse en kjede av gjentatte proteinforsøk. Et genkort eller generelt
+«truncating mutations»-kort må ikke fremstilles som et eksakt varianttreff.
+
+### Felles stoppregler og tidsbudsjett
+
+- Skill **ny søkemåte** fra **nytt forsøk på samme søk** i kode og logg.
+  Dedupliser kandidater, og husk hva som allerede er forsøkt ved gjenopptak.
+- Foreslått startgrense: høyst to ulike søkemåter per kilde/variant;
+  COSMIC begrenses i stedet til unike oppgitte ID-er. Høyst ett ekstra
+  nettverksforsøk totalt per kilde/variant, ikke ett i hvert nestet lag.
+  Dette er en implementeringsregel som skal testes, ikke en endring gjort nå.
+- Ikke bytt søkeuttrykk ved utløpt innlogging, kvote, rate limit eller ødelagt
+  sidelayout. Pause den berørte kilden og behold resten av arbeidet.
+- Timeout før resultatvisningen er lastet er ikke «ikke funnet». Ved
+  forbigående feil kan samme søk prøves én gang. Reserve-søk brukes når
+  søkemåten/identiteten er problemet, ikke når tjenesten er utilgjengelig.
+- Sett én samlet tidsfrist rundt alle oppslagstrinn for en variant/kilde,
+  slik at underliggende ventinger ikke nullstiller budsjettet. Fastsett
+  sekunder fra jobb-PC-målinger. MTBP-serveranalyse har eget rapportbudsjett,
+  ikke samme korte oppslagsfrist som de andre kildene.
+- To påfølgende kildeomfattende driftsfeil er et foreslått signal for å pause
+  kilden. Vanlige «ikke funnet» skal aldri telle som driftsfeil.
+- «Gjenoppta uferdige» skal ikke automatisk kjøre uttømte søk igjen.
+  Et separat eksplisitt nytt forsøk kan nullstille søkehistorikken.
+
+### Identitet og skjermbilder er godkjenningskravet
+
+- Registrer original input, faktisk søkeuttrykk, valgt genomversjon,
+  returnert variant/transkript, kontrollgrunnlag og bildesti.
+- Verifiser mot variantkortets relevante felt, ikke et tilfeldig treff på
+  samme tekst et sted i hele siden. Gen+cDNA uten transkript er ikke i seg
+  selv bevis på eksakt transkriptidentitet.
+- Franklin-koden merker i dag genomiske koordinater som GRCh37 i parseren.
+  En senere kontrollendring må knytte dette til bekreftet hg19-modus, og
+  kontrollere motstridende identitetsfelt. Gjør dette som eget testet snitt,
+  uten samtidig omskriving av klikk-/opptakssekvensen.
+- For indeler: bruk eksisterende testet representasjonskonvertering der
+  gyldig. Ikke flytt koordinater, bytt strand eller oversett transkript på
+  gjetning. Tvetydig ekvivalens sendes til manuell kontroll.
+- Behold fungerende Franklin-buffer. Et faneklikk alene er ikke ferdig
+  lasting: aktiv fane og det faktiske klassifikasjonspanelet må stemme.
+  Ved bildefeil gjenopptas opptaket av bekreftet variant; ikke start ny
+  søkekjede. Ikke krev at to bildefiler alltid har ulike hasher som eneste test.
+- Alle påkrevde bilder må finnes og kunne leses før resultatet er komplett.
+  «Funnet, bilde mangler» er uferdig, ikke et ferdig positivt resultat.
+
+### Gjennomføring i små, kontrollerbare snitt
+
+1. Oppgave 1–3 nedenfor: beskytt rapporter, full logg og varig resultatlagring.
+2. Test søkehistorikk og felles statusregler uten å endre Franklin-opptak.
+   Bruk små kildespesifikke kandidatlister og felles forsøksregistrering;
+   ingen stor ny generell nettleserplattform.
+3. OncoKB: lesende live-test av HGVSg-ruten med offentlig eksempel og våre
+   avvikstyper. Deretter egen implementeringscommit dersom identiteten kan
+   bekreftes. Ellers behold manuell kontroll for denne reserveveien.
+4. ClinVar: nettsidebasert kandidatsøk og kortverifikasjon, deretter fjern
+   aktive E-utilities-kall. Test at applikasjonen ikke gjør direkte
+   database-API-kall; nettsidenes egen interne trafikk er ikke en ny integrasjon.
+5. COSMIC: kun ID-liste, duplikatfjerning og raskt hopp over manglende ID.
+   MTBP: test eksplisitt avvisning og én reserve uten doble rapporter.
+6. Mål på jobb-PC før endring av buffere eller antall nettleserbaner.
+
+Hvert snitt skal ha regresjonstester for første-søk-treff, reserve-treff,
+begge uten treff, feil allel, feil genomversjon, login/timeout, manglende bilde
+og avbrudd/gjenopptak. Legg til tre særlige negative tester: COSMIC uten ID
+skal aldri navigere; OncoKB-transkriptavvik skal aldri «rettes» ved å bytte
+aminosyre; MTBP-timeout skal ikke opprette en ny pasientrapport.
+
+En samlet statustabell må brukes av GUI, audit og resume: ferdig med bilder,
+ikke funnet etter fullført søk, ikke aktuelt, manuell kontroll og uferdig
+drifts-/opptaksfeil. Ukjent status skal ikke stilltiende regnes som ferdig.
+
+### Måling og godkjenning før utrulling
+
+Kjør samme godkjente datasett før/etter og noter median/p95 per kilde og
+variant (p95 først når antallet er meningsfullt), total pasienttid,
+reserve-søkenes ekstra treff og tidskostnad, antall navigasjoner og andel
+komplette bilder. Ingen påvist feilidentitet eller feil fane godtas i
+testsettet. Hastighetsgevinst alene er ikke et godkjenningskriterium.
+Bruk ett avgrenset kildesnitt om gangen; ved regresjon trekkes dette snittet
+tilbake uten å reversere de fungerende Franklin-opptakene. En eventuell
+tilbakerulling av ClinVar må ikke aktivere API-flyten igjen: deaktiver heller
+kilden midlertidig og merk den uferdig.
+
+## Opprinnelige arbeidsoppgaver, med oppdatert OncoKB-funn
 
 ### 1. Beskytt MTBP-rapporter under gjenopptak — høyest prioritet
 
@@ -112,8 +236,8 @@ ingen treff, treg side og verifiserte skjermbilder. Mål kostnaden i nettleserti
 Omfang: DOM-undersøkelse og eget snitt. Avhengigheter: oppgave 2 og 4s
 identitetskontroller der de er relevante.
 
-- [ ] Undersøk om nettsiden tilbyr søk med genomisk identitet som kan løse
-  transkriptavvik uten API. Ikke anta at nettsiden støtter det.
+- [ ] Live-verifiser den nå dokumenterte /hgvsg/-nettsideruten med GRCh37
+  mot våre transkriptavvik. Se research og testkrav ovenfor.
 - [ ] Hvis en dokumenterbar og identitetsverifisert nettlesersti finnes, ta
   skjermbilde av det riktige resultatet; aldri bytt referanseaminosyre på gjetning.
 - [ ] Ellers vis «Transkriptavvik – manuell kontroll» med konkret forklaring og
