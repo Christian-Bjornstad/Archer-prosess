@@ -205,6 +205,26 @@ def _merge_evidence_results(target: dict, incoming: dict) -> None:
         target[key] = list(by_database.values())
 
 
+def _evidence_completion_summary(
+    evidence: dict[str, list[DatabaseEvidence]],
+) -> str:
+    counts = {"found": 0, "not_found": 0, "manual_review": 0, "unfinished": 0}
+    for items in evidence.values():
+        for item in items:
+            status = item.status.strip().casefold()
+            if status == "found":
+                counts["found"] += 1
+            elif status == "not_found":
+                counts["not_found"] += 1
+            elif status in {"manual", "manual_review"}:
+                counts["manual_review"] += 1
+            elif not is_completed_evidence(item):
+                counts["unfinished"] += 1
+    return " | ".join(
+        ["RUN SUMMARY", *(f"{key}={value}" for key, value in counts.items())]
+    )
+
+
 def _completed_evidence_sources(
     evidence: dict[str, list[DatabaseEvidence]],
 ) -> set[tuple[str, str]]:
@@ -1995,6 +2015,7 @@ class MainWindow(QMainWindow):
         report_patient_ids = list(self._active_search_report_patient_ids)
         self._active_search_report_patient_ids = []
         _merge_evidence_results(self.evidence, evidence)
+        self._log(_evidence_completion_summary(self.evidence))
         self._refresh_operations_cockpit()
         workbook_saved = self._try_write_evidence_workbook(show_errors=False)
         if workbook_saved and self.result and self.result.output_path:
@@ -2346,6 +2367,7 @@ class MainWindow(QMainWindow):
 
     def _merge_browser_evidence(self, browser_evidence: dict) -> None:
         _merge_evidence_results(self.evidence, browser_evidence)
+        self._log(_evidence_completion_summary(self.evidence))
 
     def _browser_review_failed(self, message: str) -> None:
         worker = self.browser_worker

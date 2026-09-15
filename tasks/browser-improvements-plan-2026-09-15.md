@@ -194,7 +194,7 @@ Omfang: liten logging-modul, gui/app.py og tester. Avhengigheter: ingen.
 - [x] Gi hver kjøring en ID og logg appversjon, kjøremåte, kilde, pasientindeks,
   variantreferanse, resultat, feilstadium, forsøk og tid. Behold lesbar tekst;
   lag JSONL for analyse med standardbiblioteket. Ingen passord eller sesjonsdata.
-- [ ] Vis avslutning med faktisk funnet, ikke funnet, manuell kontroll og uferdig;
+- [x] Vis avslutning med faktisk funnet, ikke funnet, manuell kontroll og uferdig;
   en ferdig kø betyr ikke at alle resultater er klare.
 
 Kontroll: >500 hendelser, gjenstart, samtidige kilder og ikke-skrivbar loggmappe.
@@ -253,7 +253,7 @@ Omfang: separate små snitt i browser_review.py. Avhengigheter: oppgave 1–3.
   innhenting, deretter fordeling til variantene. Logg rapporter og varianter hver for seg.
 - [x] Hopp over COSMIC-nettleserstart og nettbuffer når hele omfanget mangler
   COSMIC-ID; ingen venting etter lokale hopp-over-resultater.
-- [ ] Undersøk trygg gjenbruk av identiske kildeoppslag i samme kjøring med
+- [x] Undersøk trygg gjenbruk av identiske kildeoppslag i samme kjøring med
   eksakt identitetsnøkkel, uavhengige evidensobjekter og stabile bildefiler.
   MTBP-pasientrapporter skal ikke gjenbrukes mellom pasienter.
 

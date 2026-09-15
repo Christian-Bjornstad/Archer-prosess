@@ -30,6 +30,14 @@ def test_not_found_is_distinct_from_successful_evidence():
     assert cell_state_for_evidence(evidence) is CellState.NOT_FOUND
 
 
+def test_manual_review_is_visible_without_automatic_retry():
+    evidence = DatabaseEvidence(
+        "OncoKB", "manual_review", "Canonical transcript differs"
+    )
+
+    assert cell_state_for_evidence(evidence) is CellState.MANUAL_REVIEW
+
+
 def test_activity_preserves_patient_provider_and_variant_context():
     item = RunActivity(
         occurred_at=datetime(2026, 8, 12, 20, 0),

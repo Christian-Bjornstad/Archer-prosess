@@ -17,6 +17,7 @@ from archer_processor.gui.app import (
     PatientReportWorker,
     _browser_database_lanes,
     _completed_evidence_sources,
+    _evidence_completion_summary,
     _pending_source_counts,
     _protected_remote_evidence_sources,
 )
@@ -677,6 +678,19 @@ def test_completed_search_reports_pending_workbook_save(qt_app):
 
     assert "still open in Excel" in window.run_progress.detail.text()
     assert window.status_badge.text() == "Search complete · save pending"
+
+
+def test_evidence_completion_summary_distinguishes_manual_and_unfinished():
+    evidence = {
+        "a": [DatabaseEvidence("ClinVar", "found")],
+        "b": [DatabaseEvidence("ClinVar", "not_found")],
+        "c": [DatabaseEvidence("OncoKB", "manual_review")],
+        "d": [DatabaseEvidence("MTBP", "timeout")],
+    }
+
+    assert _evidence_completion_summary(evidence) == (
+        "RUN SUMMARY | found=1 | not_found=1 | manual_review=1 | unfinished=1"
+    )
 
 
 def test_processed_workbook_can_resume_into_review_pages(qt_app, tmp_path, monkeypatch):

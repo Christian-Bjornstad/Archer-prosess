@@ -49,6 +49,10 @@ def test_retryable_evidence_is_not_treated_as_completed():
         assert not is_completed_evidence(DatabaseEvidence("Franklin", status))
     assert is_completed_evidence(DatabaseEvidence("Franklin", "found"))
     assert is_completed_evidence(DatabaseEvidence("Franklin", "not_found"))
+    assert is_completed_evidence(DatabaseEvidence("OncoKB", "manual_review"))
+    assert not is_completed_evidence(DatabaseEvidence("OncoKB", "unknown_status"))
+    assert not is_completed_evidence(DatabaseEvidence("OncoKB", ""))
+    assert not is_completed_evidence(DatabaseEvidence("OncoKB", "token_required"))
 
 
 def test_mtbp_cleanup_failure_remains_retryable_without_losing_found_result():

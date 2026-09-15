@@ -28,6 +28,21 @@ RETRYABLE_EVIDENCE_STATUSES = frozenset(
         "verification_required",
         "quota_exhausted",
         "session_lost",
+        "token_required",
+        "layout_changed",
+        "transient",
+    }
+)
+COMPLETED_EVIDENCE_STATUSES = frozenset(
+    {
+        "found",
+        "not_found",
+        "not_applicable",
+        "invalid_query",
+        "manual_review",
+        "manual",
+        "unsupported_query",
+        "skipped",
     }
 )
 SCREENSHOT_REQUIRED_DATABASES = frozenset(
@@ -117,7 +132,7 @@ def is_completed_evidence(evidence: DatabaseEvidence) -> bool:
         cleanup = evidence.raw.get("remote_report_cleanup")
         cleanup_status = cleanup.get("status") if isinstance(cleanup, dict) else ""
         return cleanup_status in {"deleted", "already_absent"}
-    return evidence.status.strip().casefold() not in RETRYABLE_EVIDENCE_STATUSES
+    return evidence.status.strip().casefold() in COMPLETED_EVIDENCE_STATUSES
 
 
 def migrate_loaded_evidence(

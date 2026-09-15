@@ -14,6 +14,7 @@ _STATE_COLORS = {
     CellState.REPORT_SAVED: ("#E9F6EF", "#18794E"),
     CellState.RUNNING: ("#E7F4F7", "#087EA4"),
     CellState.RETRY: ("#FFF5D6", "#714600"),
+    CellState.MANUAL_REVIEW: ("#FFF0E6", "#9A3412"),
     CellState.SAVE_PENDING: ("#FFF5D6", "#714600"),
     CellState.NOT_FOUND: ("#F1F5F7", "#516875"),
     CellState.STOPPED: ("#F8E8E8", "#B42318"),

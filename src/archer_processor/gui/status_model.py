@@ -42,6 +42,7 @@ class CellState(str, Enum):
     RUNNING = "running"
     COMPLETE = "complete"
     NOT_FOUND = "not_found"
+    MANUAL_REVIEW = "manual_review"
     RETRY = "retry"
     STOPPED = "stopped"
     SKIPPED = "skipped"
@@ -94,6 +95,7 @@ STATE_LABELS = {
     CellState.RUNNING: "Running",
     CellState.COMPLETE: "Complete",
     CellState.NOT_FOUND: "Not found",
+    CellState.MANUAL_REVIEW: "Manual review",
     CellState.RETRY: "Retry",
     CellState.STOPPED: "Stopped",
     CellState.SKIPPED: "Skipped",
@@ -107,12 +109,15 @@ STATE_PRIORITY = {
     CellState.RETRY: 5,
     CellState.QUEUED: 4,
     CellState.NOT_FOUND: 3,
+    CellState.MANUAL_REVIEW: 4,
     CellState.COMPLETE: 2,
     CellState.SKIPPED: 1,
 }
 
 
 def cell_state_for_evidence(evidence: DatabaseEvidence) -> CellState:
+    if evidence.status.strip().casefold() in {"manual_review", "manual"}:
+        return CellState.MANUAL_REVIEW
     if evidence.status.strip().casefold() == "not_found":
         return CellState.NOT_FOUND
     if is_completed_evidence(evidence):
