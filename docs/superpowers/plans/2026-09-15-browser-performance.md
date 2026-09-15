@@ -82,3 +82,16 @@ live wall time must be measured rather than inferred from summed log durations.
 - Franklin tests prove bounded passes, transcript/GRCh37 ordering, and query timing
   audit data.
 - Run the full test suite and `git diff --check` before commit.
+
+## First live result — 2026-09-15 12:25
+
+The next run completed four patients containing 1, 2, 3, and 5 variants in
+110–128 seconds each (mean 120.8 seconds, median 122.5 seconds). All 13 Franklin
+queries returned found with screenshots in 14.6–19.2 seconds (mean 16.9 seconds).
+MTBP remained the patient-level critical path at 101.7–124.3 seconds.
+
+Patient five then exposed a separate concurrency failure: a read-only request to
+the Edge `/json/list` loopback endpoint failed once with Windows socket error
+10048 and stopped the queue. Read-only DevTools GET calls now retry that exact
+transient error twice with 0.1/0.2-second backoff. Mutating calls such as
+`/json/new` are never replayed.

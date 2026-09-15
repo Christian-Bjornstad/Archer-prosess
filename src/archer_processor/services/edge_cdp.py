@@ -909,14 +909,41 @@ def _http_json(
     timeout: float = 3,
 ) -> Any:
     request = urllib.request.Request(url, method=method)
-    try:
-        # This helper only communicates with our local DevTools listener.
-        # Enterprise/Citrix proxy settings must not route it off the machine.
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
-        raise EdgeCdpError(f"Edge DevTools endpoint failed: {url}: {exc}") from exc
+    for attempt in range(3):
+        try:
+            # This helper only communicates with our local DevTools listener.
+            # Enterprise/Citrix proxy settings must not route it off the machine.
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+            retry_socket_collision = (
+                method == "GET"
+                and attempt < 2
+                and _is_windows_socket_address_collision(exc)
+            )
+            if retry_socket_collision:
+                time.sleep(0.1 * (attempt + 1))
+                continue
+            raise EdgeCdpError(
+                f"Edge DevTools endpoint failed: {url}: {exc}"
+            ) from exc
+    raise AssertionError("unreachable")
+
+
+def _is_windows_socket_address_collision(exc: BaseException) -> bool:
+    """Recognize transient WinError 10048 through urllib's nested reason."""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if getattr(current, "winerror", None) == 10048:
+            return True
+        if getattr(current, "errno", None) == 10048:
+            return True
+        reason = getattr(current, "reason", None)
+        current = reason if isinstance(reason, BaseException) else current.__cause__
+    return False
 
 
 def _css_expression(selector: str) -> str:

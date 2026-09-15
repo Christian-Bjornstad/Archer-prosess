@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from archer_processor.services.browser_review import BrowserReviewService
 from archer_processor.services.edge_cdp import (
     EdgeCdpError,
@@ -48,6 +50,69 @@ def test_local_devtools_http_ignores_enterprise_proxy(monkeypatch):
 
     monkeypatch.setattr(urllib.request, 'build_opener', build)
     assert _http_json('http://127.0.0.1:9222/json/version') == {'Browser': 'Edge'}
+
+
+def test_local_devtools_get_retries_transient_windows_socket_collision(monkeypatch):
+    from archer_processor.services.edge_cdp import _http_json
+    import urllib.error
+    import urllib.request
+
+    attempts = []
+    sleeps = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self):
+            return b'[{"id":"page-1"}]'
+
+    class Opener:
+        def open(self, request, timeout):
+            attempts.append(request.full_url)
+            if len(attempts) < 3:
+                raise urllib.error.URLError(
+                    OSError(10048, "local socket address temporarily unavailable")
+                )
+            return Response()
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda handler: Opener())
+    monkeypatch.setattr("archer_processor.services.edge_cdp.time.sleep", sleeps.append)
+
+    result = _http_json("http://127.0.0.1:11399/json/list")
+
+    assert result == [{"id": "page-1"}]
+    assert len(attempts) == 3
+    assert sleeps == [0.1, 0.2]
+
+
+def test_local_devtools_mutation_does_not_replay_socket_collision(monkeypatch):
+    from archer_processor.services.edge_cdp import _http_json
+    import urllib.error
+    import urllib.request
+
+    attempts = []
+    sleeps = []
+
+    class Opener:
+        def open(self, request, timeout):
+            attempts.append(request.full_url)
+            raise urllib.error.URLError(OSError(10048, "socket collision"))
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda handler: Opener())
+    monkeypatch.setattr("archer_processor.services.edge_cdp.time.sleep", sleeps.append)
+
+    with pytest.raises(EdgeCdpError, match="10048"):
+        _http_json(
+            "http://127.0.0.1:11399/json/new?about:blank",
+            method="PUT",
+        )
+
+    assert len(attempts) == 1
+    assert sleeps == []
 
 
 def test_devtools_websocket_uses_preconnected_loopback_socket(monkeypatch):
