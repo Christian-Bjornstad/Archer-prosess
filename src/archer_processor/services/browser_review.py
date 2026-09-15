@@ -3656,6 +3656,15 @@ def parse_oncokb_page(
     biological_effect = _after_heading(body_text, "Biological Effect")
     overview = _between(body_text, "Variant Overview", "Mutation Effect")
     page_identity = f"{variant.symbol} {_protein_change(variant.hgvsp)}".strip()
+    if "an error has occurred" in body_text.casefold():
+        return DatabaseEvidence(
+            "OncoKB",
+            "error",
+            f"OncoKB provider error while loading {page_identity}; retry is allowed.",
+            accession=page_identity,
+            url=url,
+            raw={"failure_kind": ProviderFailureKind.TRANSIENT.value},
+        )
     canonical_mismatch = re.search(
         r"[^\n]*The reference amino acid at position\s+\d+\s+is\s+[^\n]+?"
         r"on the OncoKB canonical transcript\.?",

@@ -912,6 +912,20 @@ def test_oncokb_parser_explains_canonical_transcript_mismatch():
     assert evidence.raw["failure_kind"] == ProviderFailureKind.IDENTITY_MISMATCH
 
 
+def test_oncokb_parser_keeps_explicit_provider_error_retryable():
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+
+    evidence = parse_oncokb_page(
+        "An error has occurred\nPlease try again later.",
+        variant,
+        "https://www.oncokb.org/gene/TP53/somatic/R175H",
+    )
+
+    assert evidence.status == "error"
+    assert "provider error" in evidence.summary.casefold()
+    assert evidence.raw["failure_kind"] == ProviderFailureKind.TRANSIENT
+
+
 def test_franklin_visible_page_parser_returns_only_classification():
     variant = ArcherTsvReader().read(FIXTURE)[3]
     body = """
