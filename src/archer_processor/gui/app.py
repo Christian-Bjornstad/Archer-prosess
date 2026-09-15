@@ -2584,6 +2584,12 @@ class MainWindow(QMainWindow):
     def _rewrite_workbook(self) -> None:
         if not self.result or not self.result.output_path:
             return
+        if self.workbook_write_thread is not None:
+            self._workbook_write_requested = True
+            self._log(
+                "Manual workbook update queued behind the active background write."
+            )
+            return
         if not self._try_write_evidence_workbook(show_errors=True):
             return
         if not self.run_progress.isHidden() and "complete" in self.run_progress.title.text().casefold():

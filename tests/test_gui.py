@@ -739,6 +739,36 @@ def test_background_workbook_queue_coalesces_while_writer_is_active(qt_app, tmp_
     assert window._workbook_write_requested is True
 
 
+def test_manual_workbook_rewrite_is_queued_behind_active_background_write(
+    qt_app, tmp_path, monkeypatch
+):
+    window = MainWindow()
+    window.result = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-15",
+        tmp_path / "review.xlsx",
+    )
+
+    class ActiveThread:
+        pass
+
+    window.workbook_write_thread = ActiveThread()
+    logs = []
+    monkeypatch.setattr(window, "_log", logs.append)
+    monkeypatch.setattr(
+        window,
+        "_try_write_evidence_workbook",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("manual rewrite must not overlap background write")
+        ),
+    )
+
+    window._rewrite_workbook()
+
+    assert window._workbook_write_requested is True
+    assert "queued" in logs[0].casefold()
+
+
 def test_completed_search_status_remains_visible(qt_app):
     window = MainWindow()
     window._update_run_progress(2, 2, "Completed patient")
