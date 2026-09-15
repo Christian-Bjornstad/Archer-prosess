@@ -6,7 +6,7 @@ import threading
 import time
 
 from PIL import Image
-from PyQt6.QtWidgets import QPushButton
+from PyQt6.QtWidgets import QAbstractItemView, QPushButton
 
 from archer_processor.core import DatabaseEvidence, VariantProcessor, default_artifact_rules
 from archer_processor.core.highlights import is_automatic_database_skip
@@ -55,6 +55,8 @@ def test_evidence_actions_fit_target_window_sizes(qt_app):
         qt_app.processEvents()
         viewport = window.database_scroll.viewport().rect()
         for button in [
+            window.priority_search_btn,
+            window.remaining_search_btn,
             window.rewrite_btn,
             window.patient_excel_btn,
         ]:
@@ -325,6 +327,131 @@ def test_selected_patient_ids_deduplicate_selected_rows(qt_app, tmp_path):
     window.status_matrix.selectRow(0)
 
     assert window._selected_patient_ids() == [first_patient]
+
+
+def test_priority_controls_require_an_explicit_patient_selection(qt_app, tmp_path):
+    window = MainWindow()
+    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+    window.result = VariantProcessor().process(
+        fixture, "2026-09-15", tmp_path / "review.xlsx"
+    )
+    window._refresh_operations_cockpit()
+
+    assert window._explicitly_selected_patient_ids() == []
+    assert not window.priority_search_btn.isEnabled()
+    assert window.priority_selection_status.text() == "0 pasienter valgt"
+    assert (
+        window.status_matrix.selectionMode()
+        == QAbstractItemView.SelectionMode.ExtendedSelection
+    )
+    assert window.remaining_search_btn.isEnabled()
+
+    first_patient = window.status_matrix.item(0, 0).text()
+    window.status_matrix.selectRow(0)
+    qt_app.processEvents()
+
+    assert window._explicitly_selected_patient_ids() == [first_patient]
+    assert window.priority_search_btn.isEnabled()
+    assert window.priority_selection_status.text() == "1 pasient valgt"
+
+
+def test_pending_search_scope_can_be_limited_to_selected_patients(qt_app, tmp_path):
+    window = MainWindow()
+    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+    window.result = VariantProcessor().process(
+        fixture, "2026-09-15", tmp_path / "review.xlsx"
+    )
+    window.included_only_check.setChecked(False)
+    target_patient = window.result.variants[3].patient_id
+
+    pending = window._pending_variants_for_search(
+        ["ClinVar"], patient_ids={target_patient}
+    )
+
+    assert pending
+    assert {variant.patient_id for variant in pending} == {target_patient}
+
+
+def test_priority_action_starts_only_selected_patient_scope(qt_app, tmp_path, monkeypatch):
+    window = MainWindow()
+    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+    window.result = VariantProcessor().process(
+        fixture, "2026-09-15", tmp_path / "review.xlsx"
+    )
+    window._refresh_operations_cockpit()
+    first_patient = window.status_matrix.item(0, 0).text()
+    window.status_matrix.selectRow(0)
+    qt_app.processEvents()
+    launches = []
+    monkeypatch.setattr(
+        window,
+        "_start_database_search",
+        lambda **kwargs: launches.append(kwargs),
+    )
+
+    window.priority_search_btn.click()
+
+    assert launches == [
+        {
+            "patient_ids": {first_patient},
+            "report_after_search": [first_patient],
+            "scope_label": "prioriterte pasienter",
+        }
+    ]
+
+
+def test_existing_all_patient_search_button_keeps_no_argument_signal(
+    qt_app, tmp_path, monkeypatch
+):
+    window = MainWindow()
+    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+    window.result = VariantProcessor().process(
+        fixture, "2026-09-15", tmp_path / "review.xlsx"
+    )
+    for check in window.db_checks.values():
+        check.setChecked(False)
+    warnings = []
+    monkeypatch.setattr(window, "_save_settings", lambda **kwargs: None)
+    monkeypatch.setattr(
+        "archer_processor.gui.app.QMessageBox.warning",
+        lambda *args: warnings.append(args),
+    )
+    window.search_btn.setEnabled(True)
+
+    window.search_btn.click()
+
+    assert warnings[0][1] == "No sources"
+
+
+def test_priority_completion_starts_reports_only_after_workbook_is_saved(
+    qt_app, monkeypatch
+):
+    window = MainWindow()
+    window._active_search_report_patient_ids = ["26OUM00001", "26OUM00002"]
+    events = []
+    monkeypatch.setattr(window, "_refresh_operations_cockpit", lambda: None)
+    monkeypatch.setattr(
+        window,
+        "_try_write_evidence_workbook",
+        lambda *, show_errors: events.append("saved") or True,
+    )
+    monkeypatch.setattr(window, "_set_ready", lambda: events.append("ready"))
+    monkeypatch.setattr(window, "_complete_run_progress", lambda title: None)
+    monkeypatch.setattr(window, "_log", lambda message: None)
+    monkeypatch.setattr(
+        window,
+        "_start_patient_reports",
+        lambda patient_ids: events.append(("reports", patient_ids)),
+        raising=False,
+    )
+
+    window._database_finished({})
+
+    assert events == [
+        "saved",
+        "ready",
+        ("reports", ["26OUM00001", "26OUM00002"]),
+    ]
 
 
 def test_report_summary_uses_exact_norwegian_categories(qt_app, tmp_path):

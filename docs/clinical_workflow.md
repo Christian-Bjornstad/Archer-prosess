@@ -44,7 +44,13 @@ Database evidence sources:
 - COSMIC is opened by the input `COSMICID` in a signed-in browser. The app captures Overview, Tissue distribution, and a Samples table filtered to `lymphoid`. The NLM Clinical Tables v4 endpoint remains only as a basic/public fallback and does not contain the full panels. Confirm that the organisation's COSMIC licence permits patient-care reporting before clinical deployment.
 - OncoKB is reviewed in the signed-in web interface; cookie overlays are rejected before capture.
 - Franklin uses the signed-in web interface with explicit hg19 and Somatic selection. It tries transcript HGVSc first, then the exact `chr-position REF>ALT` genomic form only when needed and verifies the returned variant identity.
-- Franklin captures Computed Classification (ACMG and Oncology cards), Predictions, and Population Frequencies. Dynamic panels are validated and receive a one-time five-second incident retry when incomplete.
+- Franklin captures Computed Classification (ACMG and Oncology cards),
+  Predictions, and Population Frequencies. The active classification panel must
+  have the expected semantic content, occupy the viewport, and remain stable
+  across repeated layout/text checks before capture. Only that active panel is
+  expanded, preventing the sliding ACMG/Oncology transition from producing a
+  mixed screenshot. Dynamic panels receive a one-time five-second incident
+  retry when incomplete.
 - MTBP submits one pseudonymous combined report per patient. Transcript-qualified
   HGVSc is tried first; only entries explicitly rejected by MTBP are replaced by
   GRCh37 genomic notation before the complete patient batch is resubmitted. The
@@ -71,9 +77,15 @@ Search and recovery behavior:
 - Recent-analysis recovery is local and passive: startup can offer the last
   workbook, but it never opens Edge or contacts a provider until the operator
   explicitly starts or resumes evidence collection.
-- Evidence searches never generate patient reports. Select one or more rows in
-  **Patient progress**, or leave the table unselected to include every patient,
-  then click **Generer VEDLEGG_APP**.
+- For urgent cases, select one or more rows in **Patient progress** and click
+  **Kjør valgte pasienter**. The app runs only unfinished source lookups for
+  those patients, saves the evidence workbook, and then generates reports for
+  exactly the selected group. After review, **Kjør resterende** reconstructs the
+  queue from saved evidence and includes only still-unfinished patient/source
+  combinations.
+- Standard evidence searches remain separate from manual report generation.
+  Select one or more rows, or leave the table unselected to include every
+  patient, then click **Generer VEDLEGG_APP**.
 - Reports are written beside the processed workbook in `VEDLEGG_APP` with the
   exact filename `<DIT>_VPM_Tolkning.xlsx`. Existing reports are atomically
   replaced through a temporary file, so a failed write leaves the prior report

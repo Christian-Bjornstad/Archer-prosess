@@ -1068,6 +1068,8 @@ class MainWindow(QMainWindow):
         self._search_pause_requested = False
         self._search_stop_requested = False
         self._search_started_at: float | None = None
+        self._operation_active = False
+        self._active_search_report_patient_ids: list[str] = []
         self.workbook_write_pending = False
         self._workbook_lock_warning_shown = False
         self.setWindowTitle("VPM Tolkning")
@@ -1458,8 +1460,37 @@ class MainWindow(QMainWindow):
 
         status_group = QGroupBox("Patient progress")
         status_layout = QVBoxLayout(status_group)
+        priority_layout = QHBoxLayout()
+        self.priority_selection_status = QLabel("0 pasienter valgt")
+        self.priority_selection_status.setObjectName("HelperText")
+        self.priority_selection_status.setWordWrap(True)
+        self.priority_search_btn = QPushButton("Kjør valgte pasienter")
+        self.priority_search_btn.setObjectName("PrimaryButton")
+        self.priority_search_btn.setMinimumHeight(44)
+        self.priority_search_btn.setEnabled(False)
+        self.priority_search_btn.setAccessibleName("Kjør valgte pasienter først")
+        self.priority_search_btn.setToolTip(
+            "Kjør uferdige databasesøk for markerte pasienter og lag rapportene deres."
+        )
+        self.priority_search_btn.clicked.connect(self._start_prioritized_search)
+        self.remaining_search_btn = QPushButton("Kjør resterende")
+        self.remaining_search_btn.setObjectName("OutlineButton")
+        self.remaining_search_btn.setMinimumHeight(44)
+        self.remaining_search_btn.setEnabled(False)
+        self.remaining_search_btn.setAccessibleName("Kjør resterende pasienter")
+        self.remaining_search_btn.setToolTip(
+            "Fortsett med bare pasienter som fortsatt har uferdige oppslag."
+        )
+        self.remaining_search_btn.clicked.connect(self._start_remaining_search)
+        priority_layout.addWidget(self.priority_selection_status, 1)
+        priority_layout.addWidget(self.priority_search_btn)
+        priority_layout.addWidget(self.remaining_search_btn)
+        status_layout.addLayout(priority_layout)
         self.status_matrix = StatusMatrix(self.databases)
         self.status_matrix.setMinimumHeight(210)
+        self.status_matrix.itemSelectionChanged.connect(
+            self._update_priority_controls
+        )
         status_layout.addWidget(self.status_matrix)
         layout.addWidget(status_group)
 
@@ -1860,7 +1891,31 @@ class MainWindow(QMainWindow):
         self._set_ready()
         QMessageBox.information(self, "Complete", f"Workbook saved:\n{result.output_path}")
 
-    def _start_database_search(self) -> None:
+    def _start_prioritized_search(self) -> None:
+        patient_ids = self._explicitly_selected_patient_ids()
+        if not patient_ids:
+            QMessageBox.warning(
+                self,
+                "Ingen pasienter valgt",
+                "Marker én eller flere pasientrader før prioritert kjøring.",
+            )
+            return
+        self._start_database_search(
+            patient_ids=set(patient_ids),
+            report_after_search=patient_ids,
+            scope_label="prioriterte pasienter",
+        )
+
+    def _start_remaining_search(self) -> None:
+        self._start_database_search(scope_label="resterende pasienter")
+
+    def _start_database_search(
+        self,
+        *,
+        patient_ids: set[str] | None = None,
+        report_after_search: list[str] | None = None,
+        scope_label: str = "alle pasienter",
+    ) -> None:
         if not self.result:
             return
         self._save_settings(silent=True)
@@ -1871,10 +1926,16 @@ class MainWindow(QMainWindow):
         browser_databases = self._selected_browser_databases()
         api_databases: list[str] = []
         completed_sources = _completed_evidence_sources(self.evidence)
-        eligible_variants = self._variants_for_search()
-        variants = self._pending_variants_for_search(databases)
+        eligible_variants = self._variants_for_search(patient_ids=patient_ids)
+        variants = self._pending_variants_for_search(
+            databases, patient_ids=patient_ids
+        )
         if not variants:
             self._show_search_already_complete(databases)
+            if report_after_search and self._try_write_evidence_workbook(
+                show_errors=False
+            ):
+                self._start_patient_reports(report_after_search)
             return
         total_units = len(eligible_variants) * len(databases)
         pending_units = sum(
@@ -1884,10 +1945,12 @@ class MainWindow(QMainWindow):
             for database in databases
         )
         self._search_started_at = time.monotonic()
+        self._active_search_report_patient_ids = list(report_after_search or [])
         self._set_busy("Searching")
         self.search_btn.setText("Run Evidence Search")
         self._log(
-            f"Resume-aware scope: {len(variants)}/{len(eligible_variants)} variant(s), "
+            f"Resume-aware scope for {scope_label}: "
+            f"{len(variants)}/{len(eligible_variants)} variant(s), "
             f"{pending_units}/{total_units} source lookup(s) pending"
         )
         worker = DatabaseWorker(
@@ -1925,15 +1988,25 @@ class MainWindow(QMainWindow):
         thread.start()
 
     def _database_finished(self, evidence: dict) -> None:
+        report_patient_ids = list(self._active_search_report_patient_ids)
+        self._active_search_report_patient_ids = []
         _merge_evidence_results(self.evidence, evidence)
         self._refresh_operations_cockpit()
-        self._auto_rewrite_workbook()
+        workbook_saved = self._try_write_evidence_workbook(show_errors=False)
+        if workbook_saved and self.result and self.result.output_path:
+            self._log(f"Evidence workbook updated: {self.result.output_path}")
         self._set_ready()
         self._complete_run_progress("Evidence search complete")
         self.search_btn.setText("Run Evidence Search")
         self._log(
             f"Patient-by-patient evidence search complete ({self._search_elapsed_text()})"
         )
+        if report_patient_ids and workbook_saved:
+            self._start_patient_reports(report_patient_ids)
+        elif report_patient_ids:
+            self._log(
+                "Prioriterte rapporter venter til evidensarbeidsboken kan lagres."
+            )
 
     def _database_patient_finished(self, patient_evidence: dict) -> None:
         _merge_evidence_results(self.evidence, patient_evidence)
@@ -2041,7 +2114,7 @@ class MainWindow(QMainWindow):
         output_stem = self.result.output_path.stem if self.result.output_path else "archer"
         return output_parent / f"{output_stem}_browser_evidence"
 
-    def _variants_for_search(self):
+    def _variants_for_search(self, *, patient_ids: set[str] | None = None):
         if not self.result:
             return []
         variants = (
@@ -2052,15 +2125,21 @@ class MainWindow(QMainWindow):
         return [
             variant
             for variant in variants
-            if BrowserReviewService.variant_key(variant) not in self.database_skip_keys
+            if (patient_ids is None or variant.patient_id in patient_ids)
+            and BrowserReviewService.variant_key(variant) not in self.database_skip_keys
             and not is_automatic_database_skip(variant)
         ]
 
-    def _pending_variants_for_search(self, databases: list[str]):
+    def _pending_variants_for_search(
+        self,
+        databases: list[str],
+        *,
+        patient_ids: set[str] | None = None,
+    ):
         completed_sources = _completed_evidence_sources(self.evidence)
         return [
             variant
-            for variant in self._variants_for_search()
+            for variant in self._variants_for_search(patient_ids=patient_ids)
             if any(
                 (BrowserReviewService.variant_key(variant), database)
                 not in completed_sources
@@ -2399,6 +2478,7 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Evidence search resumed")
 
     def _search_cancelled(self) -> None:
+        self._active_search_report_patient_ids = []
         self._refresh_operations_cockpit()
         self._auto_rewrite_workbook()
         self._set_ready()
@@ -2442,18 +2522,47 @@ class MainWindow(QMainWindow):
     def _selected_patient_ids(self) -> list[str]:
         if self.result is None:
             return []
-        selected_rows = {
-            index.row() for index in self.status_matrix.selectionModel().selectedIndexes()
-        }
-        if selected_rows:
-            return sorted(
-                {
-                    self.status_matrix.item(row, 0).text()
-                    for row in selected_rows
-                    if self.status_matrix.item(row, 0) is not None
-                }
-            )
+        selected = self._explicitly_selected_patient_ids()
+        if selected:
+            return selected
         return sorted({variant.patient_id for variant in self.result.variants})
+
+    def _explicitly_selected_patient_ids(self) -> list[str]:
+        if self.result is None:
+            return []
+        selected_rows = sorted(
+            {
+                index.row()
+                for index in self.status_matrix.selectionModel().selectedIndexes()
+            }
+        )
+        return list(
+            dict.fromkeys(
+                self.status_matrix.item(row, 0).text()
+                for row in selected_rows
+                if self.status_matrix.item(row, 0) is not None
+            )
+        )
+
+    def _update_priority_controls(self) -> None:
+        if not hasattr(self, "priority_search_btn"):
+            return
+        patient_count = len(self._explicitly_selected_patient_ids())
+        noun = "pasient" if patient_count == 1 else "pasienter"
+        self.priority_selection_status.setText(
+            f"{patient_count} {noun} valgt"
+        )
+        available = self.result is not None and not self._operation_active
+        self.priority_search_btn.setEnabled(available and patient_count > 0)
+        selected_sources = [
+            name for name, check in self.db_checks.items() if check.isChecked()
+        ]
+        has_remaining = bool(
+            available
+            and selected_sources
+            and self._pending_variants_for_search(selected_sources)
+        )
+        self.remaining_search_btn.setEnabled(has_remaining)
 
     @staticmethod
     def _report_outcome_summary(outcomes: list[PatientReportOutcome]) -> str:
@@ -2482,6 +2591,12 @@ class MainWindow(QMainWindow):
                 "Ingen pasienter er tilgjengelige for rapportgenerering.",
             )
             return
+        self._start_patient_reports(patient_ids)
+
+    def _start_patient_reports(self, patient_ids: list[str]) -> None:
+        if not self.result or not self.result.output_path or not patient_ids:
+            return
+        self._set_busy("Generating reports")
         coordinator = PatientReportCoordinator(
             self.result, self.result.variants, self.evidence
         )
@@ -2512,13 +2627,12 @@ class MainWindow(QMainWindow):
             self._patient_report_outcome(outcome)
             if outcome.status in {"locked", "failed"}:
                 self._log(f"{outcome.status}: {outcome.path} — {outcome.message}")
-        self.patient_excel_btn.setEnabled(self.result is not None)
+        self._set_ready()
         summary = self._report_outcome_summary(outcomes)
         self._log(summary)
         QMessageBox.information(self, "VEDLEGG_APP ferdig", summary)
 
     def _patient_report_failed(self, message: str) -> None:
-        self.patient_excel_btn.setEnabled(self.result is not None)
         self._worker_failed(message)
 
     def _write_evidence_workbook(self) -> None:
@@ -2578,6 +2692,8 @@ class MainWindow(QMainWindow):
 
     def _worker_failed(self, message: str) -> None:
         was_search = self._search_started_at is not None
+        if was_search:
+            self._active_search_report_patient_ids = []
         self._set_ready()
         if not self.run_progress.isHidden():
             self.run_progress.title.setText("Search stopped")
@@ -2651,6 +2767,7 @@ class MainWindow(QMainWindow):
                 report_outcomes=report_statuses,
             )
         )
+        self._update_priority_controls()
         self.retry_report_saves_button.setVisible(
             any(outcome.status == "locked" for outcome in self.report_outcomes.values())
         )
@@ -2775,6 +2892,7 @@ class MainWindow(QMainWindow):
         self.evidence_summary.setText(
             f"{source_text} · {variant_text} · {browser_mode}"
         )
+        self._update_priority_controls()
 
     def _update_run_progress(self, current: int, total: int, detail: str) -> None:
         self.activity_progress.hide()
@@ -2832,6 +2950,7 @@ class MainWindow(QMainWindow):
     def _set_busy(self, label: str) -> None:
         self.run_progress.hide()
         is_search = label in {"Searching", "Browser lookups"}
+        self._operation_active = True
         if not is_search:
             self._search_started_at = None
         self._search_pause_requested = False
@@ -2853,6 +2972,8 @@ class MainWindow(QMainWindow):
         self.activity_progress.show()
         self.process_btn.setEnabled(False)
         self.search_btn.setEnabled(False)
+        self.priority_search_btn.setEnabled(False)
+        self.remaining_search_btn.setEnabled(False)
         self.pause_search_btn.setText("Pause Search")
         self.pause_search_btn.setEnabled(is_search)
         self.stop_search_btn.setText("Stop Search")
@@ -2865,6 +2986,7 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(label)
 
     def _set_ready(self) -> None:
+        self._operation_active = False
         self.run_status_strip.set_snapshot(RunSnapshot())
         self.status_badge.setText("Ready")
         self.status_badge.setStyleSheet("")
@@ -2882,6 +3004,7 @@ class MainWindow(QMainWindow):
         self.rewrite_btn.setEnabled(self.result is not None)
         self.patient_excel_btn.setEnabled(self.result is not None)
         self.resume_btn.setEnabled(True)
+        self._update_priority_controls()
         self.status_bar.showMessage("Ready", 3000)
 
     def _update_process_state(self) -> None:

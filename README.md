@@ -59,10 +59,16 @@ flowchart LR
 1. Import an Archer variant TSV and create the review workbook.
 2. Review **With Artifacts** and mark `X` in **Skip Database Search (X)** where appropriate.
 3. Load the reviewed workbook back into the application.
-4. Select the evidence sources and run the patient-by-patient search.
-5. Verify the compact findings and captured source images.
-6. In **Patient progress**, select one or more patient rows, or leave the table unselected for all patients.
-7. Click **Generer VEDLEGG_APP**. Reports are written to `VEDLEGG_APP` beside the review workbook as `<DIT>_VPM_Tolkning_APP.xlsx`.
+4. Select the evidence sources. To handle urgent cases first, select one or more
+   rows in **Patient progress** and click **Kjør valgte pasienter**. Their
+   unfinished lookups run first and their reports are generated after the
+   evidence workbook has been saved.
+5. Verify and answer the prioritized reports, then click **Kjør resterende**.
+   Only patients with unfinished source lookups enter the second queue.
+6. For a manual report run, select one or more patient rows, or leave the table
+   unselected for all patients, and click **Generer VEDLEGG_APP**. Reports are
+   written to `VEDLEGG_APP` beside the review workbook as
+   `<DIT>_VPM_Tolkning_APP.xlsx`.
 
 Use **Pause Search** to pause at the next safe browser checkpoint and **Resume
 Search** to continue the same queue without repeating completed work. **Stop
@@ -97,7 +103,7 @@ the provider exposes that choice.
 | Source | Capture strategy | Key safeguards |
 | --- | --- | --- |
 | **MTBP** | One combined report per patient; full image in Vedlegg and local variant crops with section headings and A/B/C evidence | Gene + protein matching takes priority for crops, then cDNA when protein identity is unavailable. Unclear matches include all rows of that gene with a visible genkontekst warning; this does not upgrade the database match status. Only rejected input variants use GRCh37 genomic fallback. |
-| **Franklin** | Classification-only ACMG/Oncology overviews, each named evidence card, Predictions, and Population Frequencies | Explicit **hg19** + **Somatic** search; each classification subtab receives a render-settling buffer before capture; capture bounds include a fixed safety margin on both sides and space above the heading, clamped to the document; ACMG stops after De Novo Data; Somatic Clinical Evidence and Add More Evidence are excluded; blank, narrow, or truncated captures are rejected and retried on resume |
+| **Franklin** | Classification-only ACMG/Oncology overviews, each named evidence card, Predictions, and Population Frequencies | Explicit **hg19** + **Somatic** search; a classification panel must contain its expected heading and classification, occupy the active viewport, and remain geometrically and textually stable across repeated checks before capture; only the active ACMG or Oncology panel is expanded, preserving the classification scale/score area without mixing pixels from the preceding tab; ACMG stops after De Novo Data; Somatic Clinical Evidence and Add More Evidence are excluded; blank, narrow, truncated, or unstable captures are rejected and retried on resume |
 | **ClinVar** | Variant title and focused germline/somatic classification summary | Opens a candidate only after chromosome, VCF position, reference, alternate, and **GRCh37** assembly all match exactly; older unverified results are queued for verification |
 | **OncoKB** | Variant Overview and Mutation Effect | Rejects the cookie overlay before taking the screenshot |
 | **COSMIC** | Overview, Tissue distribution, and Samples filtered to `lymphoid` | Explicitly selects **GRCh37** in COSMIC's global Genome Version menu before searching, then verifies both the active menu marker and the resolved `genome=37` result URL before capture. Tries every distinct COSM/COSV identifier from the Archer `COSMICID` column in source order; multiple candidates or an identity mismatch fail closed |
