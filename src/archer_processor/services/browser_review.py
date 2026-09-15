@@ -723,7 +723,8 @@ class BrowserReviewService:
             ("✔" in option.get("text", "") or "✓" in option.get("text", ""))
             for option in options
         )
-        if not selected or not re.search(r"[?&]genome=37(?:&|$)", page.url):
+        genome = re.search(r"[?&]genome=([^&#]*)", page.url, re.IGNORECASE)
+        if not selected or (genome is not None and genome.group(1) != "37"):
             raise RuntimeError("COSMIC GRCh37 was not selected; result capture was stopped.")
 
     def _search_clinvar(

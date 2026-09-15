@@ -394,6 +394,42 @@ def test_cosmic_explicitly_selects_global_grch37_menu_option(tmp_path):
     service._verify_cosmic_grch37(page)
 
 
+def test_cosmic_accepts_selected_grch37_after_canonical_redirect(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path)
+
+    class Links:
+        def evaluate_all(self, script):
+            return [{"href": "?genome=37", "text": "GRCh37 ✔"}]
+
+    class Page:
+        url = (
+            "https://cancer.sanger.ac.uk/cosmic/mutation/overview"
+            "?cosm=COSM476&id=25001834&trans=BRAF"
+        )
+
+        def locator(self, selector):
+            return Links()
+
+    service._verify_cosmic_grch37(Page())
+
+
+def test_cosmic_rejects_explicit_grch38_even_when_grch37_menu_is_selected(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path)
+
+    class Links:
+        def evaluate_all(self, script):
+            return [{"href": "?genome=37", "text": "GRCh37 ✔"}]
+
+    class Page:
+        url = "https://cancer.sanger.ac.uk/cosmic/mutation/overview?genome=38"
+
+        def locator(self, selector):
+            return Links()
+
+    with pytest.raises(RuntimeError, match="GRCh37"):
+        service._verify_cosmic_grch37(Page())
+
+
 def test_cosmic_rejects_result_when_grch37_is_not_selected(tmp_path):
     service = BrowserReviewService(profile_root=tmp_path)
 
