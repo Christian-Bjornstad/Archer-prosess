@@ -1097,7 +1097,7 @@ def test_new_search_results_merge_with_restored_evidence(qt_app, tmp_path, monke
         tmp_path / "resume.xlsx",
     )
     window.evidence = {key: [DatabaseEvidence("ClinVar", "found", "Existing")]}
-    monkeypatch.setattr(window, "_auto_rewrite_workbook", lambda: None)
+    monkeypatch.setattr(window, "_queue_evidence_workbook_write", lambda: None)
 
     window._database_finished(
         {key: [DatabaseEvidence("OncoKB", "found", "New result")]}
