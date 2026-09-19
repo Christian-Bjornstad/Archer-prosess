@@ -120,9 +120,10 @@ lane while COSMIC, OncoKB and ClinVar remain serial in a third lane. Public/API
 sources have no added delay. A fresh randomized safety delay is used only for
 signed-in website variants (3-8 seconds by default); provider switches in the
 fast lane retain a fixed short buffer. Completed patient evidence is
-checkpointed into the workbook during long runs. MTBP allows five reports in the
-portal. After a report is validated and its evidence is persisted locally, the
-application deletes that exact `ARCHER-` report before submitting the next variant.
+checkpointed into the workbook during long runs. The app allows only one active
+app-generated MTBP report and removes it before the next patient. After report
+evidence and audit state are persisted locally, the application deletes that exact
+`ARCHER-` report before submitting the next variant.
 Before a new submission, any remaining app-generated `ARCHER-` reports are removed
 so they cannot exhaust the portal limit. Manually named reports are never deleted.
 

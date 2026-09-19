@@ -56,10 +56,13 @@ Database evidence sources:
   GRCh37 genomic notation before the complete patient batch is resubmitted. The
   full report is captured once for `Vedlegg`, while exact variant rows/cards are
   cropped locally for their variant sheets without additional portal searches.
-  No personal report link is recorded. After verified local evidence is saved,
-  the exact `ARCHER-` report is deleted from the portal. Before a new submission,
-  remaining app-generated `ARCHER-` reports are cleared so they cannot fill the
-  five-report limit; manually named reports are left untouched.
+  No personal report link is recorded. After local evidence and audit state are
+  saved, the exact `ARCHER-` report is deleted from the portal. Before a new
+  submission, every remaining app-generated `ARCHER-` report is removed and
+  verified absent before the next submission. The app permits only one active
+  `ARCHER-` report,
+  waits for MTBP to settle after deletion, and leaves manually named reports
+  untouched.
 - Evidence must be presented as support for human interpretation, not as automatic final classification.
 
 The processed workbook includes a **Database Selection** sheet containing every

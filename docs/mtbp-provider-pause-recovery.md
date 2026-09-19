@@ -16,17 +16,17 @@ queue and Reports List on resume.
 1. Open MTBP Reports List and search for the exact analysis ID shown in the log.
 2. If it exists, leave it in place and use **Resume Incomplete Search**. The app
    will capture or finish that report before submitting anything new.
-3. If the report list is at the five-report limit, close any open report page and
-   resume. The app may delete only a completed app-generated `ARCHER-...` report;
-   manual reports and unresolved IDs are protected.
+3. Close any open report page and resume. Before a new submission, the app removes
+   every app-generated `ARCHER-...` report and verifies the Reports List after a
+   server-settling delay. Manually named reports are always left untouched.
 4. If the ID is absent but the app still reports `submission_unknown`, retain the
    log and diagnostic artifacts for review. Do not create the same batch manually
    unless duplicate submission has been ruled out.
 
 ## Log fields
 
-- `MTBP PREFLIGHT`: report count, protected report count, available slots and
-  cleanup outcome before submission.
+- `MTBP PREFLIGHT`: total report count, app-generated report count, the single
+  available app-report slot and cleanup outcome before submission.
 - `MTBP SUBMISSION`: analysis ID, query count, button state and current URL.
 - `submission_unknown`: the click occurred, but acceptance could not be proven.
 - `PROVIDER PAUSED`: no more patients will be submitted to that source this run.

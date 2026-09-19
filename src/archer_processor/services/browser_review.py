@@ -43,7 +43,9 @@ from archer_processor.services.variant_identity import (
 
 BROWSER_DATABASES = ("COSMIC", "OncoKB", "Franklin", "ClinVar", "MTBP")
 MTBP_REPORTS_URL = "https://mtbp.org/patients/"
-MTBP_REPORT_LIMIT = 5
+MTBP_ARCHER_REPORT_LIMIT = 1
+MTBP_DELETE_SETTLE_MS = 5_000
+MTBP_DELETE_VERIFY_ATTEMPTS = 3
 
 LOGIN_URLS = {
     "ClinVar": "https://www.ncbi.nlm.nih.gov/clinvar/",
@@ -2268,11 +2270,6 @@ class BrowserReviewService:
                             "MTBP: locally captured report deleted from portal "
                             f"({analysis_id})"
                         )
-                    elif remote_cleanup["status"] == "retained_incomplete":
-                        progress(
-                            "MTBP: incomplete report retained for recovery "
-                            f"({analysis_id})"
-                        )
                     else:
                         progress(
                             "MTBP: remote report cleanup "
@@ -2415,7 +2412,7 @@ class BrowserReviewService:
         progress: Callable[[str], None] | None,
         protected_analysis_ids: set[str] | None = None,
     ) -> dict[str, Any]:
-        """Free one slot from app-generated reports or refuse safely."""
+        """Remove every stale app-generated report before a new submission."""
         self._goto_with_retries(page, MTBP_REPORTS_URL)
         remaining = page.locator("button.delete-patient").count()
         generated = page.locator(
@@ -2430,10 +2427,6 @@ class BrowserReviewService:
         ]
         protected = protected_analysis_ids or set()
         for analysis_id in generated_ids:
-            if remaining < MTBP_REPORT_LIMIT:
-                break
-            if analysis_id in protected:
-                continue
             outcome = self._delete_mtbp_report(page, analysis_id)
             if outcome.get("status") not in {"deleted", "already_absent"}:
                 failed.append(analysis_id)
@@ -2444,11 +2437,11 @@ class BrowserReviewService:
                 progress(f"MTBP: removed old app report {analysis_id}")
         remaining = page.locator("button.delete-patient").count()
         generated_count = generated.count()
-        if remaining >= MTBP_REPORT_LIMIT:
+        if generated_count >= MTBP_ARCHER_REPORT_LIMIT:
             raise RuntimeError(
-                f"MTBP has {remaining} reports and allows only {MTBP_REPORT_LIMIT}. "
-                "No app-generated ARCHER report could be removed; delete an older "
-                "report manually in the MTBP Reports List."
+                f"MTBP still lists {generated_count} app-generated ARCHER report(s). "
+                "The app allows only one active ARCHER report and requires zero "
+                "before a new submission. Manual reports were left untouched."
             )
         outcome = {
             "status": "deleted_stale" if deleted else "retained",
@@ -2464,9 +2457,13 @@ class BrowserReviewService:
                 "MTBP PREFLIGHT | "
                 f"reports={remaining} | archer_reports={generated_count} | "
                 f"protected_reports={len(protected)} | "
-                f"available_slots={max(0, MTBP_REPORT_LIMIT - remaining)} | "
+                "available_archer_slots="
+                f"{max(0, MTBP_ARCHER_REPORT_LIMIT - generated_count)} | "
                 f"cleanup={outcome['status']}"
             )
+        outcome["available_archer_slots"] = max(
+            0, MTBP_ARCHER_REPORT_LIMIT - generated_count
+        )
         return outcome
 
     def _finalize_mtbp_report(
@@ -2478,21 +2475,7 @@ class BrowserReviewService:
         """Persist local evidence before removing one exact completed report."""
         for audit_path, evidence in audit_records:
             self._write_audit(evidence, audit_path)
-        fully_captured = bool(audit_records) and all(
-            evidence.status == "not_found"
-            or (evidence.status == "found" and evidence.raw.get("screenshots"))
-            for _, evidence in audit_records
-        )
-        if fully_captured:
-            outcome = self._delete_mtbp_report(page, analysis_id)
-        else:
-            outcome = {
-                "status": "retained_incomplete",
-                "message": (
-                    "MTBP report retained because local evidence capture is "
-                    "incomplete."
-                ),
-            }
+        outcome = self._delete_mtbp_report(page, analysis_id)
         for audit_path, evidence in audit_records:
             evidence.raw["remote_report_cleanup"] = outcome
             self._write_audit(evidence, audit_path)
@@ -2543,21 +2526,25 @@ class BrowserReviewService:
 
             page.once("dialog", accept_confirmation)
             delete_button.click()
-            try:
-                report_link.wait_for(
-                    state="detached",
-                    timeout=self.navigation_timeout_ms,
-                )
-            except Exception:
-                self._goto_with_retries(page, MTBP_REPORTS_URL)
-            if page.get_by_role("link", name=analysis_id, exact=True).count() == 0:
-                return {
-                    "status": "deleted",
-                    "message": "The generated MTBP report was removed after local capture.",
-                }
+            for _ in range(MTBP_DELETE_VERIFY_ATTEMPTS):
+                page.wait_for_timeout(MTBP_DELETE_SETTLE_MS)
+                self._goto_with_retries(page, MTBP_REPORTS_URL, attempts=2)
+                if page.get_by_role(
+                    "link", name=analysis_id, exact=True
+                ).count() == 0:
+                    return {
+                        "status": "deleted",
+                        "message": (
+                            "The generated MTBP report was removed and its absence "
+                            "was verified after server settling time."
+                        ),
+                    }
             return {
                 "status": "failed",
-                "message": "MTBP still listed the generated report after deletion.",
+                "message": (
+                    "MTBP still listed the generated report after three delayed "
+                    "verification checks."
+                ),
             }
         except Exception as exc:
             return {

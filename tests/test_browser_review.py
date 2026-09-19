@@ -3594,6 +3594,7 @@ class _FakeMtbpReportsPage:
         self.url = "https://mtbp.org/analyse/"
         self.dialog_handler = None
         self.dialogs = []
+        self.waits = []
 
     def goto(self, url, **kwargs):
         self.url = url
@@ -3614,6 +3615,9 @@ class _FakeMtbpReportsPage:
         assert event == "dialog"
         self.dialog_handler = handler
 
+    def wait_for_timeout(self, milliseconds):
+        self.waits.append(milliseconds)
+
 
 def test_mtbp_deletes_exact_generated_report_after_confirming(tmp_path):
     service = BrowserReviewService(profile_root=tmp_path)
@@ -3627,6 +3631,7 @@ def test_mtbp_deletes_exact_generated_report_after_confirming(tmp_path):
     assert page.reports == ["manual-report"]
     assert len(page.dialogs) == 1
     assert page.dialogs[0].accepted
+    assert sum(page.waits) >= 3_000
 
 
 def test_mtbp_delete_is_idempotent_when_exact_report_is_already_absent(tmp_path):
@@ -3654,7 +3659,10 @@ def test_mtbp_delete_reopens_report_list_from_detail_page(tmp_path):
 
     outcome = service._delete_mtbp_report(page, analysis_id)
 
-    assert visited == ["https://mtbp.org/patients/"]
+    assert visited == [
+        "https://mtbp.org/patients/",
+        "https://mtbp.org/patients/",
+    ]
     assert outcome["status"] == "deleted"
     assert page.reports == ["manual-report"]
 
@@ -3718,7 +3726,7 @@ def test_mtbp_resume_retries_failed_cleanup_without_resubmitting(
     assert page.reports == ["manual-report"]
 
 
-def test_mtbp_finalization_retains_incomplete_report_for_recovery(
+def test_mtbp_finalization_deletes_incomplete_report_after_saving_audit(
     tmp_path, monkeypatch
 ):
     service = BrowserReviewService(profile_root=tmp_path)
@@ -3731,17 +3739,20 @@ def test_mtbp_finalization_retains_incomplete_report_for_recovery(
     audit_path = tmp_path / "mtbp" / "incomplete.audit.json"
     audit_path.parent.mkdir()
 
+    deleted = []
     monkeypatch.setattr(
         service,
         "_delete_mtbp_report",
-        lambda *args: pytest.fail("incomplete MTBP reports must not be deleted"),
+        lambda page, analysis_id: deleted.append(analysis_id)
+        or {"status": "deleted", "message": "deleted"},
     )
 
     outcome = service._finalize_mtbp_report(
         object(), "ARCHER-incomplete", [(audit_path, evidence)]
     )
 
-    assert outcome["status"] == "retained_incomplete"
+    assert outcome["status"] == "deleted"
+    assert deleted == ["ARCHER-incomplete"]
     assert audit_path.exists()
     assert evidence.raw["remote_report_cleanup"] == outcome
 
@@ -3782,7 +3793,7 @@ def test_mtbp_finalization_deletes_complete_report_with_legitimate_not_found(
     assert all(item.raw["remote_report_cleanup"]["status"] == "deleted" for _, item in records)
 
 
-def test_mtbp_preflight_removes_only_one_safe_report_at_capacity(tmp_path):
+def test_mtbp_preflight_removes_every_archer_report_before_submission(tmp_path):
     service = BrowserReviewService(profile_root=tmp_path)
     reports = [
         "manual-1",
@@ -3795,23 +3806,30 @@ def test_mtbp_preflight_removes_only_one_safe_report_at_capacity(tmp_path):
 
     outcome = service._cleanup_stale_mtbp_reports(page, progress=None)
 
-    assert page.reports == ["manual-1", "ARCHER-old-2", "manual-2", "ARCHER-old-3"]
+    assert page.reports == ["manual-1", "manual-2"]
     assert outcome["status"] == "deleted_stale"
-    assert outcome["deleted_stale_reports"] == ["ARCHER-old-1"]
-    assert outcome["remaining_reports"] == 4
+    assert outcome["deleted_stale_reports"] == [
+        "ARCHER-old-1",
+        "ARCHER-old-2",
+        "ARCHER-old-3",
+    ]
+    assert outcome["remaining_reports"] == 2
+    assert outcome["remaining_archer_reports"] == 0
 
 
-def test_mtbp_preflight_keeps_archer_reports_below_capacity(tmp_path):
+def test_mtbp_preflight_enforces_one_archer_report_limit_even_below_account_capacity(
+    tmp_path,
+):
     service = BrowserReviewService(profile_root=tmp_path)
     reports = ["manual-1", "ARCHER-pending", "manual-2", "manual-3"]
     page = _FakeMtbpReportsPage(reports)
 
     outcome = service._cleanup_stale_mtbp_reports(page, progress=None)
 
-    assert page.reports == reports
-    assert outcome["status"] == "retained"
-    assert outcome["remaining_reports"] == 4
-    assert outcome["remaining_archer_reports"] == 1
+    assert page.reports == ["manual-1", "manual-2", "manual-3"]
+    assert outcome["status"] == "deleted_stale"
+    assert outcome["remaining_reports"] == 3
+    assert outcome["remaining_archer_reports"] == 0
 
 
 def test_mtbp_preflight_logs_capacity_and_protected_report_counts(tmp_path):
@@ -3827,14 +3845,15 @@ def test_mtbp_preflight_logs_capacity_and_protected_report_counts(tmp_path):
         protected_analysis_ids={"ARCHER-incomplete"},
     )
 
-    assert outcome["remaining_reports"] == 3
+    assert outcome["remaining_reports"] == 2
     assert messages == [
-        "MTBP PREFLIGHT | reports=3 | archer_reports=1 | protected_reports=1 | "
-        "available_slots=2 | cleanup=retained"
+        "MTBP: removed old app report ARCHER-incomplete",
+        "MTBP PREFLIGHT | reports=2 | archer_reports=0 | protected_reports=1 | "
+        "available_archer_slots=1 | cleanup=deleted_stale"
     ]
 
 
-def test_mtbp_preflight_never_deletes_protected_incomplete_report(tmp_path):
+def test_mtbp_preflight_removes_protected_archer_report_before_new_submission(tmp_path):
     service = BrowserReviewService(profile_root=tmp_path)
     page = _FakeMtbpReportsPage(
         ["manual-1", "ARCHER-incomplete", "manual-2", "ARCHER-safe", "manual-3"]
@@ -3846,14 +3865,17 @@ def test_mtbp_preflight_never_deletes_protected_incomplete_report(tmp_path):
         protected_analysis_ids={"ARCHER-incomplete"},
     )
 
-    assert "ARCHER-incomplete" in page.reports
+    assert "ARCHER-incomplete" not in page.reports
     assert "ARCHER-safe" not in page.reports
-    assert outcome["deleted_stale_reports"] == ["ARCHER-safe"]
+    assert outcome["deleted_stale_reports"] == ["ARCHER-incomplete", "ARCHER-safe"]
 
 
-def test_mtbp_preflight_refuses_to_delete_five_manual_reports(tmp_path):
+def test_mtbp_preflight_never_treats_manual_reports_as_archer_capacity(tmp_path):
     service = BrowserReviewService(profile_root=tmp_path)
     page = _FakeMtbpReportsPage([f"manual-{index}" for index in range(5)])
 
-    with pytest.raises(RuntimeError, match="delete an older report manually"):
-        service._cleanup_stale_mtbp_reports(page, progress=None)
+    outcome = service._cleanup_stale_mtbp_reports(page, progress=None)
+
+    assert page.reports == [f"manual-{index}" for index in range(5)]
+    assert outcome["remaining_archer_reports"] == 0
+    assert outcome["available_archer_slots"] == 1
