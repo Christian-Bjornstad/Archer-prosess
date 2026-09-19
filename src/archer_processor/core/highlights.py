@@ -48,6 +48,14 @@ def is_report_artifact(variant: VariantRecord) -> bool:
     return _is_artifact(variant) and variant.decision == "excluded"
 
 
+def is_report_omitted(variant: VariantRecord) -> bool:
+    """Return whether a variant belongs only in the traceability Data sheet."""
+    return is_report_artifact(variant) or variant_highlight(variant) in {
+        "germline",
+        "germline_low_af",
+    }
+
+
 def _variant_sum(variant: VariantRecord, *columns: str) -> float:
     """Sum priority counts supplied directly by the Archer TSV."""
     return sum(_number(variant.raw.get(column)) for column in columns)

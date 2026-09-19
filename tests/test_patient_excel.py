@@ -44,31 +44,45 @@ def test_patient_comment_and_long_hsmd_survive_regeneration(tmp_path):
     workbook.close()
 
 
-def test_patient_overview_uses_light_blue_and_white_banding(tmp_path):
+def test_patient_report_omits_germline_from_interpretation_sheets_but_keeps_data(
+    tmp_path,
+):
     result = VariantProcessor().process(
         FIXTURE, "2026-08-11", tmp_path / "review.xlsx"
     )
     base = result.variants[3]
     strong = replace(base, raw={"Germ": 11}, af=0.35)
-    weak = replace(
+    somatic = replace(
         base,
         source_row=base.source_row + 100,
         hgvsc="NM_015338.5:c.1935dup",
-        raw={"Germ": 11},
-        af=0.3499,
+        symbol="ASXL1",
+        raw={**base.raw, "HGVSc": "NM_015338.5:c.1935dup", "Germ": 0},
+        af=0.12,
     )
+    result.variants = [strong, somatic]
     output = tmp_path / "patient.xlsx"
 
     PatientExcelReportWriter().write_patient(
-        result, base.patient_id, [strong, weak], output, {}
+        result, base.patient_id, [strong, somatic], output, {}
     )
 
     workbook = openpyxl.load_workbook(output)
     try:
         overview = workbook["Oversikt"]
-        # Light blue / white banding replaces the old green template.
-        assert overview["A11"].fill.fgColor.rgb == "00EAF3FA"
-        assert overview["A12"].fill.fgColor.rgb == "00FFFFFF"
+        assert overview["A11"].value == "ASXL1"
+        assert overview["A12"].value is None
+        assert not any(strong.symbol in name for name in workbook.sheetnames[3:])
+        assert any("ASXL1" in name for name in workbook.sheetnames[3:])
+        data = workbook["Data"]
+        data_headers = [cell.value for cell in data[1]]
+        hgvsc_column = data_headers.index("HGVSc") + 1
+        data_hgvsc = [
+            data.cell(row, hgvsc_column).value
+            for row in range(2, data.max_row + 1)
+        ]
+        assert strong.hgvsc in data_hgvsc
+        assert somatic.hgvsc in data_hgvsc
     finally:
         workbook.close()
 
@@ -315,7 +329,7 @@ def test_patient_data_sheet_includes_artifacts_without_skip_column(tmp_path):
         assert data.max_row == 3
         assert data.sheet_properties.tabColor.rgb == "004F8A5B"
         assert data.column_dimensions["D"].hidden
-        assert data.column_dimensions["E"].hidden
+        assert not data.column_dimensions["E"].hidden
         hgvsc_column = headers.index("HGVSc") + 1
         symbol_column = headers.index("Symbol") + 1
         af_column = headers.index("AF") + 1
@@ -360,6 +374,7 @@ def test_patient_overview_places_source_gnomad_af_after_database_columns(tmp_pat
         assert overview["K11"].value == "0.00001"
         assert overview.auto_filter.ref == "A10:K11"
         assert overview.print_area == "'Oversikt'!$A$1:$K$16"
+        assert overview.freeze_panes == "A3"
     finally:
         workbook.close()
 

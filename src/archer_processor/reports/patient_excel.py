@@ -16,7 +16,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from PIL import Image as PillowImage
 
-from archer_processor.core.highlights import is_report_artifact, variant_highlight
+from archer_processor.core.highlights import is_report_omitted, variant_highlight
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
 from archer_processor.core.sorting import variant_sort_key
 from archer_processor.reports.excel_report import ExcelReportWriter
@@ -152,7 +152,7 @@ class PatientExcelReportWriter:
         # per-variant sheets).  Callers that hand us the full result list
         # still get them preserved below via result.variants.
         variants = [
-            variant for variant in variants if not is_report_artifact(variant)
+            variant for variant in variants if not is_report_omitted(variant)
         ]
         workbook = Workbook()
         placeholder = workbook.active
@@ -305,7 +305,7 @@ class PatientExcelReportWriter:
         # Artifacts stay in the hidden Data sheet for traceability, but never
         # appear in the interpretation overview the patient report shows.
         variants = [
-            variant for variant in variants if not is_report_artifact(variant)
+            variant for variant in variants if not is_report_omitted(variant)
         ]
 
         ws = workbook.create_sheet("Oversikt")
@@ -416,7 +416,7 @@ class PatientExcelReportWriter:
             ws.column_dimensions[column].width = 22
         ws.column_dimensions["K"].width = 16
         ws.auto_filter.ref = f"A10:K{max(10, 10 + len(variants))}"
-        ws.freeze_panes = "A10"
+        ws.freeze_panes = "A3"
         ws.print_area = f"A1:K{max(16, 11 + len(variants))}"
 
     def _attachment_sheet(
@@ -519,7 +519,7 @@ class PatientExcelReportWriter:
         ws.sheet_properties.tabColor = self.colors["green"]
         ws.sheet_view.showGridLines = False
         ws.column_dimensions["D"].hidden = True
-        ws.column_dimensions["E"].hidden = True
+        ws.column_dimensions["E"].hidden = False
 
         headers = [cell.value for cell in ws[1]]
         symbol_column = headers.index("Symbol") + 1
