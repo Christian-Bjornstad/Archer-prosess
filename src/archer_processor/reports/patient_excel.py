@@ -147,10 +147,10 @@ class PatientExcelReportWriter:
         variants = sorted(variants, key=variant_sort_key)
         manual_fields = read_manual_fields(output_path, patient_id)
         patient_comment = read_patient_comment(output_path)
-        # Artifacts remain in the hidden Data sheet for traceability but are
-        # kept out of every interpretation sheet (Oversikt, Vedlegg, the
-        # per-variant sheets).  Callers that hand us the full result list
-        # still get them preserved below via result.variants.
+        # Artifacts and germline-marked variants remain in Data for
+        # traceability but stay out of Oversikt, Vedlegg and variant sheets.
+        # Callers that hand us the full result list still get them preserved
+        # below via result.variants.
         variants = [
             variant for variant in variants if not is_report_omitted(variant)
         ]
@@ -302,8 +302,8 @@ class PatientExcelReportWriter:
         manual_fields: dict[str, ManualVariantFields],
         patient_comment: str = "",
     ) -> None:
-        # Artifacts stay in the hidden Data sheet for traceability, but never
-        # appear in the interpretation overview the patient report shows.
+        # Artifacts and germline-marked variants stay in Data for traceability,
+        # but never appear in the interpretation overview.
         variants = [
             variant for variant in variants if not is_report_omitted(variant)
         ]

@@ -2472,7 +2472,7 @@ class BrowserReviewService:
         analysis_id: str,
         audit_records: list[tuple[Path, DatabaseEvidence]],
     ) -> dict[str, str]:
-        """Persist local evidence before removing one exact completed report."""
+        """Persist local audit state before removing one exact ARCHER report."""
         for audit_path, evidence in audit_records:
             self._write_audit(evidence, audit_path)
         outcome = self._delete_mtbp_report(page, analysis_id)
