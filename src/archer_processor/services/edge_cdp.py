@@ -726,6 +726,18 @@ class EdgeCdpLocator:
             )
         )
 
+    def is_enabled(self) -> bool:
+        """Return whether the single matched control can accept interaction."""
+        return bool(
+            self.page._evaluate_value(
+                "(() => { const nodes = "
+                + self.expression
+                + "; if (nodes.length !== 1) return false; const el = nodes[0]; "
+                "return !el.matches(':disabled') "
+                "&& !el.closest('[aria-disabled=\"true\"]'); })()"
+            )
+        )
+
     def click(self) -> None:
         clicked = self.page._evaluate_value(
             "(() => { const nodes = "

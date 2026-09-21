@@ -303,3 +303,21 @@ def test_locator_can_scroll_visible_element_before_screenshot():
 
     assert "scrollIntoView" in page.expression
     assert "Element is hidden" in page.expression
+
+
+def test_locator_reports_whether_form_control_is_enabled():
+    class Page:
+        def __init__(self):
+            self.expression = ""
+
+        def _evaluate_value(self, expression):
+            self.expression = expression
+            return False
+
+    page = Page()
+
+    enabled = EdgeCdpLocator(page, "[document.querySelector('#run-analysis')]").is_enabled()
+
+    assert enabled is False
+    assert ":disabled" in page.expression
+    assert "aria-disabled" in page.expression
