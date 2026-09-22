@@ -1012,7 +1012,9 @@ class BrowserReviewService:
                     "a[href*='/clinvar/variation/']"
                 ).evaluate_all(
                     "nodes => nodes.map(node => ({"
-                    "text: node.innerText.trim(), href: node.href}))"
+                    "text: (node.closest('tr, article, li, .rprt')?.innerText || "
+                    "node.parentElement?.innerText || node.innerText).trim(), "
+                    "href: node.href}))"
                 )
                 candidates = _matching_clinvar_links(links, variant)
                 if len(candidates) > 1:
@@ -4049,7 +4051,6 @@ def _matching_clinvar_links(
         return []
     cdna = _cdna_change(variant.hgvsc).casefold()
     symbol = (variant.symbol or "").casefold()
-    transcript = (variant.hgvsc or "").split(":", 1)[0].strip().casefold()
     candidates: list[str] = []
     for item in links:
         if not isinstance(item, dict):
@@ -4062,7 +4063,6 @@ def _matching_clinvar_links(
             and cdna in text
             and symbol
             and symbol in text
-            and (not transcript or transcript in text)
         ):
             candidates.append(href)
     return list(dict.fromkeys(candidates))
