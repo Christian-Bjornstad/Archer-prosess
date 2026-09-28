@@ -27,6 +27,8 @@ def read_patient_comment(path: Path) -> str:
             return ""
         sheet = workbook["Oversikt"]
         comment_ranges = {str(area) for area in sheet.merged_cells.ranges}
+        if "D3:K4" in comment_ranges:
+            return str(sheet["D3"].value or "")
         if not {"E4:J7", "E4:K7"} & comment_ranges:
             return ""
         return str(sheet["E4"].value or "")
@@ -44,9 +46,15 @@ def read_manual_fields(
         if "Oversikt" not in workbook.sheetnames:
             return {}
         sheet = workbook["Oversikt"]
+        header_row = next(
+            (row for row in (7, 10) if sheet.cell(row, 1).value == "Gen"),
+            None,
+        )
+        if header_row is None:
+            return {}
         headers = {
             str(cell.value).strip(): cell.column
-            for cell in sheet[10]
+            for cell in sheet[header_row]
             if cell.value not in {None, ""}
         }
         required = {"Gen", "HGVSc", "HGVSp", "Kort evidens"}
@@ -54,7 +62,7 @@ def read_manual_fields(
             return {}
         comment_column = headers.get("Kommentar")
         preserved: dict[str, ManualVariantFields] = {}
-        for row in range(11, sheet.max_row + 1):
+        for row in range(header_row + 1, sheet.max_row + 1):
             gene = str(sheet.cell(row, headers["Gen"]).value or "").strip()
             hgvsc = str(sheet.cell(row, headers["HGVSc"]).value or "").strip()
             hgvsp = str(sheet.cell(row, headers["HGVSp"]).value or "").strip()

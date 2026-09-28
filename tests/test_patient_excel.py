@@ -20,6 +20,35 @@ def test_cosmic_not_applicable_is_norwegian():
     ]) == "Ikke funnet"
 
 
+def test_overview_cosmic_id_uses_archer_id_and_keeps_link(tmp_path):
+    result = VariantProcessor().process(FIXTURE, "2026-09-28", tmp_path / "review.xlsx")
+    base = result.variants[3]
+    with_id = replace(base, cosmic_id="COSM12345")
+    output = tmp_path / "patient.xlsx"
+    PatientExcelReportWriter().write_patient(result, base.patient_id, [with_id], output, {})
+    workbook = openpyxl.load_workbook(output)
+    try:
+        overview = workbook["Oversikt"]
+        assert overview["A3"].value == "DIT/pasientnummer"
+        assert overview["A4"].value == "Sekvenseringsdato"
+        assert overview["C4"].value == "2026-09-28"
+        assert overview["J8"].value == "ID"
+        assert "COSM12345" in overview["J8"].hyperlink.target
+        assert "D3:K4" in {str(area) for area in overview.merged_cells.ranges}
+        assert overview.freeze_panes == "A8"
+    finally:
+        workbook.close()
+
+    without_id = replace(base, cosmic_id="")
+    PatientExcelReportWriter().write_patient(result, base.patient_id, [without_id], output, {})
+    workbook = openpyxl.load_workbook(output)
+    try:
+        assert workbook["Oversikt"]["J8"].value == "Ikke ID i Archer"
+        assert workbook["Oversikt"]["J8"].hyperlink is None
+    finally:
+        workbook.close()
+
+
 def test_patient_comment_and_long_hsmd_survive_regeneration(tmp_path):
     result = VariantProcessor().process(FIXTURE, "2026-09-05", tmp_path / "review.xlsx")
     variant = result.variants[3]
@@ -28,19 +57,19 @@ def test_patient_comment_and_long_hsmd_survive_regeneration(tmp_path):
     writer.write_patient(result, variant.patient_id, [variant], output, {})
     workbook = openpyxl.load_workbook(output)
     sheet = workbook["Oversikt"]
-    assert "E4:K7" in {str(area) for area in sheet.merged_cells.ranges}
-    assert sheet["E3"].value is None
-    assert sheet["E4"].fill.fgColor.rgb == "00FFF3E8"
-    sheet["E4"] = "Manuell vurdering\nBevares ved ny generering"
-    sheet["D11"] = sheet["D11"].value.replace("HSMD -", "HSMD - " + "manuelt funn " * 20)
+    assert "D3:K4" in {str(area) for area in sheet.merged_cells.ranges}
+    assert sheet["E5"].value is None
+    assert sheet["D3"].fill.fgColor.rgb == "00FFF3E8"
+    sheet["D3"] = "Manuell vurdering\nBevares ved ny generering"
+    sheet["D8"] = sheet["D8"].value.replace("HSMD -", "HSMD - " + "manuelt funn " * 20)
     workbook.save(output)
     workbook.close()
     writer.write_patient(result, variant.patient_id, [variant], output, {})
     workbook = openpyxl.load_workbook(output)
     sheet = workbook["Oversikt"]
-    assert sheet["E4"].value == "Manuell vurdering\nBevares ved ny generering"
-    assert "manuelt funn" in sheet["D11"].value
-    assert sheet.row_dimensions[11].height > 160
+    assert sheet["D3"].value == "Manuell vurdering\nBevares ved ny generering"
+    assert "manuelt funn" in sheet["D8"].value
+    assert sheet.row_dimensions[8].height > 160
     workbook.close()
 
 
@@ -70,19 +99,10 @@ def test_patient_report_omits_germline_from_interpretation_sheets_but_keeps_data
     workbook = openpyxl.load_workbook(output)
     try:
         overview = workbook["Oversikt"]
-        assert overview["A11"].value == "ASXL1"
-        assert overview["A12"].value is None
-        assert not any(strong.symbol in name for name in workbook.sheetnames[3:])
-        assert any("ASXL1" in name for name in workbook.sheetnames[3:])
-        data = workbook["Data"]
-        data_headers = [cell.value for cell in data[1]]
-        hgvsc_column = data_headers.index("HGVSc") + 1
-        data_hgvsc = [
-            data.cell(row, hgvsc_column).value
-            for row in range(2, data.max_row + 1)
-        ]
-        assert strong.hgvsc in data_hgvsc
-        assert somatic.hgvsc in data_hgvsc
+        assert overview["A8"].value == "ASXL1"
+        assert overview["A9"].value is None
+        assert not any(strong.symbol in name for name in workbook.sheetnames[2:])
+        assert any("ASXL1" in name for name in workbook.sheetnames[2:])
     finally:
         workbook.close()
 
@@ -111,23 +131,14 @@ def test_patient_report_excludes_artifacts_but_keeps_them_in_data(tmp_path):
     try:
         overview = workbook["Oversikt"]
         overview_hgvsc = [
-            overview.cell(row, 2).value for row in range(11, overview.max_row + 1)
+            overview.cell(row, 2).value for row in range(8, overview.max_row + 1)
         ]
         assert included.hgvsc in overview_hgvsc
         assert artifact.hgvsc not in overview_hgvsc
 
-        data = workbook["Data"]
-        headers = [cell.value for cell in data[1]]
-        hgvsc_column = headers.index("HGVSc") + 1
-        data_hgvsc = [
-            data.cell(row, hgvsc_column).value for row in range(2, data.max_row + 1)
-        ]
-        assert artifact.hgvsc in data_hgvsc
-
         report_text = " ".join(
             str(cell.value or "")
             for sheet in workbook.worksheets
-            if sheet.title != "Data"
             for row in sheet.iter_rows()
             for cell in row
         )
@@ -153,7 +164,7 @@ def test_patient_overview_sorts_variants_by_descending_af_with_missing_last(tmp_
     workbook = openpyxl.load_workbook(output)
     try:
         overview = workbook["Oversikt"]
-        assert [overview.cell(row, 2).value for row in range(11, 14)] == [
+        assert [overview.cell(row, 2).value for row in range(8, 11)] == [
             high.hgvsc,
             low.hgvsc,
             missing.hgvsc,
@@ -186,9 +197,9 @@ def test_patient_overview_row_height_follows_short_evidence_line_count(tmp_path)
     workbook = openpyxl.load_workbook(output)
     try:
         overview = workbook["Oversikt"]
-        expected_lines = str(overview["D11"].value).count("\n") + 1
+        expected_lines = str(overview["D8"].value).count("\n") + 1
         assert expected_lines == 6
-        assert overview.row_dimensions[11].height >= expected_lines * 16 + 12
+        assert overview.row_dimensions[8].height >= expected_lines * 16 + 12
     finally:
         workbook.close()
 
@@ -209,7 +220,7 @@ def test_patient_overview_preserves_manual_comment_and_hsmd_after_af_reordering(
     workbook = openpyxl.load_workbook(output)
     try:
         overview = workbook["Oversikt"]
-        headers = [overview.cell(10, column).value for column in range(1, 11)]
+        headers = [overview.cell(7, column).value for column in range(1, 11)]
         assert headers == [
             "Gen",
             "HGVSc",
@@ -224,7 +235,7 @@ def test_patient_overview_preserves_manual_comment_and_hsmd_after_af_reordering(
         ]
         second_row = next(
             row
-            for row in range(11, overview.max_row + 1)
+            for row in range(8, overview.max_row + 1)
             if overview.cell(row, 2).value == second.hgvsc
         )
         overview.cell(second_row, 4, "MTBP - gammelt\nHSMD - intern klassifikasjon")
@@ -242,10 +253,10 @@ def test_patient_overview_preserves_manual_comment_and_hsmd_after_af_reordering(
         overview = regenerated["Oversikt"]
         second_row = next(
             row
-            for row in range(11, overview.max_row + 1)
+            for row in range(8, overview.max_row + 1)
             if overview.cell(row, 2).value == second.hgvsc
         )
-        assert second_row == 11
+        assert second_row == 8
         assert overview.cell(second_row, 5).value == "Vurdert manuelt"
         assert "HSMD - intern klassifikasjon" in overview.cell(second_row, 4).value
         assert "MTBP - gammelt" not in overview.cell(second_row, 4).value
@@ -285,72 +296,22 @@ def test_patient_attachment_contains_combined_mtbp_report_only_once(tmp_path):
 
     workbook = openpyxl.load_workbook(output)
     try:
-        attachment = workbook["Vedlegg"]
+        attachment = workbook["MTBP"]
         assert len(attachment._images) == 1
         assert attachment["A6"].value == "MTBP – samlet pasientrapport"
     finally:
         workbook.close()
 
 
-def test_patient_data_sheet_includes_artifacts_without_skip_column(tmp_path):
-    result = VariantProcessor().process(
-        FIXTURE, "2026-08-11", tmp_path / "review.xlsx"
-    )
-    base = result.variants[3]
-    strong = replace(base, raw={**base.raw, "Germ": 11}, af=0.35)
-    artifact_raw = {
-        **base.raw,
-        "HGVSc": "NM_000546.6:c.525dup",
-        "Tier I": 0,
-        "Tier II": 0,
-    }
-    artifact = replace(
-        base,
-        source_row=base.source_row + 100,
-        hgvsc="NM_000546.6:c.525dup",
-        raw=artifact_raw,
-        matched_rules=["known-artifact"],
-    )
-    result.variants = [strong, artifact]
+def test_patient_report_has_no_data_sheet(tmp_path):
+    result = VariantProcessor().process(FIXTURE, "2026-08-11", tmp_path / "review.xlsx")
+    variant = result.variants[3]
     output = tmp_path / "patient.xlsx"
-
-    PatientExcelReportWriter().write_patient(
-        result, base.patient_id, [strong], output, {}
-    )
-
+    PatientExcelReportWriter().write_patient(result, variant.patient_id, [variant], output, {})
     workbook = openpyxl.load_workbook(output)
     try:
-        data = workbook["Data"]
-        headers = [cell.value for cell in data[1]]
-        assert headers[0] == "Sample"
-        assert "Skip Database Search (X)" not in headers
-        assert not any(str(header).endswith(" Evidence") for header in headers)
-        assert headers[-2:] == ["WHO drivergen", "Rundato"]
-        assert data.max_row == 3
-        assert data.sheet_properties.tabColor.rgb == "004F8A5B"
-        assert data.column_dimensions["D"].hidden
-        assert not data.column_dimensions["E"].hidden
-        hgvsc_column = headers.index("HGVSc") + 1
-        symbol_column = headers.index("Symbol") + 1
-        af_column = headers.index("AF") + 1
-        who_column = headers.index("WHO drivergen") + 1
-        run_date_column = headers.index("Rundato") + 1
-        assert data.cell(2, symbol_column).font.bold
-        assert data.cell(2, af_column).font.bold
-        assert data.cell(2, af_column).number_format == "0%"
-        assert data.cell(2, who_column).value == "X"
-        assert data.cell(2, run_date_column).value == "2026_08_11"
-        colors_by_hgvsc = {
-            data.cell(row, hgvsc_column).value: data.cell(row, 1).fill.fgColor.rgb
-            for row in range(2, data.max_row + 1)
-        }
-        assert colors_by_hgvsc[strong.hgvsc] == "00C6EFCE"
-        assert colors_by_hgvsc[artifact.hgvsc] == "00FFC000"
-        report_column = headers.index("Report") + 1
-        assert data.column_dimensions[
-            openpyxl.utils.get_column_letter(report_column)
-        ].hidden
-        assert data.cell(data.max_row, hgvsc_column).value == artifact.hgvsc
+        assert "Data" not in workbook.sheetnames
+        assert workbook.sheetnames[:2] == ["Oversikt", "MTBP"]
     finally:
         workbook.close()
 
@@ -369,12 +330,12 @@ def test_patient_overview_places_source_gnomad_af_after_database_columns(tmp_pat
     workbook = openpyxl.load_workbook(output)
     try:
         overview = workbook["Oversikt"]
-        headers = [overview.cell(10, column).value for column in range(1, 12)]
+        headers = [overview.cell(7, column).value for column in range(1, 12)]
         assert headers[-2:] == ["COSMIC", "gnomAD AF"]
-        assert overview["K11"].value == "0.00001"
-        assert overview.auto_filter.ref == "A10:K11"
-        assert overview.print_area == "'Oversikt'!$A$1:$K$16"
-        assert overview.freeze_panes == "A3"
+        assert overview["K8"].value == "0.00001"
+        assert overview.auto_filter.ref == "A7:K8"
+        assert overview.print_area == "'Oversikt'!$A$1:$K$13"
+        assert overview.freeze_panes == "A8"
     finally:
         workbook.close()
 
@@ -421,7 +382,7 @@ def test_attachment_uses_gridlines_four_light_rows_and_trimmed_mtbp_report(tmp_p
 
     workbook = openpyxl.load_workbook(output)
     try:
-        attachment = workbook["Vedlegg"]
+        attachment = workbook["MTBP"]
         assert attachment.sheet_view.showGridLines
         assert all(
             attachment.cell(row, 1).fill.fgColor.rgb == "00EAF3FA"
@@ -592,20 +553,20 @@ def test_patient_excel_report_uses_requested_sheet_layout_and_image_order(tmp_pa
     )
 
     workbook = openpyxl.load_workbook(output)
-    assert workbook.sheetnames == ["Oversikt", "Vedlegg", "Data", "TP53"]
+    assert workbook.sheetnames == ["Oversikt", "MTBP", "TP53"]
     overview = workbook["Oversikt"]
     assert overview["A1"].value == "VPM-tolkning – 26OUM00004"
-    assert overview["A3"].value is None
-    assert [overview.cell(10, column).value for column in range(1, 11)] == [
+    assert overview["A5"].value is None
+    assert [overview.cell(7, column).value for column in range(1, 11)] == [
         "Gen", "HGVSc", "HGVSp", "Kort evidens",
         "Kommentar", "MTBP", "Franklin", "ClinVar", "OncoKB", "COSMIC",
     ]
-    assert "ClinVar - Pathogenic" in overview["D11"].value
-    assert "HSMD -" in overview["D11"].value
-    assert overview["H11"].value == "Pathogenic"
-    assert overview["H11"].hyperlink.target.endswith("/12345/")
-    assert overview["F11"].hyperlink is None
-    assert workbook["Vedlegg"]["A1"].value == "26OUM00004"
+    assert "ClinVar - Pathogenic" in overview["D8"].value
+    assert "HSMD -" in overview["D8"].value
+    assert overview["H8"].value == "Pathogenic"
+    assert overview["H8"].hyperlink.target.endswith("/12345/")
+    assert overview["F8"].hyperlink is None
+    assert workbook["MTBP"]["A1"].value == "26OUM00004"
     variant_sheet = workbook["TP53"]
     assert variant_sheet["A6"].hyperlink is None
     assert variant_sheet["A7"].hyperlink is not None
@@ -643,8 +604,7 @@ def test_patient_excel_uses_variant_detail_only_for_duplicate_gene(tmp_path):
     workbook = openpyxl.load_workbook(output)
     assert workbook.sheetnames == [
         "Oversikt",
-        "Vedlegg",
-        "Data",
+        "MTBP",
         "TP53 p.R175H",
         "TP53 c.743G>A",
     ]

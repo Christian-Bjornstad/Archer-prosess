@@ -6,9 +6,9 @@ import os
 import re
 import textwrap
 from collections import Counter, defaultdict
-from copy import copy
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from openpyxl import Workbook
 from openpyxl.drawing.image import Image as ExcelImage
@@ -19,7 +19,7 @@ from PIL import Image as PillowImage
 from archer_processor.core.highlights import is_report_omitted, variant_highlight
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
 from archer_processor.core.sorting import variant_sort_key
-from archer_processor.reports.excel_report import ExcelReportWriter
+from archer_processor.reports.who_genes import WHO_DRIVER_GENES
 from archer_processor.reports.manual_fields import (
     ManualVariantFields,
     read_manual_fields,
@@ -83,17 +83,6 @@ COSMIC_FIELD_DESCRIPTIONS = {
     "COSMIC_PHENOTYPE_ID": "COSMIC phenotype identifier for the tumour context.",
 }
 COSMIC_PUBLIC_API_URL = "https://clinicaltables.nlm.nih.gov/apidoc/cosmic/v4/doc.html"
-WHO_DRIVER_GENES = frozenset(
-    {
-        "ASXL1", "BCOR", "BCORL1", "BRAF", "BRCC3", "CALR", "CBL", "CEBPA",
-        "CREBBP", "CSF1R", "CSF3R", "CTCF", "CUX1", "DNMT3A", "ETV6", "EZH2",
-        "GATA2", "GNAS", "GNB1", "IDH1", "IDH2", "JAK2", "JAK3", "KDM6A",
-        "KIT", "KMT2A", "KRAS", "MPL", "MYD88", "NOTCH1", "NRAS", "PHF6",
-        "PIGA", "PPM1D", "PRPF40B", "PTEN", "PTPN11", "RAD21", "RUNX1",
-        "SETBP1", "SF1", "SF3A1", "SF3B1", "SMC1A", "SMC3", "SRSF2", "STAG2",
-        "STAT3", "TET2", "TP53", "U2AF1", "U2AF2", "WT1", "ZRSR2",
-    }
-)
 
 
 class PatientExcelReportWriter:
@@ -147,10 +136,7 @@ class PatientExcelReportWriter:
         variants = sorted(variants, key=variant_sort_key)
         manual_fields = read_manual_fields(output_path, patient_id)
         patient_comment = read_patient_comment(output_path)
-        # Artifacts and germline-marked variants remain in Data for
-        # traceability but stay out of Oversikt, Vedlegg and variant sheets.
-        # Callers that hand us the full result list still get them preserved
-        # below via result.variants.
+        # Artifacts and germline-marked variants stay out of patient reports.
         variants = [
             variant for variant in variants if not is_report_omitted(variant)
         ]
@@ -167,13 +153,8 @@ class PatientExcelReportWriter:
         )
         workbook.remove(placeholder)
         self._attachment_sheet(workbook, patient_id, variants, evidence)
-        patient_data = [
-            variant for variant in result.variants
-            if variant.patient_id == patient_id
-        ]
-        self._data_sheet(workbook, patient_data, evidence, result.run_date)
         gene_counts = Counter((variant.symbol or "Variant").casefold() for variant in variants)
-        used_names = {"Oversikt", "Vedlegg", "Data"}
+        used_names = {"Oversikt", "MTBP"}
         for index, variant in enumerate(variants, start=1):
             title = self._variant_sheet_name(
                 variant,
@@ -302,8 +283,7 @@ class PatientExcelReportWriter:
         manual_fields: dict[str, ManualVariantFields],
         patient_comment: str = "",
     ) -> None:
-        # Artifacts and germline-marked variants stay in Data for traceability,
-        # but never appear in the interpretation overview.
+        # Artifacts and germline-marked variants never appear in the overview.
         variants = [
             variant for variant in variants if not is_report_omitted(variant)
         ]
@@ -314,21 +294,20 @@ class PatientExcelReportWriter:
         ws.merge_cells("A1:K2")
         ws["A1"] = f"VPM-tolkning – {patient_id}"
         self._title_style(ws["A1"])
-        self._info_row(ws, 5, "DIT/pasientnummer", patient_id, end_column=4)
-        self._info_row(ws, 6, "Rapportdato", result.run_date, end_column=4)
-        self._info_row(ws, 7, "Antall varianter", len(variants), end_column=4)
-        ws.merge_cells("E4:K7")
-        ws["E4"] = patient_comment
-        ws["E4"].alignment = Alignment(vertical="top", wrap_text=True)
-        for row in ws.iter_rows(min_row=4, max_row=7, min_col=5, max_col=11):
+        self._info_row(ws, 3, "DIT/pasientnummer", patient_id, end_column=3)
+        self._info_row(ws, 4, "Sekvenseringsdato", result.run_date, end_column=3)
+        ws.merge_cells("D3:K4")
+        ws["D3"] = patient_comment
+        ws["D3"].alignment = Alignment(vertical="top", wrap_text=True)
+        for row in ws.iter_rows(min_row=3, max_row=4, min_col=4, max_col=11):
             for cell in row:
                 cell.fill = PatternFill("solid", fgColor=self.colors["pale_orange"])
-        for row in range(4, 8):
+        for row in range(3, 5):
             ws.row_dimensions[row].height = 24
 
-        ws.merge_cells("A9:K9")
-        ws["A9"] = "Varianter og signifikant evidens"
-        self._section_style(ws["A9"])
+        ws.merge_cells("A6:K6")
+        ws["A6"] = "Varianter og signifikant evidens"
+        self._section_style(ws["A6"])
         headers = [
             "Gen",
             "HGVSc",
@@ -339,9 +318,9 @@ class PatientExcelReportWriter:
             "gnomAD AF",
         ]
         for column, header in enumerate(headers, start=1):
-            cell = ws.cell(10, column, header)
+            cell = ws.cell(7, column, header)
             self._header_style(cell)
-        for row, variant in enumerate(variants, start=11):
+        for row, variant in enumerate(variants, start=8):
             by_database = self._by_database(evidence.get(self._key(variant), []))
             manual = manual_fields.get(
                 variant_manual_key(patient_id, variant), ManualVariantFields()
@@ -361,7 +340,9 @@ class PatientExcelReportWriter:
                 ),
                 manual.comment,
                 *[
-                    self._compact_evidence(by_database.get(database, []))
+                    self._cosmic_id_label(variant)
+                    if database == "COSMIC"
+                    else self._compact_evidence(by_database.get(database, []))
                     for database in REPORT_DATABASES
                 ],
                 variant.raw.get("gnomAD AF", ""),
@@ -372,8 +353,16 @@ class PatientExcelReportWriter:
                 cell.alignment = Alignment(vertical="top", wrap_text=True)
             for offset, database in enumerate(REPORT_DATABASES, start=6):
                 items = by_database.get(database, [])
-                if items and items[0].url and database != "MTBP":
-                    ws.cell(row, offset).hyperlink = items[0].url
+                if database == "COSMIC" and self._cosmic_id_label(variant) != "ID":
+                    continue
+                url = items[0].url if items else ""
+                if database == "COSMIC" and not url:
+                    url = (
+                        "https://cancer.sanger.ac.uk/cosmic/search?q="
+                        + quote(variant.cosmic_id.strip(), safe="")
+                    )
+                if url and database != "MTBP":
+                    ws.cell(row, offset).hyperlink = url
                     ws.cell(row, offset).style = "Hyperlink"
                     ws.cell(row, offset).alignment = Alignment(
                         vertical="top", wrap_text=True
@@ -390,7 +379,7 @@ class PatientExcelReportWriter:
             if not fill_color:
                 fill_color = (
                     self.colors["white"]
-                    if (row - 11) % 2
+                    if (row - 8) % 2
                     else self.colors["pale_blue"]
                 )
             if fill_color:
@@ -415,9 +404,17 @@ class PatientExcelReportWriter:
         for column in "FGHIJ":
             ws.column_dimensions[column].width = 22
         ws.column_dimensions["K"].width = 16
-        ws.auto_filter.ref = f"A10:K{max(10, 10 + len(variants))}"
-        ws.freeze_panes = "A3"
-        ws.print_area = f"A1:K{max(16, 11 + len(variants))}"
+        ws.auto_filter.ref = f"A7:K{max(7, 7 + len(variants))}"
+        ws.freeze_panes = "A8"
+        ws.print_area = f"A1:K{max(13, 8 + len(variants))}"
+
+    @staticmethod
+    def _cosmic_id_label(variant: VariantRecord) -> str:
+        return (
+            "ID"
+            if re.search(r"\b(?:COSM|COSV)\d+\b", variant.cosmic_id or "", re.I)
+            else "Ikke ID i Archer"
+        )
 
     def _attachment_sheet(
         self,
@@ -426,7 +423,7 @@ class PatientExcelReportWriter:
         variants: list[VariantRecord],
         evidence: dict[str, list[DatabaseEvidence]],
     ) -> None:
-        ws = workbook.create_sheet("Vedlegg")
+        ws = workbook.create_sheet("MTBP")
         self._base_sheet(ws)
         ws.sheet_view.showGridLines = True
         ws.sheet_properties.tabColor = self.colors["muted"]
@@ -488,62 +485,6 @@ class PatientExcelReportWriter:
             return output
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return report_path
-
-    def _data_sheet(
-        self,
-        workbook: Workbook,
-        variants: list[VariantRecord],
-        evidence: dict[str, list[DatabaseEvidence]],
-        run_date: str,
-    ) -> None:
-        raw_writer = ExcelReportWriter()
-        ordered_variants = sorted(
-            variants,
-            key=lambda variant: (
-                1
-                if variant_highlight(variant) in {"artifact", "artifact_light"}
-                else 0,
-                variant_sort_key(variant),
-            ),
-        )
-        raw_writer._raw_variant_sheet(
-            workbook,
-            "Data",
-            ordered_variants,
-            evidence,
-            include_selection=False,
-            include_database_evidence=False,
-            preserve_variant_order=True,
-        )
-        ws = workbook["Data"]
-        ws.sheet_properties.tabColor = self.colors["green"]
-        ws.sheet_view.showGridLines = False
-        ws.column_dimensions["D"].hidden = True
-        ws.column_dimensions["E"].hidden = False
-
-        headers = [cell.value for cell in ws[1]]
-        symbol_column = headers.index("Symbol") + 1
-        who_column = len(headers) + 1
-        run_date_column = who_column + 1
-        raw_writer._headers(ws, [*headers, "WHO drivergen", "Rundato"])
-        formatted_run_date = str(run_date or "").replace("-", "_")
-        for row_index, variant in enumerate(ordered_variants, start=2):
-            who_cell = ws.cell(
-                row_index,
-                who_column,
-                "X" if variant.symbol.upper() in WHO_DRIVER_GENES else "",
-            )
-            run_date_cell = ws.cell(row_index, run_date_column, formatted_run_date)
-            for cell in (who_cell, run_date_cell):
-                cell.border = raw_writer._border()
-                cell.alignment = Alignment(vertical="center")
-                cell.fill = copy(ws.cell(row_index, 1).fill)
-            ws.cell(row_index, symbol_column).font = Font(bold=True)
-        ws.column_dimensions[get_column_letter(who_column)].width = 17
-        ws.column_dimensions[get_column_letter(run_date_column)].width = 14
-        ws.auto_filter.ref = (
-            f"A1:{get_column_letter(run_date_column)}{max(1, len(ordered_variants) + 1)}"
-        )
 
     def _variant_sheet(
         self,

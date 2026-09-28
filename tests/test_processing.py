@@ -15,7 +15,7 @@ from archer_processor.core.models import DatabaseEvidence
 from archer_processor.core.highlights import is_automatic_database_skip
 from archer_processor.io import ArcherTsvReader
 from archer_processor.reports import ExcelReportWriter
-from archer_processor.services import DatabaseSearchService, load_database_skip_keys
+from archer_processor.services import DatabaseSearchService, ProcessedWorkbookLoader, load_database_skip_keys
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
@@ -171,7 +171,7 @@ def test_excel_export_preserves_raw_columns_and_adds_database_columns(tmp_path):
     ExcelReportWriter().write(result, output, evidence=evidence)
 
     workbook = openpyxl.load_workbook(output)
-    assert workbook.sheetnames == ["With Artifacts", "Artifacts Removed"]
+    assert workbook.sheetnames == ["With Artifacts", "Artifacts Removed", "_Evidence"]
     ws = workbook["With Artifacts"]
     headers = [cell.value for cell in ws[1]]
     raw_headers = list(result.variants[0].raw)
@@ -183,16 +183,11 @@ def test_excel_export_preserves_raw_columns_and_adds_database_columns(tmp_path):
 
     assert headers[0] == "Skip Database Search (X)"
     assert headers[1 : len(raw_headers) + 1] == raw_headers
-    assert headers[len(raw_headers) + 1 :] == [
-        f"{database} Evidence"
-        for database in [
-            "ClinVar",
-            "MTBP",
-            "Franklin",
-            "OncoKB",
-            "COSMIC",
-        ]
-    ]
+    assert headers[len(raw_headers) + 1 :] == ["WHO drivergen", "Run_dato"]
+    assert not any(header.endswith(" Evidence") for header in headers)
+    assert row[headers.index("WHO drivergen")] == "X"
+    assert row[headers.index("Run_dato")] == "2026_07_26"
+    assert workbook.sheetnames[-1] == "_Evidence"
     assert row[headers.index("HGVSc")] == variant.raw["HGVSc"]
     assert "CIViC Evidence" not in headers
 
@@ -304,8 +299,9 @@ def test_excel_export_writes_artifact_removed_sheet(tmp_path):
 
     assert "26OUM00001_VPM_S1_R1_001" in with_samples
     assert "26OUM00001_VPM_S1_R1_001" not in removed_samples
-    assert row[headers.index("ClinVar Evidence")] == "[found] ClinVar summary"
-    assert row[headers.index("Franklin Evidence")] == "[unauthorized] Franklin login was rejected"
+    assert not any(header.endswith(" Evidence") for header in headers)
+    restored = ProcessedWorkbookLoader().load(output).evidence[DatabaseSearchService().variant_key(variant)]
+    assert {item.database: item.status for item in restored}["ClinVar"] == "verification_required"
 
 
 def test_excel_export_keeps_row_coloring_on_raw_sheets(tmp_path):
@@ -393,12 +389,10 @@ def test_excel_review_layout_hides_reference_columns_and_keeps_evidence_compact(
     workbook = openpyxl.load_workbook(output)
     ws = workbook["With Artifacts"]
     headers = [cell.value for cell in ws[1]]
-    evidence_column = headers.index("OncoKB Evidence") + 1
-    evidence_cell = ws.cell(5, evidence_column)
     report_column = headers.index("Report") + 1
     assert ws.freeze_panes == "G2"
     assert ws.column_dimensions[openpyxl.utils.get_column_letter(report_column)].hidden
     assert all(not ws.row_dimensions[row].hidden for row in range(2, ws.max_row + 1))
-    assert not evidence_cell.alignment.wrap_text
+    assert "OncoKB Evidence" not in headers
     assert ws.row_dimensions[5].height == 18
     workbook.close()

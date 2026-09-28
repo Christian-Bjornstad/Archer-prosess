@@ -62,7 +62,7 @@ def test_processed_workbook_restores_variants_x_marks_and_evidence(tmp_path):
     assert manual_skip in state.database_skip_keys
     assert f"{result.variants[0].sample}|{result.variants[0].hgvsc}" in state.database_skip_keys
     restored = {item.database: item for item in state.evidence[key]}
-    assert restored["ClinVar"].summary == "Benign"
+    assert restored["ClinVar"].status == "verification_required"
     assert restored["OncoKB"].clinical_significance == "Likely Oncogenic"
     assert restored["OncoKB"].url == "https://www.oncokb.org/example"
     assert restored["OncoKB"].raw["screenshot"].endswith("oncokb.png")

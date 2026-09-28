@@ -102,7 +102,7 @@ the provider exposes that choice.
 
 | Source | Capture strategy | Key safeguards |
 | --- | --- | --- |
-| **MTBP** | One combined report per patient; full image in Vedlegg and local variant crops with section headings and A/B/C evidence | Gene + protein matching takes priority for crops, then cDNA when protein identity is unavailable. Unclear matches include all rows of that gene with a visible genkontekst warning; this does not upgrade the database match status. Only rejected input variants use GRCh37 genomic fallback. |
+| **MTBP** | One combined report per patient; full image in the MTBP sheet and local variant crops with section headings and A/B/C evidence | Gene + protein matching takes priority for crops, then cDNA when protein identity is unavailable. Unclear matches include all rows of that gene with a visible genkontekst warning; this does not upgrade the database match status. Only rejected input variants use GRCh37 genomic fallback. |
 | **Franklin** | Classification-only ACMG/Oncology overviews, each named evidence card, Predictions, and Population Frequencies | Explicit **hg19** + **Somatic** search; each ACMG/Oncology subtab gets a fixed one-second render buffer before capture; only the active panel is expanded, preserving the classification scale/score area without mixing pixels from the preceding tab; ACMG stops after De Novo Data; Somatic Clinical Evidence and Add More Evidence are excluded; blank or truncated captures are rejected and retried on resume |
 | **ClinVar** | Variant title and focused germline/somatic classification summary | Opens a candidate only after chromosome, VCF position, reference, alternate, and **GRCh37** assembly all match exactly; older unverified results are queued for verification |
 | **OncoKB** | Variant Overview and Mutation Effect | Rejects the cookie overlay before taking the screenshot |
@@ -169,10 +169,11 @@ It contains exactly two data sheets:
 - **Artifacts Removed** — the corresponding view without known artifacts.
 
 The workbook mirrors the laboratory review layout with frozen identifier columns,
-hidden low-priority technical fields, familiar row colours, and compact evidence
-columns at the far right. AF remains numeric, is shown as a percentage, and is
-sorted from highest to lowest within each patient. Evidence text does not expand
-row height.
+hidden low-priority technical fields, familiar row colours, WHO driver-gene hits,
+and `Run_dato` at the far right. Database results are kept in a very hidden
+storage sheet so a review session can be resumed without visible search columns.
+AF remains numeric, is shown as a percentage, and is sorted from highest to
+lowest within each patient.
 
 ### Patient workbooks
 
@@ -182,11 +183,11 @@ Patient reports are named `<DIT>_VPM_Tolkning_APP.xlsx` (for example,
 - **Oversikt** — compact findings such as `ClinVar – Benign`, plus source links,
   a manual **Kommentar** column, and a manual `HSMD -` line. Kommentar and HSMD
   text follow the variant when a workbook is regenerated and AF order changes.
-  A pale-orange merged **E4:J7** box holds patient-level comments and is preserved
-  on regeneration. COSMIC's not-applicable display text is **Ikke funnet**;
-  the internal status remains unchanged.
-- **Vedlegg** — the combined MTBP report without the portal/header intro above the Genomics content. The original full screenshot remains in the local evidence directory. The sheet keeps visible gridlines and four light guide rows above the report.
-- **Data** — the traceability data with database evidence columns removed, columns D/E hidden, integer-percent bold AF values, bold gene symbols, a WHO-driver flag, and the run date in `YYYY_MM_DD` form. Orange artifact rows are grouped last.
+  A pale-orange merged **D3:K4** box holds patient-level comments and is preserved
+  on regeneration. Patient number and sequencing date occupy rows 3 and 4.
+  The COSMIC-ID column shows **ID** with a link for an Archer ID and
+  **Ikke ID i Archer** otherwise.
+- **MTBP** — the combined MTBP report without the portal/header intro above the Genomics content. The original full screenshot remains in the local evidence directory. The sheet keeps visible gridlines and four light guide rows above the report.
 - **One sheet per variant** — linked compact evidence followed by embedded screenshots with plain, non-linked captions.
 
 Unique genes use the gene symbol as the sheet name. If a patient has multiple

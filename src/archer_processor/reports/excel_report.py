@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from collections import defaultdict
 from math import isnan
@@ -18,6 +19,7 @@ from archer_processor.core.highlights import (
 )
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
 from archer_processor.core.sorting import variant_sort_key
+from archer_processor.reports.who_genes import WHO_DRIVER_GENES
 
 
 DEFAULT_DATABASE_COLUMNS = [
@@ -128,6 +130,7 @@ class ExcelReportWriter:
             hide_excluded,
             include_selection=True,
             database_skip_keys=database_skip_keys or set(),
+            run_date=result.run_date,
         )
         self._raw_variant_sheet(
             workbook,
@@ -139,7 +142,9 @@ class ExcelReportWriter:
             ],
             evidence,
             hide_excluded,
+            run_date=result.run_date,
         )
+        self._evidence_storage_sheet(workbook, evidence)
         for ws in workbook.worksheets:
             ws.sheet_view.showGridLines = False
         return self._save_atomically(workbook, output_path)
@@ -157,6 +162,24 @@ class ExcelReportWriter:
             if temporary.exists() and temporary != output_path:
                 temporary.unlink(missing_ok=True)
         return output_path
+
+    @staticmethod
+    def _evidence_storage_sheet(workbook: Workbook, evidence: dict[str, list[DatabaseEvidence]]) -> None:
+        """Keep source results for resume without cluttering review columns."""
+        ws = workbook.create_sheet("_Evidence")
+        ws.append([
+            "Variant key", "Database", "Status", "Summary", "Accession",
+            "Clinical significance", "URL", "Raw JSON chunks",
+        ])
+        for key, items in evidence.items():
+            for item in items:
+                raw_json = json.dumps(item.raw, default=str, ensure_ascii=False)
+                chunks = [raw_json[index:index + 30_000] for index in range(0, len(raw_json), 30_000)]
+                ws.append([
+                    key, item.database, item.status, item.summary, item.accession,
+                    item.clinical_significance, item.url, *chunks,
+                ])
+        ws.sheet_state = "veryHidden"
 
     def _database_selection_sheet(
         self,
@@ -566,16 +589,16 @@ class ExcelReportWriter:
         database_skip_keys: set[str] | None = None,
         include_database_evidence: bool = True,
         preserve_variant_order: bool = False,
+        run_date: str = "",
     ) -> None:
         ws = workbook.create_sheet(title)
         raw_columns = self._raw_columns(variants)
-        database_columns = (
-            self._database_columns(evidence) if include_database_evidence else []
-        )
+        database_columns = []
         headers = (
             (["Skip Database Search (X)"] if include_selection else [])
             + raw_columns
             + [f"{database} Evidence" for database in database_columns]
+            + (["WHO drivergen", "Run_dato"] if run_date else [])
         )
         self._headers(ws, headers)
         raw_offset = 1 if include_selection else 0
@@ -608,6 +631,10 @@ class ExcelReportWriter:
                     for column in raw_columns
                 ],
                 *[self._evidence_cell(evidence_by_database.get(database, [])) for database in database_columns],
+                *([
+                    "X" if (variant.symbol or "").upper() in WHO_DRIVER_GENES else "",
+                    run_date.replace("-", "_"),
+                ] if run_date else []),
             ]
             for col_index, value in enumerate(values, start=1):
                 cell = ws.cell(row_index, col_index, value)
