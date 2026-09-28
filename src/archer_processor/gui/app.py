@@ -61,6 +61,7 @@ from archer_processor.services import (
     BrowserReviewService,
     DatabaseSearchService,
     ProcessedWorkbookLoader,
+    RETRYABLE_EVIDENCE_STATUSES,
     is_completed_evidence,
     inspect_recent_analysis,
     load_database_skip_keys,
@@ -309,6 +310,27 @@ def _failed_search_variants(
         ):
             failed.append(variant)
     return failed
+
+
+def _retryable_source_pairs(
+    variants,
+    evidence: dict[str, list[DatabaseEvidence]],
+    databases: list[str],
+) -> set[tuple[str, str]]:
+    """Attempted lookups a user can explicitly retry for these variants."""
+    selected = set(databases)
+    pairs: set[tuple[str, str]] = set()
+    for variant in variants:
+        key = BrowserReviewService.variant_key(variant)
+        for item in evidence.get(key, []):
+            if item.database not in selected:
+                continue
+            status = item.status.strip().casefold()
+            if status in RETRYABLE_EVIDENCE_STATUSES or (
+                status == "found" and not is_completed_evidence(item)
+            ):
+                pairs.add((key, item.database))
+    return pairs
 
 
 def _has_failed_lookups(
@@ -1586,6 +1608,17 @@ class MainWindow(QMainWindow):
             "Kjør uferdige databasesøk for markerte pasienter og lag rapportene deres."
         )
         self.priority_search_btn.clicked.connect(self._start_prioritized_search)
+        self.retry_selected_btn = QPushButton("Prøv feilede på nytt")
+        self.retry_selected_btn.setObjectName("OutlineButton")
+        self.retry_selected_btn.setMinimumHeight(44)
+        self.retry_selected_btn.setEnabled(False)
+        self.retry_selected_btn.setAccessibleName(
+            "Prøv feilede oppslag for valgte pasienter på nytt"
+        )
+        self.retry_selected_btn.setToolTip(
+            "Prøv bare feilede eller avbrutte oppslag for markerte pasienter på nytt."
+        )
+        self.retry_selected_btn.clicked.connect(self._start_selected_retry)
         self.remaining_search_btn = QPushButton("Kjør resterende")
         self.remaining_search_btn.setObjectName("OutlineButton")
         self.remaining_search_btn.setMinimumHeight(44)
@@ -1599,6 +1632,9 @@ class MainWindow(QMainWindow):
         priority_layout.addWidget(self.priority_search_btn)
         priority_layout.addWidget(self.remaining_search_btn)
         status_layout.addLayout(priority_layout)
+        status_layout.addWidget(
+            self.retry_selected_btn, alignment=Qt.AlignmentFlag.AlignLeft
+        )
         self.status_matrix = StatusMatrix(self.databases)
         self.status_matrix.setMinimumHeight(210)
         self.status_matrix.itemSelectionChanged.connect(
@@ -2081,12 +2117,24 @@ class MainWindow(QMainWindow):
     def _start_remaining_search(self) -> None:
         self._start_database_search(scope_label="resterende pasienter")
 
+    def _start_selected_retry(self) -> None:
+        patient_ids = self._explicitly_selected_patient_ids()
+        if not patient_ids:
+            return
+        self._start_database_search(
+            patient_ids=set(patient_ids),
+            report_after_search=patient_ids,
+            scope_label="feilede oppslag for valgte pasienter",
+            retry_failed_only=True,
+        )
+
     def _start_database_search(
         self,
         *,
         patient_ids: set[str] | None = None,
         report_after_search: list[str] | None = None,
         scope_label: str = "alle pasienter",
+        retry_failed_only: bool = False,
     ) -> None:
         if not self.result:
             return
@@ -2100,10 +2148,35 @@ class MainWindow(QMainWindow):
         api_databases: list[str] = []
         completed_sources = _completed_evidence_sources(self.evidence)
         eligible_variants = self._variants_for_search(patient_ids=patient_ids)
-        variants = self._pending_variants_for_search(
-            databases, patient_ids=patient_ids
-        )
+        if retry_failed_only:
+            retry_pairs = _retryable_source_pairs(
+                eligible_variants, self.evidence, databases
+            )
+            completed_sources.difference_update(retry_pairs)
+            completed_sources.update(
+                (BrowserReviewService.variant_key(variant), database)
+                for variant in eligible_variants
+                for database in databases
+                if (BrowserReviewService.variant_key(variant), database)
+                not in retry_pairs
+            )
+            variants = [
+                variant
+                for variant in eligible_variants
+                if any(
+                    (BrowserReviewService.variant_key(variant), database)
+                    in retry_pairs
+                    for database in databases
+                )
+            ]
+        else:
+            variants = self._pending_variants_for_search(
+                databases, patient_ids=patient_ids
+            )
         if not variants:
+            if retry_failed_only:
+                self._log("Ingen feilede oppslag for valgte pasienter og kilder.")
+                return
             self._show_search_already_complete(databases)
             if report_after_search and self._try_write_evidence_workbook(
                 show_errors=False
@@ -2754,7 +2827,8 @@ class MainWindow(QMainWindow):
     def _update_priority_controls(self) -> None:
         if not hasattr(self, "priority_search_btn"):
             return
-        patient_count = len(self._explicitly_selected_patient_ids())
+        selected_patient_ids = self._explicitly_selected_patient_ids()
+        patient_count = len(selected_patient_ids)
         noun = "pasient" if patient_count == 1 else "pasienter"
         self.priority_selection_status.setText(
             f"{patient_count} {noun} valgt"
@@ -2764,6 +2838,20 @@ class MainWindow(QMainWindow):
         selected_sources = [
             name for name, check in self.db_checks.items() if check.isChecked()
         ]
+        retry_pairs = (
+            _retryable_source_pairs(
+                self._variants_for_search(patient_ids=set(selected_patient_ids)),
+                self.evidence,
+                selected_sources,
+            )
+            if available and patient_count and selected_sources
+            else set()
+        )
+        self.retry_selected_btn.setEnabled(bool(retry_pairs))
+        self.retry_selected_btn.setText(
+            f"Prøv feilede på nytt ({len(retry_pairs)})"
+            if retry_pairs else "Prøv feilede på nytt"
+        )
         has_remaining = bool(
             available
             and selected_sources
@@ -3216,6 +3304,7 @@ class MainWindow(QMainWindow):
         self.process_btn.setEnabled(False)
         self.search_btn.setEnabled(False)
         self.priority_search_btn.setEnabled(False)
+        self.retry_selected_btn.setEnabled(False)
         self.remaining_search_btn.setEnabled(False)
         self.pause_search_btn.setText("Pause Search")
         self.pause_search_btn.setEnabled(is_search)

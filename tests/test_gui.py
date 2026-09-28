@@ -6,6 +6,7 @@ import threading
 import time
 
 from PIL import Image
+from PyQt6.QtCore import QThread
 from PyQt6.QtWidgets import QAbstractItemView, QPushButton
 
 from archer_processor.core import DatabaseEvidence, VariantProcessor, default_artifact_rules
@@ -21,6 +22,7 @@ from archer_processor.gui.app import (
     _evidence_completion_summary,
     _pending_source_counts,
     _protected_remote_evidence_sources,
+    _retryable_source_pairs,
 )
 from archer_processor.gui.status_model import (
     CellState,
@@ -61,6 +63,7 @@ def test_evidence_actions_fit_target_window_sizes(qt_app):
         viewport = window.database_scroll.viewport().rect()
         for button in [
             window.priority_search_btn,
+            window.retry_selected_btn,
             window.remaining_search_btn,
             window.rewrite_btn,
             window.patient_excel_btn,
@@ -361,6 +364,7 @@ def test_priority_controls_require_an_explicit_patient_selection(qt_app, tmp_pat
 
     assert window._explicitly_selected_patient_ids() == []
     assert not window.priority_search_btn.isEnabled()
+    assert not window.retry_selected_btn.isEnabled()
     assert window.priority_selection_status.text() == "0 pasienter valgt"
     assert (
         window.status_matrix.selectionMode()
@@ -374,7 +378,128 @@ def test_priority_controls_require_an_explicit_patient_selection(qt_app, tmp_pat
 
     assert window._explicitly_selected_patient_ids() == [first_patient]
     assert window.priority_search_btn.isEnabled()
+    assert not window.retry_selected_btn.isEnabled()
     assert window.priority_selection_status.text() == "1 pasient valgt"
+
+
+def test_retry_selected_enables_only_for_attempted_failures(qt_app, tmp_path, monkeypatch):
+    window = MainWindow()
+    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+    window.result = VariantProcessor().process(
+        fixture, "2026-09-15", tmp_path / "review.xlsx"
+    )
+    window.included_only_check.setChecked(False)
+    for check in window.db_checks.values():
+        check.setChecked(False)
+    window.db_checks["ClinVar"].setChecked(True)
+    window._refresh_operations_cockpit()
+    variant = window._variants_for_search()[0]
+    first_patient = variant.patient_id
+    patient_row = next(
+        row for row in range(window.status_matrix.rowCount())
+        if window.status_matrix.item(row, 0).text() == first_patient
+    )
+    window.status_matrix.selectRow(patient_row)
+    qt_app.processEvents()
+
+    assert not window.retry_selected_btn.isEnabled()
+    key = BrowserReviewService.variant_key(variant)
+    window.evidence[key] = [DatabaseEvidence("ClinVar", "timeout", "slow")]
+    window._update_priority_controls()
+    assert window.retry_selected_btn.isEnabled()
+    assert window.retry_selected_btn.text() == "Prøv feilede på nytt (1)"
+
+    launches = []
+    monkeypatch.setattr(window, "_start_database_search", lambda **kwargs: launches.append(kwargs))
+    window.retry_selected_btn.click()
+    assert launches == [{
+        "patient_ids": {first_patient},
+        "report_after_search": [first_patient],
+        "scope_label": "feilede oppslag for valgte pasienter",
+        "retry_failed_only": True,
+    }]
+
+    window.db_checks["ClinVar"].setChecked(False)
+    assert not window.retry_selected_btn.isEnabled()
+
+
+def test_retry_pairs_exclude_unattempted_and_completed_lookups():
+    variants = ArcherTsvReader().read(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+    )[:2]
+    first_key = BrowserReviewService.variant_key(variants[0])
+    second_key = BrowserReviewService.variant_key(variants[1])
+    evidence = {
+        first_key: [
+            DatabaseEvidence("ClinVar", "timeout", "slow"),
+            DatabaseEvidence("OncoKB", "found", "ok"),
+        ],
+        second_key: [DatabaseEvidence("ClinVar", "not_found", "no hit")],
+    }
+
+    assert _retryable_source_pairs(
+        variants, evidence, ["ClinVar", "OncoKB", "MTBP"]
+    ) == {(first_key, "ClinVar")}
+
+
+def test_selected_retry_worker_only_receives_failed_lookup_scope(
+    qt_app, tmp_path, monkeypatch
+):
+    window = MainWindow()
+    window.result = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-15", tmp_path / "review.xlsx",
+    )
+    window.included_only_check.setChecked(False)
+    for check in window.db_checks.values():
+        check.setChecked(False)
+    window.db_checks["ClinVar"].setChecked(True)
+    window.db_checks["OncoKB"].setChecked(True)
+    selected = window._variants_for_search()[0]
+    unattempted = replace(
+        selected,
+        hgvsc="NM_000546.6:c.525A>G",
+        source_row=selected.source_row + 101,
+    )
+    other = replace(
+        selected,
+        sample="OTHER_VPM_1",
+        source_row=selected.source_row + 100,
+    )
+    window.result.variants.extend([unattempted, other])
+    selected_key = BrowserReviewService.variant_key(selected)
+    unattempted_key = BrowserReviewService.variant_key(unattempted)
+    other_key = BrowserReviewService.variant_key(other)
+    window.evidence = {
+        selected_key: [
+            DatabaseEvidence("ClinVar", "timeout", "slow"),
+            DatabaseEvidence("OncoKB", "found", "ok"),
+        ],
+        other_key: [DatabaseEvidence("ClinVar", "error", "failed")],
+    }
+    monkeypatch.setattr(window, "_save_settings", lambda **kwargs: True)
+    monkeypatch.setattr(QThread, "start", lambda self: None)
+
+    window._start_database_search(
+        patient_ids={selected.patient_id}, retry_failed_only=True
+    )
+
+    worker = window.database_worker
+    assert {variant.patient_id for variant in worker.variants} == {
+        selected.patient_id
+    }
+    assert (selected_key, "ClinVar") not in worker.completed_sources
+    assert (selected_key, "OncoKB") in worker.completed_sources
+    assert (unattempted_key, "ClinVar") in worker.completed_sources
+    assert unattempted not in worker.variants
+    assert (other_key, "ClinVar") not in worker.completed_sources
+    assert all(
+        (BrowserReviewService.variant_key(variant), "OncoKB")
+        in worker.completed_sources
+        for variant in worker.report_variants
+        if variant.patient_id == selected.patient_id
+    )
+    window._set_ready()
 
 
 def test_pending_search_scope_can_be_limited_to_selected_patients(qt_app, tmp_path):
