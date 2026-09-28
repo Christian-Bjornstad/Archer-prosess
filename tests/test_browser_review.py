@@ -1745,7 +1745,8 @@ def test_clinvar_queries_use_transcript_then_precise_grch37_position():
 
     assert _clinvar_queries(variant) == [
         "NM_000546.6:c.524G>A",
-        "17[chr] AND 7578406[chrpos37]",
+        "TP53[gene] AND 17[chr] AND 7578406[chrpos37]",
+        "TP53 R175H",
     ]
 
 
@@ -1766,6 +1767,55 @@ def test_clinvar_identity_requires_requested_change_and_grch37_location():
     assert accepted.accepted
     assert accepted.basis == "exact_transcript_grch37"
     assert not rejected.accepted
+
+
+def test_clinvar_protein_fallback_requires_gene_and_grch37_location(tmp_path, monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+    exact_url = "https://www.ncbi.nlm.nih.gov/clinvar/variation/12374/"
+    exact_body = (
+        "TP53 p.Arg175His\n"
+        "Variation ID: 12374 Accession: VCV000012374.86\n"
+        "Location\n17: 7578406 (GRCh37)"
+    )
+
+    class Locator:
+        def __init__(self, page):
+            self.page = page
+
+        def inner_text(self, **kwargs):
+            return exact_body if self.page.url == exact_url else "Search results"
+
+        def evaluate_all(self, script):
+            if "R175H" not in self.page.url:
+                return []
+            return [{"text": "TP53 p.Arg175His", "href": exact_url}]
+
+    class Page:
+        url = ""
+
+        def goto(self, url, **kwargs):
+            self.url = url
+
+        def locator(self, selector):
+            return Locator(self)
+
+    monkeypatch.setattr(service, "_capture_clinvar_result", lambda v, e, p, d: e)
+    evidence = service._lookup_clinvar_variant(Page(), variant, tmp_path)
+
+    assert evidence.status == "found"
+    assert evidence.raw["identity_verification"]["basis"] == "gene_protein_grch37"
+    assert evidence.raw["query_attempts"] == _clinvar_queries(variant)
+    assert not _clinvar_identity(exact_body, variant).accepted
+    assert not _clinvar_identity(
+        exact_body.replace("7578406", "7578407"), variant, allow_protein=True
+    ).accepted
+    assert not _clinvar_identity(
+        exact_body.replace("TP53", "TP532"), variant, allow_protein=True
+    ).accepted
+    assert not _clinvar_identity(
+        exact_body + "\nNM_000546.6:c.524G>T", variant, allow_protein=True
+    ).accepted
 
 
 def test_clinvar_search_uses_browser_without_database_api(tmp_path, monkeypatch):
@@ -1917,7 +1967,7 @@ def test_clinvar_website_lookup_uses_exact_row_from_grch37_fallback(
 
     assert evidence.status == "found"
     assert page.url == exact_url
-    assert evidence.raw["query_attempts"] == _clinvar_queries(variant)
+    assert evidence.raw["query_attempts"] == _clinvar_queries(variant)[:2]
 
 
 def test_clinvar_website_lookup_accepts_updated_transcript_in_result_row_context(

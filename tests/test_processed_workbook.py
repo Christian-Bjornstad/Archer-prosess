@@ -1,7 +1,7 @@
 import hashlib
 import json
 import os
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -78,6 +78,18 @@ def test_processed_workbook_restores_original_run_date_not_file_mtime(tmp_path):
     state = ProcessedWorkbookLoader().load(output)
 
     assert state.result.run_date == "2026-01-02"
+
+
+def test_processed_workbook_corrects_stale_date_from_vpm_folder(tmp_path):
+    run_dir = tmp_path / "2026_09_18_VPM"
+    run_dir.mkdir()
+    output = run_dir / "review.xlsx"
+    result = VariantProcessor().process(FIXTURE, "2026-01-02", output)
+    ExcelReportWriter().write(replace(result, run_date="2026-01-02"), output)
+
+    state = ProcessedWorkbookLoader().load(output)
+
+    assert state.result.run_date == "2026-09-18"
 
 
 def test_processed_workbook_rejects_unrelated_excel_file(tmp_path):

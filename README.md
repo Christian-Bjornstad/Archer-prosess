@@ -105,9 +105,9 @@ the provider exposes that choice.
 
 | Source | Capture strategy | Key safeguards |
 | --- | --- | --- |
-| **MTBP** | One combined report per patient; full image in the MTBP sheet and local variant crops with section headings and A/B/C evidence | Gene + protein matching takes priority for crops, then cDNA when protein identity is unavailable. Unclear matches include all rows of that gene with a visible genkontekst warning; this does not upgrade the database match status. Only rejected input variants use GRCh37 genomic fallback. |
+| **MTBP** | One combined report per patient; full image in the MTBP sheet and local variant crops with section headings and A/B/C evidence | Gene + protein matching takes priority for crops, then cDNA when protein identity is unavailable. Unclear matches include all rows of that gene without an added image banner; the match scope remains in PNG metadata. Only rejected input variants use GRCh37 genomic fallback. |
 | **Franklin** | Classification-only ACMG/Oncology overviews, each named evidence card, Predictions, and Population Frequencies | Explicit **hg19** + **Somatic** search; each ACMG/Oncology subtab gets a fixed one-second render buffer before capture; only the active panel is expanded, preserving the classification scale/score area without mixing pixels from the preceding tab; ACMG stops after De Novo Data; Somatic Clinical Evidence and Add More Evidence are excluded; blank or truncated captures are rejected and retried on resume |
-| **ClinVar** | Variant title and focused germline/somatic classification summary | Opens a candidate only after chromosome, VCF position, reference, alternate, and **GRCh37** assembly all match exactly; older unverified results are queued for verification |
+| **ClinVar** | Variant title and focused germline/somatic classification summary | Searches HGVSc, then gene with GRCh37 chromosome and position, then gene with HGVSp. The opened result must show the gene, GRCh37 position, and matching cDNA or protein change; older unverified results are queued for verification. |
 | **OncoKB** | Variant Overview and Mutation Effect | Rejects the cookie overlay before taking the screenshot |
 | **COSMIC** | Overview, Tissue distribution, and Samples filtered to `lymphoid` | Explicitly selects **GRCh37** in COSMIC's global Genome Version menu before searching and requires its active menu marker before capture. Canonical result redirects may omit the genome parameter, but any explicit genome value other than `37` is rejected. Tries every distinct COSM/COSV identifier from the Archer `COSMICID` column in source order; multiple candidates or an identity mismatch fail closed |
 
@@ -173,7 +173,7 @@ It contains exactly two data sheets:
 
 The workbook mirrors the laboratory review layout with frozen identifier columns,
 hidden low-priority technical fields, familiar row colours,
-and `Run_dato` at the far right, derived from a `YYYY_MM_DD_VPM` folder when present. Database results are kept in a very hidden
+and `Run_dato` at the far right, derived from a `YYYY_MM_DD_VPM` input or output file name or folder when present. Database results are kept in a very hidden
 storage sheet so a review session can be resumed without visible search columns.
 AF remains numeric, is shown as a percentage, and is sorted from highest to
 lowest within each patient.

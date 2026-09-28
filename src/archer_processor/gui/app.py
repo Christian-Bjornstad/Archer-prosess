@@ -1334,12 +1334,13 @@ class MainWindow(QMainWindow):
         self.input_edit = QLineEdit()
         self.input_edit.setPlaceholderText("Select the filtered variant TSV")
         self.input_edit.textChanged.connect(self._update_process_state)
-        self.input_edit.textChanged.connect(self._sync_run_date_from_input)
+        self.input_edit.textChanged.connect(self._sync_run_date_from_paths)
         input_btn = QPushButton("Browse")
         input_btn.clicked.connect(self._browse_input)
         self.output_edit = QLineEdit()
         self.output_edit.setPlaceholderText("Clinical review workbook (.xlsx)")
         self.output_edit.textChanged.connect(self._update_process_state)
+        self.output_edit.textChanged.connect(self._sync_run_date_from_paths)
         output_btn = QPushButton("Browse")
         output_btn.clicked.connect(self._browse_output)
         self.run_date = QDateEdit()
@@ -1900,8 +1901,11 @@ class MainWindow(QMainWindow):
             output = Path(self.settings.default_output_dir) / f"{Path(path).stem}_VPM_review.xlsx"
             self.output_edit.setText(str(output))
 
-    def _sync_run_date_from_input(self) -> None:
-        run_date = sequencing_date_from_path(Path(self.input_edit.text()))
+    def _sync_run_date_from_paths(self) -> None:
+        run_date = (
+            sequencing_date_from_path(Path(self.input_edit.text()))
+            or sequencing_date_from_path(Path(self.output_edit.text()))
+        )
         if run_date:
             self.run_date.setDate(QDate.fromString(run_date, "yyyy-MM-dd"))
             self.run_date.setToolTip("Hentet fra navnet på VPM-mappen")

@@ -41,6 +41,28 @@ def test_run_date_comes_from_vpm_folder_and_reaches_review_workbook(tmp_path):
         workbook.close()
 
 
+def test_run_date_comes_from_vpm_file_name(tmp_path):
+    input_path = tmp_path / "2026_09_18_VPM.tsv"
+    input_path.write_bytes(FIXTURE.read_bytes())
+    output = tmp_path / "review.xlsx"
+    result = VariantProcessor().process(input_path, "2026-01-01", output)
+    ExcelReportWriter().write(result, output)
+    assert result.run_date == "2026-09-18"
+    workbook = openpyxl.load_workbook(output)
+    try:
+        sheet = workbook["With Artifacts"]
+        headers = [cell.value for cell in sheet[1]]
+        assert sheet.cell(2, headers.index("Run_dato") + 1).value == "2026_09_18"
+    finally:
+        workbook.close()
+
+
+def test_run_date_uses_dated_output_when_input_has_no_run_name(tmp_path):
+    output = tmp_path / "2026_09_18_VPM_review.xlsx"
+    result = VariantProcessor().process(FIXTURE, "2026-01-01", output)
+    assert result.run_date == "2026-09-18"
+
+
 def test_review_workbook_failed_save_preserves_last_good_file(tmp_path, monkeypatch):
     result = VariantProcessor().process(FIXTURE, "2026-09-15", tmp_path / "review.xlsx")
     output = tmp_path / "review.xlsx"

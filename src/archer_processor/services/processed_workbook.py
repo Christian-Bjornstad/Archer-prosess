@@ -11,6 +11,7 @@ from typing import Any
 import openpyxl
 
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
+from archer_processor.core.run_date import sequencing_date_from_path
 from archer_processor.core.rules import FilterEngine
 from archer_processor.io import ArcherTsvReader
 
@@ -155,10 +156,15 @@ class ProcessedWorkbookLoader:
             stored_evidence=stored_evidence, progress=progress,
         )
         timestamp = datetime.fromtimestamp(workbook_path.stat().st_mtime)
+        resolved_run_date = (
+            sequencing_date_from_path(workbook_path)
+            or persisted_run_date
+            or timestamp.date().isoformat()
+        )
         result = ProcessingResult(
             input_path=workbook_path,
             output_path=workbook_path,
-            run_date=persisted_run_date or timestamp.date().isoformat(),
+            run_date=resolved_run_date,
             variants=variants,
             rules_applied=[rule.rule_id for rule in self.filter_engine.rules],
             started_at=timestamp,

@@ -994,6 +994,7 @@ class BrowserReviewService:
     ) -> DatabaseEvidence:
         attempts: list[str] = []
         for query in _clinvar_queries(variant):
+            protein_fallback = query == _clinvar_protein_query(variant)
             attempts.append(query)
             query_url = (
                 "https://www.ncbi.nlm.nih.gov/clinvar/?term="
@@ -1016,7 +1017,9 @@ class BrowserReviewService:
                     "node.parentElement?.innerText || node.innerText).trim(), "
                     "href: node.href}))"
                 )
-                candidates = _matching_clinvar_links(links, variant)
+                candidates = _matching_clinvar_links(
+                    links, variant, allow_protein=protein_fallback
+                )
                 if len(candidates) > 1:
                     return DatabaseEvidence(
                         "ClinVar",
@@ -1037,7 +1040,9 @@ class BrowserReviewService:
                 body_text = page.locator("body").inner_text(
                     timeout=self.navigation_timeout_ms
                 )
-            verification = _clinvar_identity(body_text, variant)
+            verification = _clinvar_identity(
+                body_text, variant, allow_protein=protein_fallback
+            )
             if not verification.accepted:
                 continue
             accession_match = re.search(
@@ -1046,7 +1051,7 @@ class BrowserReviewService:
             evidence = DatabaseEvidence(
                 "ClinVar",
                 "found",
-                "ClinVar website result verified against transcript/cDNA and GRCh37 location.",
+                "ClinVar website result verified against the variant and GRCh37 location.",
                 accession=accession_match.group(1) if accession_match else "",
                 url=page.url,
                 raw={
@@ -4010,15 +4015,38 @@ def _clinvar_queries(variant: VariantRecord) -> list[str]:
     if variant.hgvsc:
         queries.append(variant.hgvsc.strip())
     identity = genomic_identity(variant)
-    if identity:
+    if identity and variant.symbol:
         queries.append(
-            f"{identity.chromosome}[chr] AND "
+            f"{variant.symbol.strip()}[gene] AND {identity.chromosome}[chr] AND "
             f"{identity.position}[chrpos37]"
         )
+    protein_query = _clinvar_protein_query(variant)
+    if protein_query:
+        queries.append(protein_query)
     return list(dict.fromkeys(query for query in queries if query))
 
 
-def _clinvar_identity(body_text: str, variant: VariantRecord) -> IdentityVerification:
+def _clinvar_protein_query(variant: VariantRecord) -> str:
+    protein = _protein_change(variant.hgvsp)
+    return f"{variant.symbol.strip()} {protein}" if variant.symbol and protein else ""
+
+
+def _clinvar_protein_matches(text: str, variant: VariantRecord) -> bool:
+    expected = _protein_change(variant.hgvsp).casefold()
+    if not expected:
+        return False
+    return any(
+        _protein_change(match.group(0)).casefold() == expected
+        for match in re.finditer(
+            r"\bp\.\(?[A-Za-z*]+\d+[A-Za-z*]+\)?(?=$|[^A-Za-z0-9])",
+            text, re.I,
+        )
+    )
+
+
+def _clinvar_identity(
+    body_text: str, variant: VariantRecord, *, allow_protein: bool = False
+) -> IdentityVerification:
     expected = genomic_identity(variant)
     if expected is None:
         return IdentityVerification(False, "none", "GRCh37 input identity is incomplete.")
@@ -4029,47 +4057,62 @@ def _clinvar_identity(body_text: str, variant: VariantRecord) -> IdentityVerific
             False, "grch37_location", "ClinVar page did not show the requested GRCh37 location."
         )
     cdna = _cdna_change(variant.hgvsc).casefold()
-    symbol = (variant.symbol or "").casefold()
+    symbol = (variant.symbol or "").strip()
     transcript = (variant.hgvsc or "").split(":", 1)[0].strip().casefold()
-    if not cdna or cdna not in compact or not symbol or symbol not in compact:
+    if not symbol or not re.search(rf"\b{re.escape(symbol)}\b", body_text, re.I):
         return IdentityVerification(
-            False, "variant_change", "ClinVar page did not show the requested gene and cDNA change."
+            False, "variant_change", "ClinVar page did not show the requested gene."
         )
-    if transcript and transcript in compact:
+    if cdna and cdna in compact and transcript and transcript in compact:
         return IdentityVerification(
             True,
             "exact_transcript_grch37",
             "Transcript cDNA and GRCh37 location matched.",
             expected,
         )
+    if cdna and cdna in compact:
+        return IdentityVerification(
+            True, "gene_cdna_grch37",
+            "Gene, cDNA change, and GRCh37 location matched.", expected,
+        )
+    if allow_protein and _clinvar_protein_matches(body_text, variant):
+        if cdna and re.search(r"\bc\.[^\s(),;]+", body_text, re.I):
+            return IdentityVerification(
+                False, "variant_change",
+                "ClinVar showed a different cDNA change at the protein-matched location.",
+            )
+        return IdentityVerification(
+            True, "gene_protein_grch37",
+            "Gene, protein change, and GRCh37 location matched.", expected,
+        )
     return IdentityVerification(
-        True,
-        "gene_cdna_grch37",
-        "Gene, cDNA change, and GRCh37 location matched.",
-        expected,
+        False, "variant_change",
+        "ClinVar page did not show the requested cDNA or protein change.",
     )
 
 
 def _matching_clinvar_links(
-    links: object, variant: VariantRecord
+    links: object, variant: VariantRecord, *, allow_protein: bool = False
 ) -> list[str]:
     if not isinstance(links, list):
         return []
     cdna = _cdna_change(variant.hgvsc).casefold()
-    symbol = (variant.symbol or "").casefold()
+    symbol = (variant.symbol or "").strip()
     candidates: list[str] = []
     for item in links:
         if not isinstance(item, dict):
             continue
         text = re.sub(r"\s+", "", str(item.get("text") or "")).casefold()
         href = str(item.get("href") or "").strip()
-        if (
-            href
-            and cdna
-            and cdna in text
-            and symbol
-            and symbol in text
-        ):
+        matched_change = bool(cdna and cdna in text)
+        if allow_protein:
+            matched_change = matched_change or _clinvar_protein_matches(
+                str(item.get("text") or ""), variant
+            )
+        gene_matches = bool(
+            symbol and re.search(rf"\b{re.escape(symbol)}\b", str(item.get("text") or ""), re.I)
+        )
+        if href and gene_matches and matched_change:
             candidates.append(href)
     return list(dict.fromkeys(candidates))
 

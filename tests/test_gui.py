@@ -343,6 +343,13 @@ def test_input_folder_sets_sequencing_date(qt_app, tmp_path):
     assert window.run_date.date().toString("yyyy-MM-dd") == "2026-09-18"
     assert not window.run_date.isEnabled()
 
+    window.input_edit.setText(str(tmp_path / "2026_09_19_VPM.tsv"))
+    assert window.run_date.date().toString("yyyy-MM-dd") == "2026-09-19"
+
+    window.input_edit.setText(str(tmp_path / "variants.tsv"))
+    window.output_edit.setText(str(tmp_path / "2026_09_20_VPM_review.xlsx"))
+    assert window.run_date.date().toString("yyyy-MM-dd") == "2026-09-20"
+
 
 def test_priority_controls_require_an_explicit_patient_selection(qt_app, tmp_path):
     window = MainWindow()

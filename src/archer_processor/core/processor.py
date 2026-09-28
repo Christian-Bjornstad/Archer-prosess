@@ -29,7 +29,11 @@ class VariantProcessor:
 
     def process(self, input_path: Path, run_date: str, output_path: Path | None = None) -> ProcessingResult:
         started = datetime.now()
-        run_date = sequencing_date_from_path(input_path) or run_date
+        run_date = (
+            sequencing_date_from_path(input_path)
+            or (sequencing_date_from_path(output_path) if output_path else None)
+            or run_date
+        )
         variants = self.reader.read(input_path)
         self.filter_engine.apply(variants)
         if self.history:
