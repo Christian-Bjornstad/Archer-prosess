@@ -4012,6 +4012,9 @@ def _oncokb_page_matches_variant(
 
 def _clinvar_queries(variant: VariantRecord) -> list[str]:
     queries: list[str] = []
+    protein_query = _clinvar_protein_query(variant)
+    if protein_query:
+        queries.append(protein_query)
     if variant.hgvsc:
         queries.append(variant.hgvsc.strip())
     identity = genomic_identity(variant)
@@ -4020,9 +4023,6 @@ def _clinvar_queries(variant: VariantRecord) -> list[str]:
             f"{variant.symbol.strip()}[gene] AND {identity.chromosome}[chr] AND "
             f"{identity.position}[chrpos37]"
         )
-    protein_query = _clinvar_protein_query(variant)
-    if protein_query:
-        queries.append(protein_query)
     return list(dict.fromkeys(query for query in queries if query))
 
 

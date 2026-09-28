@@ -1740,13 +1740,13 @@ def test_clinvar_capture_is_cropped_to_title_and_classification_summary(tmp_path
     }
 
 
-def test_clinvar_queries_use_transcript_then_precise_grch37_position():
+def test_clinvar_queries_use_protein_then_transcript_then_grch37_position():
     variant = ArcherTsvReader().read(FIXTURE)[3]
 
     assert _clinvar_queries(variant) == [
+        "TP53 R175H",
         "NM_000546.6:c.524G>A",
         "TP53[gene] AND 17[chr] AND 7578406[chrpos37]",
-        "TP53 R175H",
     ]
 
 
@@ -1805,7 +1805,7 @@ def test_clinvar_protein_fallback_requires_gene_and_grch37_location(tmp_path, mo
 
     assert evidence.status == "found"
     assert evidence.raw["identity_verification"]["basis"] == "gene_protein_grch37"
-    assert evidence.raw["query_attempts"] == _clinvar_queries(variant)
+    assert evidence.raw["query_attempts"] == ["TP53 R175H"]
     assert not _clinvar_identity(exact_body, variant).accepted
     assert not _clinvar_identity(
         exact_body.replace("7578406", "7578407"), variant, allow_protein=True
@@ -1907,7 +1907,7 @@ def test_clinvar_website_lookup_verifies_redirected_variant_before_capture(
     assert evidence.status == "found"
     assert evidence.accession == "VCV000012374.86"
     assert evidence.raw["assembly_verified"] == "GRCh37"
-    assert evidence.raw["query_attempts"] == ["NM_000546.6:c.524G>A"]
+    assert evidence.raw["query_attempts"] == ["TP53 R175H"]
     assert len(captured) == 1
 
 
@@ -1967,7 +1967,7 @@ def test_clinvar_website_lookup_uses_exact_row_from_grch37_fallback(
 
     assert evidence.status == "found"
     assert page.url == exact_url
-    assert evidence.raw["query_attempts"] == _clinvar_queries(variant)[:2]
+    assert evidence.raw["query_attempts"] == _clinvar_queries(variant)
 
 
 def test_clinvar_website_lookup_accepts_updated_transcript_in_result_row_context(

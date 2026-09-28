@@ -1063,7 +1063,7 @@ def test_browser_worker_passes_restored_evidence_to_provider_resume(
     assert received == [{key: [prior]}]
 
 
-def test_browser_worker_runs_franklin_mtbp_and_fast_providers_in_parallel(
+def test_browser_worker_runs_clinvar_franklin_mtbp_and_fast_providers_in_parallel(
     qt_app, tmp_path, monkeypatch
 ):
     variant = VariantProcessor().process(
@@ -1074,11 +1074,11 @@ def test_browser_worker_runs_franklin_mtbp_and_fast_providers_in_parallel(
     key = f"{variant.sample}|{variant.hgvsc}"
     worker = BrowserReviewWorker(
         [variant],
-        ["Franklin", "MTBP", "COSMIC"],
+        ["ClinVar", "Franklin", "MTBP", "COSMIC"],
         tmp_path / "evidence",
         AppSettings(),
     )
-    rendezvous = threading.Barrier(3, timeout=2)
+    rendezvous = threading.Barrier(4, timeout=5)
     calls = []
     calls_lock = threading.Lock()
 
@@ -1105,22 +1105,25 @@ def test_browser_worker_runs_franklin_mtbp_and_fast_providers_in_parallel(
 
     assert {tuple(databases) for _, databases in calls} == {
         ("COSMIC",),
+        ("ClinVar",),
         ("Franklin",),
         ("MTBP",),
     }
-    assert len({thread_name for thread_name, _ in calls}) == 3
+    assert len({thread_name for thread_name, _ in calls}) == 4
     assert {item.database for item in evidence[key]} == {
         "COSMIC",
+        "ClinVar",
         "Franklin",
         "MTBP",
     }
 
 
-def test_browser_database_lanes_keep_fast_providers_serial_in_canonical_order():
+def test_browser_database_lanes_give_clinvar_a_separate_lane():
     assert _browser_database_lanes(
         ["MTBP", "ClinVar", "Franklin", "OncoKB", "COSMIC"]
     ) == [
-        ("fast databases", ["COSMIC", "OncoKB", "ClinVar"]),
+        ("fast databases", ["COSMIC", "OncoKB"]),
+        ("ClinVar", ["ClinVar"]),
         ("Franklin", ["Franklin"]),
         ("MTBP", ["MTBP"]),
     ]
@@ -1618,7 +1621,7 @@ def test_database_worker_completes_all_sources_before_next_patient(
     assert 10 <= sum(slept) <= 20
     assert all(delay <= 0.25 for delay in slept)
     assert report_events == []
-    assert prior_snapshots == [restored_evidence] * 6
+    assert prior_snapshots == [restored_evidence] * 8
 
 
 def test_stop_search_requests_safe_interruption_and_keeps_status(

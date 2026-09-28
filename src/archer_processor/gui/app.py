@@ -187,11 +187,13 @@ def _browser_database_lanes(databases: list[str]) -> list[tuple[str, list[str]]]
     fast_databases = [
         database
         for database in BROWSER_DATABASES
-        if database in requested and database not in {"Franklin", "MTBP"}
+        if database in requested and database not in {"ClinVar", "Franklin", "MTBP"}
     ]
     lanes: list[tuple[str, list[str]]] = []
     if fast_databases:
         lanes.append(("fast databases", fast_databases))
+    if "ClinVar" in requested:
+        lanes.append(("ClinVar", ["ClinVar"]))
     if "Franklin" in requested:
         lanes.append(("Franklin", ["Franklin"]))
     if "MTBP" in requested:

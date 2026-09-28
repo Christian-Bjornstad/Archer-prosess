@@ -107,7 +107,7 @@ the provider exposes that choice.
 | --- | --- | --- |
 | **MTBP** | One combined report per patient; full image in the MTBP sheet and local variant crops with section headings and A/B/C evidence | Gene + protein matching takes priority for crops, then cDNA when protein identity is unavailable. Unclear matches include all rows of that gene without an added image banner; the match scope remains in PNG metadata. Only rejected input variants use GRCh37 genomic fallback. |
 | **Franklin** | Classification-only ACMG/Oncology overviews, each named evidence card, Predictions, and Population Frequencies | Explicit **hg19** + **Somatic** search; each ACMG/Oncology subtab gets a fixed one-second render buffer before capture; only the active panel is expanded, preserving the classification scale/score area without mixing pixels from the preceding tab; ACMG stops after De Novo Data; Somatic Clinical Evidence and Add More Evidence are excluded; blank or truncated captures are rejected and retried on resume |
-| **ClinVar** | Variant title and focused germline/somatic classification summary | Searches HGVSc, then gene with GRCh37 chromosome and position, then gene with HGVSp. The opened result must show the gene, GRCh37 position, and matching cDNA or protein change; older unverified results are queued for verification. |
+| **ClinVar** | Variant title and focused germline/somatic classification summary | Searches gene with HGVSp first, then HGVSc, then gene with GRCh37 chromosome and position. The opened result must show the gene, GRCh37 position, and matching cDNA or protein change; older unverified results are queued for verification. |
 | **OncoKB** | Variant Overview and Mutation Effect | Rejects the cookie overlay before taking the screenshot |
 | **COSMIC** | Overview, Tissue distribution, and Samples filtered to `lymphoid` | Explicitly selects **GRCh37** in COSMIC's global Genome Version menu before searching and requires its active menu marker before capture. Canonical result redirects may omit the genome parameter, but any explicit genome value other than `37` is rejected. Tries every distinct COSM/COSV identifier from the Archer `COSMICID` column in source order; multiple candidates or an identity mismatch fail closed |
 
@@ -142,8 +142,8 @@ to be reused while keeping browser activity visible and auditable.
 ## Operational safeguards
 
 - Patients run serially; all selected websites finish before the next patient begins.
-- Different providers use at most three parallel lanes: Franklin, MTBP, and a
-  serial fast-database lane for COSMIC, OncoKB, and ClinVar.
+- Different providers use at most four parallel lanes: ClinVar, Franklin,
+  MTBP, and a serial fast-database lane for COSMIC and OncoKB.
 - Variants within a provider remain serial and each provider keeps its isolated
   Edge profile. The application never opens concurrent sessions to one provider.
 - Randomized safety buffers default to 3–8 seconds between variant lookups.

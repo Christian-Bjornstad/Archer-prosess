@@ -10,7 +10,7 @@
   protein identity is unavailable. A different transcript's cDNA must not reject
   an exact displayed protein match (regression: CBL p.Cys401Trp versus p.His398Tyr).
   If none or multiple match, include
-  all rows for that gene, with a visible `genkontekst - variant ikke entydig` warning.
+  all rows for that gene without an added warning banner; the match scope stays in PNG metadata.
   Never include another gene. A missing gene still fails capture validation.
 - Gene-context images do not change database match status or import an uncertain
   classification as exact evidence. They may accompany not-found/ambiguous results.
@@ -24,16 +24,16 @@
 
 ## Bounded browser concurrency
 
-The normal Evidence run and the separate Browser Sources run now use up to three
-lanes per patient: Franklin runs alone, MTBP runs alone, and COSMIC, OncoKB and
-ClinVar share a serial fast-database lane in canonical order. Each lane owns a
+The normal Evidence run and the separate Browser Sources run now use up to four
+lanes per patient: ClinVar, Franklin and MTBP each run alone, while COSMIC and
+OncoKB share a serial fast-database lane in canonical order. Each lane owns a
 separate service instance, and every provider still uses its own persistent Edge
-profile. There are never more than three browser lanes, and neither patients nor
+profile. There are never more than four browser lanes, and neither patients nor
 variants within a provider are parallelized.
 
-Both lanes must finish before the next patient begins. Existing provider delays,
+All lanes must finish before the next patient begins. Existing provider delays,
 backoff, pause/stop checks and queued checkpoint/report writes are preserved.
-Synthetic tests prove all three lanes overlap and that a single selected lane
+Synthetic tests prove all four lanes overlap and that a single selected lane
 runs directly. A live Citrix run is still needed to measure the real elapsed-time
 gain and observe whether any portal changes its failure rate.
 
