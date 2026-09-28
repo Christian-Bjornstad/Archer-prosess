@@ -32,9 +32,9 @@ def test_overview_cosmic_id_uses_archer_id_and_keeps_link(tmp_path):
         assert overview["A3"].value == "DIT/pasientnummer"
         assert overview["A4"].value == "Sekvenseringsdato"
         assert overview["C4"].value == "2026-09-28"
-        assert overview["J8"].value == "ID"
+        assert overview["J8"].value == "COSM12345"
         assert "COSM12345" in overview["J8"].hyperlink.target
-        assert "D3:K4" in {str(area) for area in overview.merged_cells.ranges}
+        assert "D3:L4" in {str(area) for area in overview.merged_cells.ranges}
         assert overview.freeze_panes == "A8"
     finally:
         workbook.close()
@@ -49,6 +49,23 @@ def test_overview_cosmic_id_uses_archer_id_and_keeps_link(tmp_path):
         workbook.close()
 
 
+def test_overview_who_driver_gene_uses_configured_list(tmp_path):
+    result = VariantProcessor().process(FIXTURE, "2026-09-28", tmp_path / "review.xlsx")
+    variant = result.variants[3]
+    output = tmp_path / "patient.xlsx"
+    PatientExcelReportWriter(frozenset({variant.symbol.upper()})).write_patient(
+        result, variant.patient_id, [variant], output, {}
+    )
+    workbook = openpyxl.load_workbook(output)
+    try:
+        sheet = workbook["Oversikt"]
+        assert sheet["K7"].value == "gnomAD AF"
+        assert sheet["L7"].value == "WHO drivergen"
+        assert sheet["L8"].value == "X"
+    finally:
+        workbook.close()
+
+
 def test_patient_comment_and_long_hsmd_survive_regeneration(tmp_path):
     result = VariantProcessor().process(FIXTURE, "2026-09-05", tmp_path / "review.xlsx")
     variant = result.variants[3]
@@ -57,7 +74,7 @@ def test_patient_comment_and_long_hsmd_survive_regeneration(tmp_path):
     writer.write_patient(result, variant.patient_id, [variant], output, {})
     workbook = openpyxl.load_workbook(output)
     sheet = workbook["Oversikt"]
-    assert "D3:K4" in {str(area) for area in sheet.merged_cells.ranges}
+    assert "D3:L4" in {str(area) for area in sheet.merged_cells.ranges}
     assert sheet["E5"].value is None
     assert sheet["D3"].fill.fgColor.rgb == "00FFF3E8"
     sheet["D3"] = "Manuell vurdering\nBevares ved ny generering"
@@ -333,8 +350,8 @@ def test_patient_overview_places_source_gnomad_af_after_database_columns(tmp_pat
         headers = [overview.cell(7, column).value for column in range(1, 12)]
         assert headers[-2:] == ["COSMIC", "gnomAD AF"]
         assert overview["K8"].value == "0.00001"
-        assert overview.auto_filter.ref == "A7:K8"
-        assert overview.print_area == "'Oversikt'!$A$1:$K$13"
+        assert overview.auto_filter.ref == "A7:L8"
+        assert overview.print_area == "'Oversikt'!$A$1:$L$13"
         assert overview.freeze_panes == "A8"
     finally:
         workbook.close()

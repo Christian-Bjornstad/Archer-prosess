@@ -27,7 +27,7 @@ def read_patient_comment(path: Path) -> str:
             return ""
         sheet = workbook["Oversikt"]
         comment_ranges = {str(area) for area in sheet.merged_cells.ranges}
-        if "D3:K4" in comment_ranges:
+        if {"D3:K4", "D3:L4"} & comment_ranges:
             return str(sheet["D3"].value or "")
         if not {"E4:J7", "E4:K7"} & comment_ranges:
             return ""

@@ -45,6 +45,7 @@ from archer_processor.core import DatabaseEvidence, FilterEngine, ProcessingResu
 from archer_processor.core.highlights import (
     is_automatic_database_skip,
 )
+from archer_processor.core.run_date import sequencing_date_from_path
 from archer_processor.io import ArcherTsvReader
 from archer_processor.reports import (
     ExcelReportWriter,
@@ -1333,6 +1334,7 @@ class MainWindow(QMainWindow):
         self.input_edit = QLineEdit()
         self.input_edit.setPlaceholderText("Select the filtered variant TSV")
         self.input_edit.textChanged.connect(self._update_process_state)
+        self.input_edit.textChanged.connect(self._sync_run_date_from_input)
         input_btn = QPushButton("Browse")
         input_btn.clicked.connect(self._browse_input)
         self.output_edit = QLineEdit()
@@ -1354,7 +1356,7 @@ class MainWindow(QMainWindow):
         grid.addWidget(QLabel("Output XLSX"), 1, 0)
         grid.addWidget(self.output_edit, 1, 1)
         grid.addWidget(output_btn, 1, 2)
-        grid.addWidget(QLabel("Run date"), 2, 0)
+        grid.addWidget(QLabel("Sekvenseringsdato"), 2, 0)
         grid.addWidget(self.run_date, 2, 1)
         grid.addWidget(self.hide_excluded, 2, 2)
         layout.addWidget(files)
@@ -1898,6 +1900,16 @@ class MainWindow(QMainWindow):
             output = Path(self.settings.default_output_dir) / f"{Path(path).stem}_VPM_review.xlsx"
             self.output_edit.setText(str(output))
 
+    def _sync_run_date_from_input(self) -> None:
+        run_date = sequencing_date_from_path(Path(self.input_edit.text()))
+        if run_date:
+            self.run_date.setDate(QDate.fromString(run_date, "yyyy-MM-dd"))
+            self.run_date.setToolTip("Hentet fra navnet på VPM-mappen")
+        else:
+            self.run_date.setDate(QDate.currentDate())
+            self.run_date.setToolTip("Ingen datert VPM-mappe funnet; velg dato manuelt")
+        self.run_date.setEnabled(run_date is None)
+
     def _browse_output(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "Save Workbook", "", "Excel workbook (*.xlsx)")
         if path:
@@ -1934,7 +1946,7 @@ class MainWindow(QMainWindow):
             self.who_path_status.setStyleSheet(f"color: {Palette.red};")
             return False
         source = "Innebygd liste" if not path else Path(path).name
-        self.who_path_status.setText(f"{source}: {count} drivergener. Brukes i review-filen.")
+        self.who_path_status.setText(f"{source}: {count} drivergener. Brukes i pasientvedlegget.")
         self.who_path_status.setStyleSheet(f"color: {Palette.green};")
         return True
 
@@ -2787,7 +2799,10 @@ class MainWindow(QMainWindow):
             return
         self._set_busy("Generating reports")
         coordinator = PatientReportCoordinator(
-            self.result, self.result.variants, self.evidence
+            self.result, self.result.variants, self.evidence,
+            writer=PatientExcelReportWriter(
+                load_who_driver_genes(self.settings.who_driver_genes_path)
+            ),
         )
         worker = PatientReportWorker(coordinator, patient_ids)
         thread = QThread(self)
@@ -3062,7 +3077,10 @@ class MainWindow(QMainWindow):
         if not locked:
             return
         coordinator = PatientReportCoordinator(
-            self.result, self.result.variants, self.evidence
+            self.result, self.result.variants, self.evidence,
+            writer=PatientExcelReportWriter(
+                load_who_driver_genes(self.settings.who_driver_genes_path)
+            ),
         )
         coordinator.pending = locked
         worker = ReportRetryWorker(coordinator)
@@ -3544,9 +3562,10 @@ class MainWindow(QMainWindow):
                 gridline-color: #E4EBF0;
                 alternate-background-color: #F7FAFC;
             }}
-            QTableWidget::item:selected {{
-                background: {Palette.pale_blue};
-                color: {Palette.navy};
+            QTableWidget#PatientStatusMatrix::item:selected {{
+                background: #075B79;
+                color: white;
+                font-weight: 700;
             }}
             QProgressBar#ActivityProgress {{
                 background: #E8EEF3;

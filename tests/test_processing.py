@@ -21,6 +21,26 @@ from archer_processor.services import DatabaseSearchService, ProcessedWorkbookLo
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
 
 
+def test_run_date_comes_from_vpm_folder_and_reaches_review_workbook(tmp_path):
+    input_dir = tmp_path / "2026_09_18_VPM" / "analysis"
+    input_dir.mkdir(parents=True)
+    input_path = input_dir / FIXTURE.name
+    input_path.write_bytes(FIXTURE.read_bytes())
+    output = tmp_path / "review.xlsx"
+
+    result = VariantProcessor().process(input_path, "2026-01-01", output)
+    ExcelReportWriter().write(result, output)
+
+    workbook = openpyxl.load_workbook(output)
+    try:
+        assert result.run_date == "2026-09-18"
+        sheet = workbook["With Artifacts"]
+        headers = [cell.value for cell in sheet[1]]
+        assert sheet.cell(2, headers.index("Run_dato") + 1).value == "2026_09_18"
+    finally:
+        workbook.close()
+
+
 def test_review_workbook_failed_save_preserves_last_good_file(tmp_path, monkeypatch):
     result = VariantProcessor().process(FIXTURE, "2026-09-15", tmp_path / "review.xlsx")
     output = tmp_path / "review.xlsx"
@@ -183,9 +203,8 @@ def test_excel_export_preserves_raw_columns_and_adds_database_columns(tmp_path):
 
     assert headers[0] == "Skip Database Search (X)"
     assert headers[1 : len(raw_headers) + 1] == raw_headers
-    assert headers[len(raw_headers) + 1 :] == ["WHO drivergen", "Run_dato"]
+    assert headers[len(raw_headers) + 1 :] == ["Run_dato"]
     assert not any(header.endswith(" Evidence") for header in headers)
-    assert row[headers.index("WHO drivergen")] == "X"
     assert row[headers.index("Run_dato")] == "2026_07_26"
     assert workbook.sheetnames[-1] == "_Evidence"
     assert row[headers.index("HGVSc")] == variant.raw["HGVSc"]
@@ -242,7 +261,7 @@ def test_review_workbook_sorts_each_patient_by_descending_numeric_percent_af(tmp
         workbook.close()
 
 
-def test_review_workbook_uses_configured_who_genes(tmp_path):
+def test_review_workbook_omits_who_genes(tmp_path):
     output = tmp_path / "review.xlsx"
     result = VariantProcessor().process(FIXTURE, "2026-09-28", output)
     ExcelReportWriter(frozenset({"RUNX1"})).write(result, output)
@@ -250,10 +269,8 @@ def test_review_workbook_uses_configured_who_genes(tmp_path):
     try:
         sheet = workbook["With Artifacts"]
         headers = [cell.value for cell in sheet[1]]
-        symbol_index = headers.index("Symbol")
-        who_index = headers.index("WHO drivergen")
-        for row in sheet.iter_rows(min_row=2, values_only=True):
-            assert row[who_index] == ("X" if row[symbol_index] == "RUNX1" else None)
+        assert "WHO drivergen" not in headers
+        assert headers[-1] == "Run_dato"
     finally:
         workbook.close()
 

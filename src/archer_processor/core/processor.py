@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from archer_processor.knowledge.history import VariantHistoryRepository
 
 from .models import ProcessingResult
+from .run_date import sequencing_date_from_path
 from .rules import FilterEngine
 
 if TYPE_CHECKING:
@@ -28,6 +29,7 @@ class VariantProcessor:
 
     def process(self, input_path: Path, run_date: str, output_path: Path | None = None) -> ProcessingResult:
         started = datetime.now()
+        run_date = sequencing_date_from_path(input_path) or run_date
         variants = self.reader.read(input_path)
         self.filter_engine.apply(variants)
         if self.history:

@@ -172,8 +172,8 @@ It contains exactly two data sheets:
 - **Artifacts Removed** — the corresponding view without known artifacts.
 
 The workbook mirrors the laboratory review layout with frozen identifier columns,
-hidden low-priority technical fields, familiar row colours, WHO driver-gene hits,
-and `Run_dato` at the far right. Database results are kept in a very hidden
+hidden low-priority technical fields, familiar row colours,
+and `Run_dato` at the far right, derived from a `YYYY_MM_DD_VPM` folder when present. Database results are kept in a very hidden
 storage sheet so a review session can be resumed without visible search columns.
 AF remains numeric, is shown as a percentage, and is sorted from highest to
 lowest within each patient.
@@ -186,10 +186,10 @@ Patient reports are named `<DIT>_VPM_Tolkning_APP.xlsx` (for example,
 - **Oversikt** — compact findings such as `ClinVar – Benign`, plus source links,
   a manual **Kommentar** column, and a manual `HSMD -` line. Kommentar and HSMD
   text follow the variant when a workbook is regenerated and AF order changes.
-  A pale-orange merged **D3:K4** box holds patient-level comments and is preserved
+  A pale-orange merged **D3:L4** box holds patient-level comments and is preserved
   on regeneration. Patient number and sequencing date occupy rows 3 and 4.
-  The COSMIC-ID column shows **ID** with a link for an Archer ID and
-  **Ikke ID i Archer** otherwise.
+  The WHO driver-gene column sits to the right of gnomAD. The COSMIC-ID column
+  shows the Archer COSMIC ID with a link, or **Ikke ID i Archer** when absent.
 - **MTBP** — the combined MTBP report without the portal/header intro above the Genomics content. The original full screenshot remains in the local evidence directory. The sheet keeps visible gridlines and four light guide rows above the report.
 - **One sheet per variant** — linked compact evidence followed by embedded screenshots with plain, non-linked captions.
 

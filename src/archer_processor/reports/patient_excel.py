@@ -105,6 +105,11 @@ class PatientExcelReportWriter:
         "white": "FFFFFF",
     }
 
+    def __init__(self, who_driver_genes: frozenset[str] | None = None) -> None:
+        self.who_driver_genes = (
+            WHO_DRIVER_GENES if who_driver_genes is None else who_driver_genes
+        )
+
     def write_all(
         self,
         result: ProcessingResult,
@@ -291,21 +296,21 @@ class PatientExcelReportWriter:
         ws = workbook.create_sheet("Oversikt")
         self._base_sheet(ws)
         ws.sheet_properties.tabColor = self.colors["navy"]
-        ws.merge_cells("A1:K2")
+        ws.merge_cells("A1:L2")
         ws["A1"] = f"VPM-tolkning – {patient_id}"
         self._title_style(ws["A1"])
         self._info_row(ws, 3, "DIT/pasientnummer", patient_id, end_column=3)
         self._info_row(ws, 4, "Sekvenseringsdato", result.run_date, end_column=3)
-        ws.merge_cells("D3:K4")
+        ws.merge_cells("D3:L4")
         ws["D3"] = patient_comment
         ws["D3"].alignment = Alignment(vertical="top", wrap_text=True)
-        for row in ws.iter_rows(min_row=3, max_row=4, min_col=4, max_col=11):
+        for row in ws.iter_rows(min_row=3, max_row=4, min_col=4, max_col=12):
             for cell in row:
                 cell.fill = PatternFill("solid", fgColor=self.colors["pale_orange"])
         for row in range(3, 5):
             ws.row_dimensions[row].height = 24
 
-        ws.merge_cells("A6:K6")
+        ws.merge_cells("A6:L6")
         ws["A6"] = "Varianter og signifikant evidens"
         self._section_style(ws["A6"])
         headers = [
@@ -316,6 +321,7 @@ class PatientExcelReportWriter:
             "Kommentar",
             *REPORT_DATABASES,
             "gnomAD AF",
+            "WHO drivergen",
         ]
         for column, header in enumerate(headers, start=1):
             cell = ws.cell(7, column, header)
@@ -346,6 +352,7 @@ class PatientExcelReportWriter:
                     for database in REPORT_DATABASES
                 ],
                 variant.raw.get("gnomAD AF", ""),
+                "X" if (variant.symbol or "").upper() in self.who_driver_genes else "",
             ]
             for column, value in enumerate(values, start=1):
                 cell = ws.cell(row, column, value)
@@ -353,13 +360,13 @@ class PatientExcelReportWriter:
                 cell.alignment = Alignment(vertical="top", wrap_text=True)
             for offset, database in enumerate(REPORT_DATABASES, start=6):
                 items = by_database.get(database, [])
-                if database == "COSMIC" and self._cosmic_id_label(variant) != "ID":
+                if database == "COSMIC" and self._cosmic_id_label(variant) == "Ikke ID i Archer":
                     continue
                 url = items[0].url if items else ""
                 if database == "COSMIC" and not url:
                     url = (
                         "https://cancer.sanger.ac.uk/cosmic/search?q="
-                        + quote(variant.cosmic_id.strip(), safe="")
+                        + quote(self._cosmic_id_label(variant), safe="")
                     )
                 if url and database != "MTBP":
                     ws.cell(row, offset).hyperlink = url
@@ -383,13 +390,13 @@ class PatientExcelReportWriter:
                     else self.colors["pale_blue"]
                 )
             if fill_color:
-                for column in range(1, 12):
+                for column in range(1, 13):
                     ws.cell(row, column).fill = PatternFill(
                         "solid", fgColor=fill_color
                     )
             # Excel does not auto-fit wrapped cells with an explicit height.
             # Allow for wrapping, not just newline characters (HSMD is last).
-            widths = [14, 31, 25, 52, 32, 22, 22, 22, 22, 22, 16]
+            widths = [14, 31, 25, 52, 32, 22, 22, 22, 22, 22, 16, 20]
             lines = max(
                 sum(max(1, len(textwrap.wrap(line, max(1, width - 7))))
                     for line in str(value or "").split("\n"))
@@ -404,15 +411,16 @@ class PatientExcelReportWriter:
         for column in "FGHIJ":
             ws.column_dimensions[column].width = 22
         ws.column_dimensions["K"].width = 16
-        ws.auto_filter.ref = f"A7:K{max(7, 7 + len(variants))}"
+        ws.column_dimensions["L"].width = 20
+        ws.auto_filter.ref = f"A7:L{max(7, 7 + len(variants))}"
         ws.freeze_panes = "A8"
-        ws.print_area = f"A1:K{max(13, 8 + len(variants))}"
+        ws.print_area = f"A1:L{max(13, 8 + len(variants))}"
 
     @staticmethod
     def _cosmic_id_label(variant: VariantRecord) -> str:
         return (
-            "ID"
-            if re.search(r"\b(?:COSM|COSV)\d+\b", variant.cosmic_id or "", re.I)
+            match.group(0).upper()
+            if (match := re.search(r"\b(?:COSM|COSV)\d+\b", variant.cosmic_id or "", re.I))
             else "Ikke ID i Archer"
         )
 

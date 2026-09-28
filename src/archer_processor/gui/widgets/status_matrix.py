@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QItemSelectionModel, Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QAbstractItemView, QHeaderView, QTableWidget, QTableWidgetItem
 
@@ -43,6 +43,11 @@ class StatusMatrix(QTableWidget):
         self.itemActivated.connect(self._emit_activation)
 
     def set_rows(self, rows: Sequence[PatientStatusRow]) -> None:
+        selected_patients = {
+            self.item(index.row(), 0).text()
+            for index in self.selectionModel().selectedRows()
+            if self.item(index.row(), 0) is not None
+        }
         self.setRowCount(0)
         for row_data in rows:
             row = self.rowCount()
@@ -60,6 +65,12 @@ class StatusMatrix(QTableWidget):
                 item.setBackground(QColor(background))
                 item.setForeground(QColor(foreground))
                 self.setItem(row, column, item)
+            if row_data.patient_id in selected_patients:
+                self.selectionModel().select(
+                    self.model().index(row, 0),
+                    QItemSelectionModel.SelectionFlag.Select
+                    | QItemSelectionModel.SelectionFlag.Rows,
+                )
 
     def _emit_activation(self, item: QTableWidgetItem) -> None:
         value = item.data(Qt.ItemDataRole.UserRole)

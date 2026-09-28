@@ -333,6 +333,16 @@ def test_selected_patient_ids_deduplicate_selected_rows(qt_app, tmp_path):
 
     assert window._selected_patient_ids() == [first_patient]
 
+    window._refresh_operations_cockpit()
+    assert window._selected_patient_ids() == [first_patient]
+
+
+def test_input_folder_sets_sequencing_date(qt_app, tmp_path):
+    window = MainWindow()
+    window.input_edit.setText(str(tmp_path / "2026_09_18_VPM" / "variants.tsv"))
+    assert window.run_date.date().toString("yyyy-MM-dd") == "2026-09-18"
+    assert not window.run_date.isEnabled()
+
 
 def test_priority_controls_require_an_explicit_patient_selection(qt_app, tmp_path):
     window = MainWindow()

@@ -5,6 +5,7 @@ import pytest
 from PIL import Image
 
 from archer_processor.io import ArcherTsvReader
+from archer_processor.services.capture_validation import CaptureValidation, IncompleteCaptureError
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
 from archer_processor.services.browser_review import (
     BrowserReviewCancelled,
@@ -31,7 +32,6 @@ from archer_processor.services.browser_review import (
     parse_mtbp_report,
     parse_oncokb_page,
 )
-from archer_processor.services.capture_validation import CaptureValidation
 from archer_processor.services.provider_failures import (
     ProviderFailureKind,
     ProviderLookupError,
@@ -39,6 +39,30 @@ from archer_processor.services.provider_failures import (
 
 
 VALID_CAPTURE = lambda _: CaptureValidation(True, "ok", 800, 500, 10.0)
+
+
+def test_mtbp_variant_capture_uses_direct_fallback_when_report_crop_fails(tmp_path, monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+    full_report = tmp_path / "patient-report.png"
+    direct_image = tmp_path / "variant.png"
+    attempts = []
+
+    def failed_crop(*args):
+        attempts.append("crop")
+        raise IncompleteCaptureError(CaptureValidation(False, "missing row", 0, 0, 0.0))
+
+    def direct_capture(*args):
+        attempts.append("direct")
+        return direct_image
+
+    monkeypatch.setattr(service, "_crop_mtbp_variant_from_report", failed_crop)
+    monkeypatch.setattr(service, "_capture_mtbp_variant_screenshot", direct_capture)
+
+    assert service._capture_mtbp_variant_with_fallback(
+        object(), variant, tmp_path, full_report
+    ) == direct_image
+    assert attempts == ["crop", "direct"]
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_variants.tsv"

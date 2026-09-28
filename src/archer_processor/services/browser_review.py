@@ -1878,10 +1878,9 @@ class BrowserReviewService:
                         full_report_path is not None and evidence.raw.get("gene_candidate_count", 0) > 0
                     ):
                         try:
-                            if full_report_path is not None:
-                                screenshot_path = self._crop_mtbp_variant_from_report(page, variant, artifact_directory, full_report_path)
-                            else:
-                                screenshot_path = self._capture_mtbp_variant_screenshot(page, variant, artifact_directory)
+                            screenshot_path = self._capture_mtbp_variant_with_fallback(
+                                page, variant, artifact_directory, full_report_path
+                            )
                         except IncompleteCaptureError as exc:
                             if evidence.status == "found":
                                 evidence.status = "partial_capture"
@@ -2211,14 +2210,9 @@ class BrowserReviewService:
                         full_report_path is not None and evidence.raw.get("gene_candidate_count", 0) > 0
                     ):
                         try:
-                            if full_report_path is not None:
-                                screenshot_path = self._crop_mtbp_variant_from_report(
-                                    page, variant, artifact_directory, full_report_path
-                                )
-                            else:
-                                screenshot_path = self._capture_mtbp_variant_screenshot(
-                                    page, variant, artifact_directory
-                                )
+                            screenshot_path = self._capture_mtbp_variant_with_fallback(
+                                page, variant, artifact_directory, full_report_path
+                            )
                         except IncompleteCaptureError as exc:
                             if evidence.status == "found":
                                 evidence.status = "partial_capture"
@@ -3455,6 +3449,33 @@ class BrowserReviewService:
                 stable_reads = 0
             previous = current
             page.wait_for_timeout(500)
+
+    def _capture_mtbp_variant_with_fallback(
+        self,
+        page: Any,
+        variant: VariantRecord,
+        artifact_directory: Path,
+        full_report_path: Path | None,
+    ) -> Path:
+        if full_report_path is None:
+            return self._capture_mtbp_variant_screenshot(page, variant, artifact_directory)
+        try:
+            return self._crop_mtbp_variant_from_report(
+                page, variant, artifact_directory, full_report_path
+            )
+        except IncompleteCaptureError as crop_error:
+            try:
+                return self._capture_mtbp_variant_screenshot(
+                    page, variant, artifact_directory
+                )
+            except IncompleteCaptureError as direct_error:
+                raise IncompleteCaptureError(
+                    CaptureValidation(
+                        False,
+                        f"{crop_error.validation.reason}; direct:{direct_error.validation.reason}",
+                        0, 0, 0.0,
+                    )
+                ) from direct_error
 
     def _capture_mtbp_variant_screenshot(
         self,

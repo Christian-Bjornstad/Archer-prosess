@@ -601,7 +601,7 @@ class ExcelReportWriter:
             (["Skip Database Search (X)"] if include_selection else [])
             + raw_columns
             + [f"{database} Evidence" for database in database_columns]
-            + (["WHO drivergen", "Run_dato"] if run_date else [])
+            + (["Run_dato"] if run_date else [])
         )
         self._headers(ws, headers)
         raw_offset = 1 if include_selection else 0
@@ -635,7 +635,6 @@ class ExcelReportWriter:
                 ],
                 *[self._evidence_cell(evidence_by_database.get(database, [])) for database in database_columns],
                 *([
-                    "X" if (variant.symbol or "").upper() in self.who_driver_genes else "",
                     run_date.replace("-", "_"),
                 ] if run_date else []),
             ]
