@@ -83,11 +83,14 @@ Manual **Sign In** windows still open visibly. Variant-to-variant pacing remains
 randomized according to Settings; switching between providers uses a fixed 3-second
 transition.
 
-The desktop interface is organised around four pages: **Import**, **Variants**,
-**Evidence**, and **Settings**. A persistent progress strip
+The desktop interface is organised around three pages: **Import**, **Evidence**,
+and **Settings**. The review workbook opens in the computer's spreadsheet app;
+the desktop interface does not duplicate its variant grid. A persistent progress strip
 distinguishes Ready, Running, Paused, Interrupted, Complete, Retry available, and
 Report save pending. The entire Evidence workspace scrolls, including **Run queue**,
 source selection, **Patient progress**, browser sessions and report controls.
+Settings accepts an optional local `.xlsx`, `.csv`, or `.txt` WHO driver-gene list;
+an empty path uses the bundled list, while an invalid path blocks saving with a clear error.
 There is no duplicate activity panel or evidence matrix; the copyable, timestamped
 log lives in **Import**. Resume incomplete work from the main queue controls.
 Startup can offer

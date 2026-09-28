@@ -2,10 +2,45 @@ import json
 
 from archer_processor.core import default_artifact_rules
 from archer_processor.services import AppSettings
+from archer_processor.reports.who_genes import WHO_DRIVER_GENES, load_who_driver_genes
+from openpyxl import Workbook
+import pytest
 
 
 def test_automated_edge_runs_minimized_by_default():
     assert AppSettings().browser_background is True
+
+
+def test_who_driver_gene_file_accepts_excel_and_rejects_missing_file(tmp_path):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "WHO"
+    sheet.append(["Gen", "Merknad"])
+    sheet.append(["TP53", "driver"])
+    sheet.append(["RUNX1", "driver"])
+    path = tmp_path / "who.xlsx"
+    workbook.save(path)
+
+    assert load_who_driver_genes() == WHO_DRIVER_GENES
+    assert load_who_driver_genes(path) == frozenset({"TP53", "RUNX1"})
+    with pytest.raises(ValueError, match="finnes ikke"):
+        load_who_driver_genes(tmp_path / "mangler.xlsx")
+
+
+def test_who_driver_gene_path_persists(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(AppSettings, "config_path", classmethod(lambda cls: config_path))
+    monkeypatch.setattr(
+        "archer_processor.services.settings.credentials.save_password", lambda *args: None,
+    )
+    AppSettings(who_driver_genes_path="C:/data/who.xlsx").save()
+    assert AppSettings.load().who_driver_genes_path == "C:/data/who.xlsx"
+
+
+def test_who_driver_genes_accepts_semicolon_csv(tmp_path):
+    path = tmp_path / "who.csv"
+    path.write_text("Gen;Kilde\nTP53;WHO\nRUNX1;WHO\n", encoding="utf-8")
+    assert load_who_driver_genes(path) == frozenset({"TP53", "RUNX1"})
 
 
 def test_default_browser_delay_range_is_three_to_eight_seconds():

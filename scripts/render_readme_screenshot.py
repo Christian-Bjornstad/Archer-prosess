@@ -40,7 +40,7 @@ def main():
     window._set_ready()
     window._refresh_operations_cockpit()
     window._update_evidence_summary()
-    window._switch_page(2)
+    window._switch_page(1)
     window.resize(1320, 1120)
     window.show()
     app.processEvents()

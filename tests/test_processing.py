@@ -242,6 +242,22 @@ def test_review_workbook_sorts_each_patient_by_descending_numeric_percent_af(tmp
         workbook.close()
 
 
+def test_review_workbook_uses_configured_who_genes(tmp_path):
+    output = tmp_path / "review.xlsx"
+    result = VariantProcessor().process(FIXTURE, "2026-09-28", output)
+    ExcelReportWriter(frozenset({"RUNX1"})).write(result, output)
+    workbook = openpyxl.load_workbook(output)
+    try:
+        sheet = workbook["With Artifacts"]
+        headers = [cell.value for cell in sheet[1]]
+        symbol_index = headers.index("Symbol")
+        who_index = headers.index("WHO drivergen")
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            assert row[who_index] == ("X" if row[symbol_index] == "RUNX1" else None)
+    finally:
+        workbook.close()
+
+
 def test_database_selection_sheet_round_trips_x_marks(tmp_path):
     output = tmp_path / "review.xlsx"
     result = VariantProcessor().process(FIXTURE, "2026-07-26", output)

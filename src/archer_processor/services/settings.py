@@ -12,6 +12,7 @@ from archer_processor.services import credentials
 @dataclass(slots=True)
 class AppSettings:
     default_output_dir: str = str(Path.home() / "Desktop")
+    who_driver_genes_path: str = ""
     clinvar_api_key: str = ""
     cosmic_email: str = ""
     cosmic_password: str = field(default="", repr=False, metadata={"persist": False})
@@ -144,7 +145,9 @@ class AppSettings:
         for item in fields(self):
             if item.metadata.get("persist") is False:
                 data.pop(item.name, None)
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        temporary.replace(path)
         credentials.save_password("OncoKB", self.oncokb_email, self.oncokb_password)
         credentials.save_password("COSMIC", self.cosmic_email, self.cosmic_password)
         credentials.save_password("Franklin", self.franklin_email, self.franklin_password)

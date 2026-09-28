@@ -11,11 +11,10 @@ from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import QDate, QObject, Qt, QThread, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPixmap
+from PyQt6.QtGui import QDesktopServices, QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
-    QButtonGroup,
     QComboBox,
     QDateEdit,
     QFileDialog,
@@ -34,7 +33,6 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
-    QTabWidget,
     QStatusBar,
     QTableWidget,
     QTableWidgetItem,
@@ -46,8 +44,6 @@ from PyQt6.QtWidgets import (
 from archer_processor.core import DatabaseEvidence, FilterEngine, ProcessingResult, VariantProcessor, default_artifact_rules, production_rules
 from archer_processor.core.highlights import (
     is_automatic_database_skip,
-    priority_warning,
-    variant_highlight,
 )
 from archer_processor.io import ArcherTsvReader
 from archer_processor.reports import (
@@ -56,6 +52,7 @@ from archer_processor.reports import (
     PatientReportCoordinator,
     PatientReportOutcome,
 )
+from archer_processor.reports.who_genes import load_who_driver_genes
 from archer_processor.services import (
     AppSettings,
     BROWSER_DATABASES,
@@ -106,7 +103,9 @@ class ProcessingWorker(QObject):
             processor = VariantProcessor(filter_engine=filter_engine)
             result = processor.process(self.input_path, self.run_date, self.output_path)
             self.status.emit("Writing review workbook")
-            ExcelReportWriter().write(result, self.output_path, hide_excluded=self.hide_excluded)
+            ExcelReportWriter(
+                load_who_driver_genes(self.settings.who_driver_genes_path)
+            ).write(result, self.output_path, hide_excluded=self.hide_excluded)
             self.finished.emit(result)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -637,18 +636,20 @@ class WorkbookWriteWorker(QObject):
         *,
         hide_excluded: bool,
         database_skip_keys: set[str],
+        who_driver_genes_path: str = "",
     ) -> None:
         super().__init__()
         self.result = deepcopy(result)
         self.evidence = deepcopy(evidence)
         self.hide_excluded = bool(hide_excluded)
         self.database_skip_keys = set(database_skip_keys)
+        self.who_driver_genes_path = who_driver_genes_path
 
     def run(self) -> None:
         try:
             if self.result.output_path is None:
                 raise RuntimeError("Evidence workbook output path is missing.")
-            path = ExcelReportWriter().write(
+            path = ExcelReportWriter(load_who_driver_genes(self.who_driver_genes_path)).write(
                 self.result,
                 self.result.output_path,
                 self.evidence,
@@ -1277,7 +1278,6 @@ class MainWindow(QMainWindow):
         self.tabs = QStackedWidget()
         self.tabs.setObjectName("WorkspacePages")
         self.tabs.addWidget(self._processing_tab())
-        self.tabs.addWidget(self._review_tab())
         self.tabs.addWidget(self._database_tab())
         self.tabs.addWidget(self._settings_tab_v2())
         layout.addWidget(self.tabs, 1)
@@ -1299,7 +1299,6 @@ class MainWindow(QMainWindow):
     def _switch_page(self, index: int) -> None:
         pages = [
             ("IMPORT", "Analysis workspace", "Start from a variant dataset or resume a processed review workbook"),
-            ("VARIANTS", "Variant review", "Filter, inspect, and prioritise calls for evidence research"),
             ("EVIDENCE", "Evidence search", "Research selected variants across clinical and cancer databases"),
             ("SETTINGS", "Configuration", "Manage local files, provider access, and search safeguards"),
         ]
@@ -1367,8 +1366,13 @@ class MainWindow(QMainWindow):
         self.process_btn.setObjectName("PrimaryButton")
         self.process_btn.setEnabled(False)
         self.process_btn.clicked.connect(self._start_processing)
+        self.open_workbook_btn = QPushButton("Åpne Excel-fil")
+        self.open_workbook_btn.setObjectName("OutlineButton")
+        self.open_workbook_btn.setEnabled(False)
+        self.open_workbook_btn.clicked.connect(self._open_review_workbook)
         actions.addStretch()
         actions.addWidget(self.validate_btn)
+        actions.addWidget(self.open_workbook_btn)
         actions.addWidget(self.process_btn)
         layout.addLayout(actions)
 
@@ -1469,48 +1473,6 @@ class MainWindow(QMainWindow):
         layout.addStretch()
         self.import_scroll.setWidget(content)
         page_layout.addWidget(self.import_scroll)
-        return page
-
-    def _review_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        self.variant_toolbar = QFrame()
-        self.variant_toolbar.setObjectName("VariantToolbar")
-        toolbar_layout = QHBoxLayout(self.variant_toolbar)
-        toolbar_layout.setContentsMargins(14, 10, 14, 10)
-        self.review_filter_edit = QLineEdit()
-        self.review_filter_edit.setPlaceholderText("Filter sample, gene, HGVS, or warning")
-        self.review_filter_edit.setClearButtonEnabled(True)
-        self.review_filter_edit.textChanged.connect(self._apply_review_filters)
-        self.review_decision_combo = QComboBox()
-        self.review_decision_combo.addItems(["All decisions", "Included", "Excluded"])
-        self.review_decision_combo.currentIndexChanged.connect(self._apply_review_filters)
-        self.review_count_label = QLabel("No variants loaded")
-        self.review_count_label.setObjectName("HelperText")
-        self.variant_counters = QLabel("0 total · 0 included · 0 excluded")
-        self.variant_counters.setObjectName("VariantCounters")
-        toolbar_layout.addWidget(QLabel("Find variants"))
-        toolbar_layout.addWidget(self.review_filter_edit, 1)
-        toolbar_layout.addWidget(self.review_decision_combo)
-        toolbar_layout.addWidget(self.variant_counters)
-        toolbar_layout.addWidget(self.review_count_label)
-        layout.addWidget(self.variant_toolbar)
-        self.variant_table = QTableWidget(0, 7)
-        self.variant_table.setHorizontalHeaderLabels(
-            ["Sample", "Gene", "HGVSc", "AF", "Depth", "Decision", "Warnings"]
-        )
-        self.variant_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.variant_table.setAlternatingRowColors(True)
-        self.variant_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.variant_table.setMinimumHeight(420)
-        layout.addWidget(self.variant_table, 1)
-        self.variant_empty_state = QLabel(
-            "No variants match the current filters. Clear filters to restore all rows."
-        )
-        self.variant_empty_state.setObjectName("VariantEmptyState")
-        self.variant_empty_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.variant_empty_state.hide()
-        layout.addWidget(self.variant_empty_state)
         return page
 
     def _database_tab(self) -> QWidget:
@@ -1754,6 +1716,20 @@ class MainWindow(QMainWindow):
         local_grid.addWidget(QLabel("Default report folder"), 0, 0)
         local_grid.addWidget(self.output_dir_edit, 0, 1)
         local_grid.addWidget(dir_btn, 0, 2)
+        self.who_genes_edit = QLineEdit(self.settings.who_driver_genes_path)
+        self.who_genes_edit.setPlaceholderText("Innebygd WHO-drivergenliste brukes når feltet er tomt")
+        self.who_genes_edit.setAccessibleName("WHO-drivergenfil")
+        self.who_genes_edit.editingFinished.connect(self._validate_who_path)
+        who_btn = QPushButton("Velg fil")
+        who_btn.clicked.connect(self._browse_who_genes)
+        local_grid.addWidget(QLabel("WHO-drivergener"), 1, 0)
+        local_grid.addWidget(self.who_genes_edit, 1, 1)
+        local_grid.addWidget(who_btn, 1, 2)
+        self.who_path_status = QLabel()
+        self.who_path_status.setObjectName("HelperText")
+        self.who_path_status.setWordWrap(True)
+        local_grid.addWidget(self.who_path_status, 2, 1, 1, 2)
+        self._validate_who_path()
         layout.addWidget(local_group)
 
         access_group = QGroupBox("Browser access")
@@ -1927,10 +1903,40 @@ class MainWindow(QMainWindow):
         if path:
             self.output_edit.setText(path if path.lower().endswith(".xlsx") else f"{path}.xlsx")
 
+    def _open_review_workbook(self) -> None:
+        path = self.result.output_path if self.result else None
+        if path is None or not Path(path).is_file():
+            QMessageBox.warning(self, "Excel-fil mangler", "Opprett eller åpne en review-fil først.")
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path).resolve()))):
+            QMessageBox.warning(self, "Kunne ikke åpne fil", f"Åpne filen manuelt:\n{path}")
+
     def _browse_output_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Select Default Output Folder", self.output_dir_edit.text())
         if path:
             self.output_dir_edit.setText(path)
+
+    def _browse_who_genes(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Velg WHO-drivergenfil", self.who_genes_edit.text(),
+            "Genlister (*.xlsx *.csv *.txt)",
+        )
+        if path:
+            self.who_genes_edit.setText(path)
+            self._validate_who_path()
+
+    def _validate_who_path(self) -> bool:
+        path = self.who_genes_edit.text().strip()
+        try:
+            count = len(load_who_driver_genes(path))
+        except (OSError, ValueError) as exc:
+            self.who_path_status.setText(str(exc))
+            self.who_path_status.setStyleSheet(f"color: {Palette.red};")
+            return False
+        source = "Innebygd liste" if not path else Path(path).name
+        self.who_path_status.setText(f"{source}: {count} drivergener. Brukes i review-filen.")
+        self.who_path_status.setStyleSheet(f"color: {Palette.green};")
+        return True
 
     def _load_artifact_table(self, artifacts: list[dict[str, str]]) -> None:
         self.artifact_table.setRowCount(0)
@@ -1993,8 +1999,9 @@ class MainWindow(QMainWindow):
         if output_path.suffix.lower() != ".xlsx":
             output_path = output_path.with_suffix(".xlsx")
             self.output_edit.setText(str(output_path))
+        if not self._save_settings(silent=True):
+            return
         self._start_run_journal(output_path.parent, "processing")
-        self._save_settings(silent=True)
         self._set_busy("Processing")
         worker = ProcessingWorker(
             input_path,
@@ -2026,7 +2033,7 @@ class MainWindow(QMainWindow):
         self.selection_status.setText("No skip list loaded")
         self._log(f"Complete: {result.total_count} variants, {len(result.included)} included, {len(result.excluded)} excluded")
         self._refresh_metrics()
-        self._refresh_variant_table()
+        self.open_workbook_btn.setEnabled(True)
         self.search_btn.setEnabled(True)
         self.search_btn.setText("Run Evidence Search")
         self.browser_review_btn.setEnabled(True)
@@ -2065,7 +2072,8 @@ class MainWindow(QMainWindow):
     ) -> None:
         if not self.result:
             return
-        self._save_settings(silent=True)
+        if not self._save_settings(silent=True):
+            return
         databases = [name for name, check in self.db_checks.items() if check.isChecked()]
         if not databases:
             QMessageBox.warning(self, "No sources", "Select at least one evidence source.")
@@ -2181,7 +2189,8 @@ class MainWindow(QMainWindow):
 
     def _start_browser_login(self) -> None:
         database = self.browser_database_combo.currentText()
-        self._save_settings(silent=True)
+        if not self._save_settings(silent=True):
+            return
         self._set_busy(f"{database} sign-in")
         worker = BrowserLoginWorker(database, self.settings)
         thread = QThread(self)
@@ -2205,7 +2214,8 @@ class MainWindow(QMainWindow):
     def _start_browser_review(self) -> None:
         if not self.result:
             return
-        self._save_settings(silent=True)
+        if not self._save_settings(silent=True):
+            return
         databases = self._selected_browser_databases()
         if not databases:
             QMessageBox.warning(
@@ -2443,7 +2453,7 @@ class MainWindow(QMainWindow):
             "Resume Incomplete Search" if self.evidence else "Run Evidence Search"
         )
         self._refresh_metrics()
-        self._refresh_variant_table()
+        self.open_workbook_btn.setEnabled(True)
         self._refresh_operations_cockpit()
         self.load_selection_btn.setEnabled(True)
         self._remember_recent_workbook(workbook_path)
@@ -2460,7 +2470,7 @@ class MainWindow(QMainWindow):
             self,
             "Analysis restored",
             f"Loaded {self.result.total_count} variants and {evidence_count} evidence result(s).\n\n"
-            "The analysis is ready in Variants and Evidence.",
+            "The analysis is ready in Evidence.",
         )
 
     def _remember_recent_workbook(self, workbook_path: Path) -> None:
@@ -2817,7 +2827,7 @@ class MainWindow(QMainWindow):
     def _write_evidence_workbook(self) -> None:
         if not self.result or not self.result.output_path:
             return
-        ExcelReportWriter().write(
+        ExcelReportWriter(load_who_driver_genes(self.settings.who_driver_genes_path)).write(
             self.result,
             self.result.output_path,
             self.evidence,
@@ -2842,6 +2852,7 @@ class MainWindow(QMainWindow):
             self.evidence,
             hide_excluded=self.hide_excluded.isChecked(),
             database_skip_keys=self.database_skip_keys,
+            who_driver_genes_path=self.settings.who_driver_genes_path,
         )
         thread = QThread(self)
         worker.moveToThread(thread)
@@ -2956,8 +2967,27 @@ class MainWindow(QMainWindow):
             self._log(f"ERROR: {message}")
         QMessageBox.critical(self, "Error", message)
 
-    def _save_settings(self, silent: bool = False) -> None:
-        self.settings.default_output_dir = self.output_dir_edit.text()
+    def _save_settings(self, silent: bool = False) -> bool:
+        output_dir = self.output_dir_edit.text().strip()
+        who_path = self.who_genes_edit.text().strip()
+        try:
+            if not output_dir or not Path(output_dir).expanduser().is_dir():
+                raise ValueError("Velg en eksisterende mappe for rapporter.")
+            output_dir = str(Path(output_dir).expanduser().resolve())
+            if who_path:
+                who_path = str(Path(who_path).expanduser().resolve())
+            load_who_driver_genes(who_path)
+        except (OSError, ValueError) as exc:
+            self._validate_who_path()
+            QMessageBox.warning(self, "Ugyldige filinnstillinger", str(exc))
+            self._switch_page(2)
+            (self.output_dir_edit if not output_dir or not Path(output_dir).expanduser().is_dir()
+             else self.who_genes_edit).setFocus()
+            return False
+        self.settings.default_output_dir = output_dir
+        self.settings.who_driver_genes_path = who_path
+        self.output_dir_edit.setText(output_dir)
+        self.who_genes_edit.setText(who_path)
         self.settings.clinvar_api_key = ""
         self.settings.cosmic_email = self.cosmic_email_edit.text()
         self.settings.cosmic_password = self.cosmic_password_edit.text()
@@ -2984,19 +3014,18 @@ class MainWindow(QMainWindow):
         self.settings.mtbp_cancer_type = self.mtbp_cancer_type_edit.text().strip() or "Blood"
         self.settings.artifact_rules = self._artifact_rules_from_table()
         self.settings.enabled_databases = [name for name, check in self.db_checks.items() if check.isChecked()]
-        self.settings.save()
+        try:
+            self.settings.save()
+        except OSError as exc:
+            QMessageBox.warning(self, "Kunne ikke lagre innstillinger", str(exc))
+            return False
         if not silent:
             self._log("Settings saved")
+        return True
 
     def _refresh_metrics(self) -> None:
         if not self.result:
             return
-        self.variant_counters.setText(
-            f"{self.result.total_count} total · "
-            f"{len(self.result.included)} included · "
-            f"{len(self.result.excluded)} excluded"
-        )
-        self._apply_review_filters()
         self._update_evidence_summary()
         self._refresh_operations_cockpit()
 
@@ -3055,66 +3084,6 @@ class MainWindow(QMainWindow):
 
     def _activity_received(self, activity: RunActivity) -> None:
         self._log(activity.message or activity.action)
-
-    def _refresh_variant_table(self) -> None:
-        if not self.result:
-            return
-        self.variant_table.setRowCount(0)
-        for variant in self.result.variants:
-            row = self.variant_table.rowCount()
-            self.variant_table.insertRow(row)
-            values = [
-                variant.sample,
-                variant.symbol,
-                variant.hgvsc,
-                "" if variant.af is None else f"{variant.af:.2%}",
-                "" if variant.depth is None else str(variant.depth),
-                variant.decision,
-                "; ".join(
-                    value
-                    for value in [*variant.warnings, priority_warning(variant)]
-                    if value
-                ),
-            ]
-            for col, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                highlight = variant_highlight(variant)
-                if highlight == "artifact":
-                    item.setBackground(QColor(Palette.artifact_orange))
-                elif highlight == "artifact_light":
-                    item.setBackground(QColor(Palette.artifact_light_orange))
-                elif highlight == "germline":
-                    item.setBackground(QColor(Palette.strong_green))
-                elif highlight == "germline_low_af":
-                    item.setBackground(QColor(Palette.pale_green))
-                self.variant_table.setItem(row, col, item)
-        self._apply_review_filters()
-
-    def _apply_review_filters(self) -> None:
-        if not hasattr(self, "variant_table"):
-            return
-        query = self.review_filter_edit.text().strip().casefold()
-        mode = self.review_decision_combo.currentText()
-        visible = 0
-        for row in range(self.variant_table.rowCount()):
-            row_text = " ".join(
-                self._table_text(self.variant_table, row, column)
-                for column in range(self.variant_table.columnCount())
-            ).casefold()
-            decision = self._table_text(self.variant_table, row, 5).casefold()
-            mode_matches = (
-                mode == "All decisions"
-                or (mode == "Included" and decision == "included")
-                or (mode == "Excluded" and decision == "excluded")
-            )
-            show = (not query or query in row_text) and mode_matches
-            self.variant_table.setRowHidden(row, not show)
-            visible += int(show)
-        total = self.variant_table.rowCount()
-        self.review_count_label.setText(
-            f"Showing {visible} of {total}" if total else "No variants loaded"
-        )
-        self.variant_empty_state.setVisible(total > 0 and visible == 0)
 
     def _update_evidence_summary(self) -> None:
         if not hasattr(self, "evidence_summary"):
@@ -3486,7 +3455,7 @@ class MainWindow(QMainWindow):
                 border: 1px solid {Palette.border};
                 border-radius: 8px;
             }}
-            QFrame#ToolbarCard, QFrame#VariantToolbar, QFrame#RunProgressCard,
+            QFrame#ToolbarCard, QFrame#RunProgressCard,
             QFrame#EvidenceCommand {{
                 background: {Palette.panel};
                 border: 1px solid {Palette.border};
@@ -3539,20 +3508,6 @@ class MainWindow(QMainWindow):
             QLabel#HelperText {{
                 color: {Palette.muted};
                 font-size: 12px;
-            }}
-            QLabel#VariantCounters {{
-                color: {Palette.navy};
-                background: {Palette.pale_blue};
-                border-radius: 6px;
-                padding: 6px 9px;
-                font-weight: 700;
-            }}
-            QLabel#VariantEmptyState {{
-                color: {Palette.muted};
-                background: {Palette.panel};
-                border: 1px dashed {Palette.border};
-                border-radius: 8px;
-                padding: 18px;
             }}
             QLabel#FieldLabel {{
                 color: {Palette.navy};

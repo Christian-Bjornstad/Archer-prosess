@@ -53,7 +53,7 @@ def test_primary_and_secondary_text_actions_are_at_least_44px(qt_app):
 
 def test_evidence_actions_fit_target_window_sizes(qt_app):
     window = MainWindow()
-    window._switch_page(2)
+    window._switch_page(1)
     window.show()
     for width, height in [(1120, 720), (1440, 900)]:
         window.resize(width, height)
@@ -72,7 +72,7 @@ def test_evidence_actions_fit_target_window_sizes(qt_app):
 
 def test_entire_evidence_page_scrolls_and_import_keeps_log(qt_app):
     window = MainWindow()
-    window._switch_page(2)
+    window._switch_page(1)
     window.resize(1120, 720)
     window.show()
     qt_app.processEvents()
@@ -202,36 +202,17 @@ def test_settings_are_grouped_into_four_operator_sections(qt_app):
     assert not hasattr(window, "history_edit")
 
 
-def test_variant_workspace_has_no_external_history_column(qt_app):
-    window = MainWindow()
-
-    headers = [
-        window.variant_table.horizontalHeaderItem(column).text()
-        for column in range(window.variant_table.columnCount())
-    ]
-
-    assert headers == [
-        "Sample",
-        "Gene",
-        "HGVSc",
-        "AF",
-        "Depth",
-        "Decision",
-        "Warnings",
-    ]
-
-
 def test_sidebar_navigation_switches_workspace_pages(qt_app):
     window = MainWindow()
 
-    assert len(window.nav_buttons) == 4
+    assert len(window.nav_buttons) == 3
     assert window.nav_buttons[0].isChecked()
     assert window.tabs.currentIndex() == 0
 
-    window._switch_page(2)
+    window._switch_page(1)
 
-    assert window.tabs.currentIndex() == 2
-    assert window.nav_buttons[2].isChecked()
+    assert window.tabs.currentIndex() == 1
+    assert window.nav_buttons[1].isChecked()
     assert window.page_title.text() == "Evidence search"
     assert window.page_eyebrow.text().endswith("EVIDENCE")
 
@@ -241,7 +222,7 @@ def test_navigation_uses_short_labels_without_numbered_workflow_copy(qt_app):
 
     labels = [button.text() for button in window.navigation.buttons]
 
-    assert labels == ["Import", "Variants", "Evidence", "Settings"]
+    assert labels == ["Import", "Evidence", "Settings"]
     assert all(not re.match(r"\d", label) for label in labels)
 
 
@@ -452,7 +433,7 @@ def test_existing_all_patient_search_button_keeps_no_argument_signal(
     for check in window.db_checks.values():
         check.setChecked(False)
     warnings = []
-    monkeypatch.setattr(window, "_save_settings", lambda **kwargs: None)
+    monkeypatch.setattr(window, "_save_settings", lambda **kwargs: True)
     monkeypatch.setattr(
         "archer_processor.gui.app.QMessageBox.warning",
         lambda *args: warnings.append(args),
@@ -575,27 +556,10 @@ def test_patient_report_worker_emits_progress_per_patient(qt_app, tmp_path):
     assert [outcome.patient_id for outcome in finished[0]] == ["P2", "P1"]
 
 
-def test_review_filters_and_search_progress_are_visible(qt_app, tmp_path):
+def test_no_excel_preview_and_search_progress_is_visible(qt_app, tmp_path):
     window = MainWindow()
-    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
-    window.result = VariantProcessor().process(
-        fixture, "2026-08-01", tmp_path / "review.xlsx"
-    )
-    window._refresh_variant_table()
-
-    assert not hasattr(window, "review_flag_note")
-    assert "Review flags" not in [
-        window.review_decision_combo.itemText(index)
-        for index in range(window.review_decision_combo.count())
-    ]
-
-    window.review_filter_edit.setText(window.result.variants[0].symbol)
-    assert "Showing" in window.review_count_label.text()
-    assert any(
-        not window.variant_table.isRowHidden(row)
-        for row in range(window.variant_table.rowCount())
-    )
-
+    assert not hasattr(window, "variant_table")
+    assert window.tabs.count() == 3
     window._update_run_progress(2, 5, "Patient 3 is running")
     assert not window.run_progress.isHidden()
     assert window.run_progress.bar.value() == 2
@@ -603,75 +567,20 @@ def test_review_filters_and_search_progress_are_visible(qt_app, tmp_path):
     assert window.run_progress.detail.text() == "Patient 3 is running"
 
 
-def test_variant_workspace_prioritises_toolbar_and_table(qt_app, tmp_path):
+def test_invalid_who_path_is_rejected_in_settings(qt_app, tmp_path, monkeypatch):
     window = MainWindow()
-    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
-    window.result = VariantProcessor().process(
-        fixture, "2026-08-12", tmp_path / "review.xlsx"
+    window.output_dir_edit.setText(str(tmp_path))
+    window.who_genes_edit.setText(str(tmp_path / "mangler.xlsx"))
+    assert not window._validate_who_path()
+    assert "finnes ikke" in window.who_path_status.text()
+    warnings = []
+    monkeypatch.setattr(
+        "archer_processor.gui.app.QMessageBox.warning",
+        lambda *args: warnings.append(args),
     )
-    for index, variant in enumerate(window.result.variants):
-        variant.decision = "included" if index < 3 else "excluded"
-    window._refresh_metrics()
-    window._refresh_variant_table()
-
-    assert window.variant_toolbar.objectName() == "VariantToolbar"
-    assert window.variant_counters.text() == "5 total · 3 included · 2 excluded"
-    assert window.variant_table.minimumHeight() >= 420
-    assert not hasattr(window, "total_card")
-
-
-def test_filtered_empty_state_explains_how_to_restore_rows(qt_app, tmp_path):
-    window = MainWindow()
-    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
-    window.result = VariantProcessor().process(
-        fixture, "2026-08-12", tmp_path / "review.xlsx"
-    )
-    window._refresh_variant_table()
-
-    window.review_filter_edit.setText("NO_SUCH_VARIANT")
-
-    assert not window.variant_empty_state.isHidden()
-    assert "Clear filters" in window.variant_empty_state.text()
-
-
-def test_variant_table_uses_distinct_strong_and_weak_germline_green(qt_app, tmp_path):
-    window = MainWindow()
-    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
-    window.result = VariantProcessor().process(
-        fixture, "2026-08-11", tmp_path / "review.xlsx"
-    )
-    window.result.variants[0].raw["Germ"] = 11
-    window.result.variants[0].af = 0.35
-    window.result.variants[0].artifact_status = ""
-    window.result.variants[0].matched_rules = []
-    window.result.variants[1].raw["Germ"] = 11
-    window.result.variants[1].af = 0.3499
-    window.result.variants[1].artifact_status = ""
-    window.result.variants[1].matched_rules = []
-
-    window._refresh_variant_table()
-
-    assert window.variant_table.item(0, 0).background().color().name() == "#cdedd8"
-    assert window.variant_table.item(1, 0).background().color().name() == "#e9f6ef"
-
-
-def test_variant_table_uses_distinct_asxl1_artifact_oranges(qt_app, tmp_path):
-    window = MainWindow()
-    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
-    window.result = VariantProcessor().process(
-        fixture, "2026-09-03", tmp_path / "review.xlsx"
-    )
-    strong = window.result.variants[1]
-    strong.af = 0.05
-    strong.matched_rules = ["asxl1_1934dup_artifact"]
-    light = window.result.variants[2]
-    light.af = 0.0525
-    light.matched_rules = ["asxl1_1934dup_artifact"]
-
-    window._refresh_variant_table()
-
-    assert window.variant_table.item(1, 0).background().color().name() == "#ffc000"
-    assert window.variant_table.item(2, 0).background().color().name() == "#f4b183"
+    assert window._save_settings(silent=True) is False
+    assert window.tabs.currentIndex() == 2
+    assert "finnes ikke" in warnings[0][2]
 
 
 def test_locked_workbook_shows_warning_without_raising(qt_app, tmp_path, monkeypatch):

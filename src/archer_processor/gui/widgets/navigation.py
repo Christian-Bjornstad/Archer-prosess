@@ -47,7 +47,6 @@ class NavigationRail(QFrame):
         for index, (label, icon_name) in enumerate(
             (
                 ("Import", "document"),
-                ("Variants", "table"),
                 ("Evidence", "search"),
                 ("Settings", "settings"),
             )

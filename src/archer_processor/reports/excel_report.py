@@ -91,6 +91,9 @@ REFERENCE_HIDDEN_COLUMNS = {
 
 
 class ExcelReportWriter:
+    def __init__(self, who_driver_genes: frozenset[str] | None = None) -> None:
+        self.who_driver_genes = WHO_DRIVER_GENES if who_driver_genes is None else who_driver_genes
+
     colors = {
         "navy": "163B5C",
         "blue": "2F75B5",
@@ -632,7 +635,7 @@ class ExcelReportWriter:
                 ],
                 *[self._evidence_cell(evidence_by_database.get(database, [])) for database in database_columns],
                 *([
-                    "X" if (variant.symbol or "").upper() in WHO_DRIVER_GENES else "",
+                    "X" if (variant.symbol or "").upper() in self.who_driver_genes else "",
                     run_date.replace("-", "_"),
                 ] if run_date else []),
             ]
