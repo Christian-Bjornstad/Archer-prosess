@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from PIL import Image, ImageDraw, ImageFont, PngImagePlugin
+from PIL import Image, PngImagePlugin
 
 from archer_processor.core.highlights import is_automatic_database_skip
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
@@ -3520,7 +3520,7 @@ class BrowserReviewService:
         self, page: Any, variant: VariantRecord, artifact_directory: Path,
         full_report_path: Path,
     ) -> Path:
-        """Reuse frozen report pixels; ambiguous matches are labelled gene context only."""
+        """Reuse frozen report pixels and retain match scope in PNG metadata."""
         try:
             geometry = json.loads(full_report_path.with_suffix(".geometry.json").read_text(encoding="utf-8"))
             gene_rows = [entry for entry in geometry["rows"]
@@ -3531,10 +3531,8 @@ class BrowserReviewService:
             selected = gene_rows if gene_context else matches
             if not selected:
                 raise ValueError("MTBP capture has no rows for this gene")
-            caption = f"{variant.symbol}: genkontekst - variant ikke entydig; alle genets rader vises."
             metadata = PngImagePlugin.PngInfo()
             metadata.add_text("match_scope", "gene_context" if gene_context else "exact_variant")
-            metadata.add_text("caption", caption if gene_context else "Exact variant")
             path = self._screenshot_path(artifact_directory, "MTBP", variant)
             with Image.open(full_report_path) as source:
                 sx, sy = source.width / geometry["width"], source.height / geometry["height"]
@@ -3555,19 +3553,6 @@ class BrowserReviewService:
                         raise ValueError("MTBP row outside captured report")
                     pieces.append(source.crop(bounds).convert("RGB"))
                 width = max(p.width for p in pieces)
-                if gene_context:
-                    # The warning is part of the pixels, not just optional PNG metadata.
-                    import textwrap
-                    lines = textwrap.wrap(caption, width=max(12, width // 14))
-                    banner = Image.new("RGB", (width, 30 * len(lines) + 16), "#fff0cf")
-                    draw = ImageDraw.Draw(banner)
-                    try:
-                        font = ImageFont.truetype("arial.ttf", 20)
-                    except OSError:
-                        font = ImageFont.load_default()
-                    for index, line in enumerate(lines):
-                        draw.text((8, 8 + index * 30), line, fill="#453019", font=font)
-                    pieces.insert(0, banner)
                 combined = Image.new("RGB", (width, sum(p.height for p in pieces)), "white")
                 y = 0
                 for piece in pieces:
