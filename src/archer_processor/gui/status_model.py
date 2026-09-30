@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import Counter
 from datetime import datetime
 from enum import Enum
 from typing import Sequence
@@ -116,6 +117,8 @@ STATE_PRIORITY = {
 
 
 def cell_state_for_evidence(evidence: DatabaseEvidence) -> CellState:
+    if evidence.status.strip().casefold() in {"skipped", "not_applicable"}:
+        return CellState.SKIPPED
     if evidence.status.strip().casefold() in {"manual_review", "manual"}:
         return CellState.MANUAL_REVIEW
     if evidence.status.strip().casefold() == "not_found":
@@ -132,22 +135,23 @@ def build_patient_status_rows(
     evidence: dict[str, list[DatabaseEvidence]],
     skipped_keys: set[str],
     report_outcomes: dict[str, str],
-    active: tuple[str, str] | None = None,
+    active: tuple[str, str] | set[tuple[str, str]] | None = None,
+    active_keys: set[tuple[str, str]] | None = None,
 ) -> list[PatientStatusRow]:
     grouped: dict[str, list[VariantRecord]] = {}
     for variant in variants:
         grouped.setdefault(variant.patient_id, []).append(variant)
 
     rows: list[PatientStatusRow] = []
+    active_sources = {active} if isinstance(active, tuple) else (active or set())
     for patient_id, patient_variants in grouped.items():
         cells: dict[str, StatusCell] = {}
         for database in databases:
             states: list[CellState] = []
+            details: list[str] = []
             for variant in patient_variants:
                 key = f"{variant.sample}|{variant.hgvsc}"
-                if active == (patient_id, database):
-                    states.append(CellState.RUNNING)
-                elif key in skipped_keys:
+                if key in skipped_keys:
                     states.append(CellState.SKIPPED)
                 else:
                     item = next(
@@ -158,13 +162,30 @@ def build_patient_status_rows(
                         ),
                         None,
                     )
-                    states.append(
+                    state = (
                         CellState.QUEUED
                         if item is None
                         else cell_state_for_evidence(item)
                     )
+                    if (
+                        (patient_id, database) in active_sources
+                        and (active_keys is None or (key, database) in active_keys)
+                        and state in {CellState.QUEUED, CellState.RETRY}
+                    ):
+                        state = CellState.RUNNING
+                    states.append(state)
+                    if item is not None and item.summary:
+                        details.append(f"{variant.display_name}: {item.summary}")
             state = max(states, key=STATE_PRIORITY.get)
-            cells[database] = StatusCell(state, STATE_LABELS[state])
+            counts = Counter(states)
+            label = STATE_LABELS[state]
+            if len(counts) > 1:
+                label += f" ({counts[state]}/{len(states)})"
+            summary = " · ".join(
+                f"{STATE_LABELS[item_state]}: {count}"
+                for item_state, count in counts.items()
+            )
+            cells[database] = StatusCell(state, label, "\n".join([summary, *details]))
 
         report_state = {
             "created": CellState.REPORT_SAVED,

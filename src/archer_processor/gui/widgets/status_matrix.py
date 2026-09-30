@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from PyQt6.QtCore import QItemSelectionModel, Qt, pyqtSignal
+from PyQt6.QtCore import QItemSelectionModel, QSignalBlocker, Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QAbstractItemView, QHeaderView, QTableWidget, QTableWidgetItem
 
@@ -43,6 +43,8 @@ class StatusMatrix(QTableWidget):
         self.itemActivated.connect(self._emit_activation)
 
     def set_rows(self, rows: Sequence[PatientStatusRow]) -> None:
+        blocker = QSignalBlocker(self)
+        scroll_position = self.verticalScrollBar().value()
         selected_patients = {
             self.item(index.row(), 0).text()
             for index in self.selectionModel().selectedRows()
@@ -71,6 +73,8 @@ class StatusMatrix(QTableWidget):
                     QItemSelectionModel.SelectionFlag.Select
                     | QItemSelectionModel.SelectionFlag.Rows,
                 )
+        self.verticalScrollBar().setValue(scroll_position)
+        blocker.unblock()
 
     def _emit_activation(self, item: QTableWidgetItem) -> None:
         value = item.data(Qt.ItemDataRole.UserRole)

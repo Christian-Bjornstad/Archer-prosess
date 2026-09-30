@@ -339,6 +339,8 @@ class BrowserReviewService:
                         for key, evidence in database_results.items()
                     }
                 )
+            if activity:
+                activity(database, "Provider finished")
             self._check_cancelled()
             if database_index < len(jobs) - 1:
                 self._wait_between_databases(

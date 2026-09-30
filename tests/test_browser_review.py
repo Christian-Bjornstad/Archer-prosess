@@ -175,6 +175,7 @@ def test_browser_review_reports_provider_with_progress(tmp_path, monkeypatch):
 
     assert seen[0][0] == "Franklin"
     assert "starting" in seen[0][1].casefold()
+    assert seen[-1] == ("Franklin", "Provider finished")
 
 
 def test_browser_review_logs_queryable_result_and_provider_summary(

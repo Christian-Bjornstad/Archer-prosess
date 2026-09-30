@@ -116,3 +116,39 @@ def test_retryable_variant_takes_precedence_over_completed_variant():
 
     assert rows[0].cells["Franklin"].state is CellState.RETRY
     assert rows[0].cells["Report"].state is CellState.NOT_READY
+
+
+def test_active_retry_only_marks_the_attempted_variant_running():
+    variants = [
+        VariantRecord(Path("synthetic.tsv"), row, "SYNTHETIC01", "TP53", change)
+        for row, change in ((2, "c.524G>A"), (3, "c.743G>A"))
+    ]
+    rows = build_patient_status_rows(
+        variants, databases=["ClinVar"],
+        evidence={"SYNTHETIC01|c.524G>A": [DatabaseEvidence("ClinVar", "timeout", "slow")]},
+        skipped_keys=set(), report_outcomes={},
+        active={("SYNTHETIC01", "ClinVar")},
+        active_keys={("SYNTHETIC01|c.524G>A", "ClinVar")},
+    )
+    cell = rows[0].cells["ClinVar"]
+    assert cell.label == "Running (1/2)"
+    assert "Queued: 1" in cell.detail
+
+
+def test_mixed_patient_status_explains_found_and_missing_counts():
+    variants = [
+        VariantRecord(Path("synthetic.tsv"), row, "SYNTHETIC01", "TP53", change)
+        for row, change in ((2, "c.524G>A"), (3, "c.743G>A"))
+    ]
+    rows = build_patient_status_rows(
+        variants, databases=["ClinVar"],
+        evidence={
+            "SYNTHETIC01|c.524G>A": [DatabaseEvidence("ClinVar", "found", "matched")],
+            "SYNTHETIC01|c.743G>A": [DatabaseEvidence("ClinVar", "not_found", "no exact result")],
+        },
+        skipped_keys=set(), report_outcomes={},
+    )
+    cell = rows[0].cells["ClinVar"]
+    assert cell.label == "Not found (1/2)"
+    assert "Complete: 1" in cell.detail
+    assert "no exact result" in cell.detail

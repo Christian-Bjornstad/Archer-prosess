@@ -382,6 +382,80 @@ def test_priority_controls_require_an_explicit_patient_selection(qt_app, tmp_pat
     assert window.priority_selection_status.text() == "1 pasient valgt"
 
 
+def test_matrix_tracks_source_completion_failure_and_search_scope(qt_app, tmp_path, monkeypatch):
+    window = MainWindow()
+    window.result = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-15", tmp_path / "review.xlsx",
+    )
+    window.included_only_check.setChecked(False)
+    variant = window._variants_for_search()[0]
+    future = replace(variant, sample="FUTURE_VPM_A")
+    window.result.variants = [variant, future]
+    key = BrowserReviewService.variant_key(variant)
+    future_key = BrowserReviewService.variant_key(future)
+    window._prepare_search_status([variant, future], ["ClinVar", "Franklin"], set())
+    window._set_busy("Searching")
+    window._source_state_changed(variant.patient_id, "ClinVar", True)
+    window._source_state_changed(variant.patient_id, "Franklin", True)
+    clinvar_column = 2 + window.databases.index("ClinVar")
+    franklin_column = 2 + window.databases.index("Franklin")
+    assert window.status_matrix.item(0, clinvar_column).text() == "Running"
+    window._search_evidence_updated({key: [DatabaseEvidence("ClinVar", "found", "ok")]})
+    window._source_state_changed(variant.patient_id, "ClinVar", False)
+    assert window.status_matrix.item(0, clinvar_column).text() == "Complete"
+
+    monkeypatch.setattr(window, "_auto_rewrite_workbook", lambda: None)
+    monkeypatch.setattr("archer_processor.gui.app.QMessageBox.critical", lambda *args: None)
+    window._search_started_at = time.monotonic()
+    window.status_matrix.selectRow(0)
+    window._worker_failed("Microsoft Edge timed out during Runtime.evaluate")
+
+    assert window.status_matrix.item(0, franklin_column).text() == "Retry"
+    assert window.status_matrix.item(1, franklin_column).text() == "Queued"
+    assert future_key not in window.evidence
+    assert window.retry_selected_btn.isEnabled()
+    assert not window._active_sources
+
+
+def test_matrix_marks_unsearched_variants_as_skipped(qt_app, tmp_path):
+    window = MainWindow()
+    window.result = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-15", tmp_path / "review.xlsx",
+    )
+    automatic_skip = next(
+        variant for variant in window.result.variants
+        if is_automatic_database_skip(variant)
+    )
+    window.result.variants = [automatic_skip]
+    window._refresh_operations_cockpit()
+    assert window.status_matrix.item(0, 2).text() == "Skipped"
+
+
+def test_source_failure_keeps_mtbp_resume_id_and_completed_evidence(qt_app, tmp_path):
+    window = MainWindow()
+    window.result = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-15", tmp_path / "review.xlsx",
+    )
+    window.included_only_check.setChecked(False)
+    variant = window._variants_for_search()[0]
+    window.result.variants = [variant]
+    key = BrowserReviewService.variant_key(variant)
+    window.evidence = {key: [
+        DatabaseEvidence("MTBP", "partial_capture", "pending", raw={"analysis_id": "ARCHER-retained"}),
+        DatabaseEvidence("ClinVar", "found", "ok"),
+    ]}
+    window._prepare_search_status([variant], ["MTBP"], set())
+    window._source_state_changed(variant.patient_id, "MTBP", True)
+    window._record_active_search_failure("Runtime.evaluate timed out")
+    by_database = {item.database: item for item in window.evidence[key]}
+    assert by_database["MTBP"].status == "timeout"
+    assert by_database["MTBP"].raw["analysis_id"] == "ARCHER-retained"
+    assert by_database["ClinVar"].status == "found"
+
+
 def test_retry_selected_enables_only_for_attempted_failures(qt_app, tmp_path, monkeypatch):
     window = MainWindow()
     fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
@@ -945,6 +1019,7 @@ def test_browser_worker_checkpoints_workbook_once_after_all_patient_lanes(
         replace(AppSettings(), browser_delay_seconds=0, browser_delay_max_seconds=0),
     )
     checkpoints = []
+    updates = []
 
     class Service:
         def search_variants(self, batch, databases, *args, checkpoint=None, **kwargs):
@@ -957,10 +1032,13 @@ def test_browser_worker_checkpoints_workbook_once_after_all_patient_lanes(
 
     monkeypatch.setattr(worker, "_build_service", lambda: Service())
     worker.patient_finished.connect(checkpoints.append)
+    worker.evidence_updated.connect(updates.append)
 
     worker.run()
 
     assert len(checkpoints) == 1
+    qt_app.processEvents()
+    assert len(updates) == 2
     assert {item.database for item in checkpoints[0][key]} == {
         "COSMIC",
         "OncoKB",
@@ -1680,6 +1758,7 @@ def test_database_worker_completes_all_sources_before_next_patient(
             progress,
             completed_sources,
             checkpoint,
+            activity=None,
             prior_evidence=None,
         ):
             prior_snapshots.append(prior_evidence)

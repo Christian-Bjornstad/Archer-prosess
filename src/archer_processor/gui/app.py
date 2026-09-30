@@ -381,6 +381,7 @@ class DatabaseWorker(QObject):
     finished = pyqtSignal(object)
     cancelled = pyqtSignal()
     patient_finished = pyqtSignal(object)
+    source_state = pyqtSignal(str, str, bool)
     failed = pyqtSignal(str)
     status = pyqtSignal(str)
     progress = pyqtSignal(int, int, str)
@@ -588,6 +589,9 @@ class DatabaseWorker(QObject):
             ),
             completed_sources=self.completed_sources,
             checkpoint=self.patient_finished.emit,
+            activity=lambda database, action: self.source_state.emit(
+                patient_id, database, action == "Starting provider"
+            ) if action in {"Starting provider", "Provider finished"} else None,
             prior_evidence=self.existing_evidence,
         )
         elapsed = time.monotonic() - started_at
@@ -726,6 +730,8 @@ class BrowserReviewWorker(QObject):
     finished = pyqtSignal(object)
     cancelled = pyqtSignal()
     patient_finished = pyqtSignal(object)
+    evidence_updated = pyqtSignal(object)
+    source_state = pyqtSignal(str, str, bool)
     failed = pyqtSignal(str)
     status = pyqtSignal(str)
     progress = pyqtSignal(int, int, str)
@@ -1082,19 +1088,29 @@ class BrowserReviewWorker(QObject):
             active_databases,
             self.artifact_root / f"patient-{original_patient_index:03d}",
             progress=lambda message, p=prefix: self.status.emit(f"{p}: {message}"),
-            activity=lambda database, message, patient=patient_id, pass_variants=variants: self.activity.emit(
-                RunActivity(
-                    occurred_at=datetime.now(),
-                    patient_id=patient,
-                    database=database,
-                    variant_label=(pass_variants[0].display_name if len(pass_variants) == 1 else f"{len(pass_variants)} variants"),
-                    action=message,
-                    message=message,
-                )
+            activity=lambda database, message: self._provider_activity(
+                patient_id, database, message, variants
             ),
             completed_sources=completed_sources,
-            checkpoint=None,
+            checkpoint=self.evidence_updated.emit,
             prior_evidence=prior_evidence,
+        )
+
+    def _provider_activity(self, patient_id, database, message, variants) -> None:
+        if message in {"Starting provider", "Provider finished"}:
+            self.source_state.emit(patient_id, database, message == "Starting provider")
+        self.activity.emit(
+            RunActivity(
+                occurred_at=datetime.now(),
+                patient_id=patient_id,
+                database=database,
+                variant_label=(
+                    variants[0].display_name
+                    if len(variants) == 1 else f"{len(variants)} variants"
+                ),
+                action=message,
+                message=message,
+            )
         )
 
     def _build_service(self) -> BrowserReviewService:
@@ -1230,6 +1246,8 @@ class MainWindow(QMainWindow):
         self._search_stop_requested = False
         self._search_started_at: float | None = None
         self._operation_active = False
+        self._active_sources: set[tuple[str, str]] = set()
+        self._search_pending_pairs: set[tuple[str, str]] = set()
         self._active_search_report_patient_ids: list[str] = []
         self._pending_report_after_workbook: list[str] = []
         self.workbook_write_pending = False
@@ -2198,6 +2216,7 @@ class MainWindow(QMainWindow):
         )
         self._start_run_journal(output_directory, "evidence")
         self._active_search_report_patient_ids = list(report_after_search or [])
+        self._prepare_search_status(variants, databases, completed_sources)
         self._set_busy("Searching")
         self.search_btn.setText("Run Evidence Search")
         self._log(
@@ -2237,6 +2256,7 @@ class MainWindow(QMainWindow):
         worker.progress.connect(self._update_run_progress)
         worker.paused.connect(self._search_pause_changed)
         worker.patient_finished.connect(self._database_patient_finished)
+        worker.source_state.connect(self._source_state_changed)
         worker.report_outcome.connect(self._patient_report_outcome)
         if hasattr(worker, "activity"):
             worker.activity.connect(self._activity_received)
@@ -2274,7 +2294,6 @@ class MainWindow(QMainWindow):
 
     def _database_patient_finished(self, patient_evidence: dict) -> None:
         _merge_evidence_results(self.evidence, patient_evidence)
-        self._refresh_operations_cockpit()
         self._update_evidence_summary()
         self._auto_rewrite_workbook()
 
@@ -2342,6 +2361,7 @@ class MainWindow(QMainWindow):
             else Path(self.settings.default_output_dir)
         )
         self._start_run_journal(output_directory, "browser_evidence")
+        self._prepare_search_status(variants, databases, completed_sources)
         self._set_busy("Browser lookups")
         worker = BrowserReviewWorker(
             variants,
@@ -2361,6 +2381,8 @@ class MainWindow(QMainWindow):
         worker.progress.connect(self._update_run_progress)
         worker.paused.connect(self._search_pause_changed)
         worker.patient_finished.connect(self._browser_patient_finished)
+        worker.evidence_updated.connect(self._search_evidence_updated)
+        worker.source_state.connect(self._source_state_changed)
         worker.report_outcome.connect(self._patient_report_outcome)
         worker.activity.connect(self._activity_received)
         worker.finished.connect(self._browser_review_finished)
@@ -2589,7 +2611,6 @@ class MainWindow(QMainWindow):
 
     def _browser_patient_finished(self, patient_evidence: dict) -> None:
         self._merge_browser_evidence(patient_evidence)
-        self._refresh_operations_cockpit()
         self._update_evidence_summary()
         self._auto_rewrite_workbook()
 
@@ -2611,31 +2632,6 @@ class MainWindow(QMainWindow):
         self._log(_evidence_completion_summary(self.evidence))
 
     def _browser_review_failed(self, message: str) -> None:
-        worker = self.browser_worker
-        if isinstance(worker, BrowserReviewWorker):
-            failed_evidence = {}
-            completed_sources = _completed_evidence_sources(self.evidence)
-            protected_sources = _protected_remote_evidence_sources(self.evidence)
-            for variant in worker.variants:
-                key = BrowserReviewService.variant_key(variant)
-                pending_databases = [
-                    database
-                    for database in worker.databases
-                    if (key, database) not in completed_sources
-                    and (key, database) not in protected_sources
-                ]
-                failed_evidence[key] = [
-                    DatabaseEvidence(
-                        database,
-                        "error",
-                        "Login-based lookup failed before a final result was captured. "
-                        f"Details: {message}",
-                    )
-                    for database in pending_databases
-                ]
-            self._merge_browser_evidence(failed_evidence)
-        self._refresh_operations_cockpit()
-        self._auto_rewrite_workbook()
         self._worker_failed(message)
 
     def _stop_evidence_search(self) -> None:
@@ -3061,8 +3057,10 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Workbook update failed", message)
 
     def _worker_failed(self, message: str) -> None:
-        was_search = self._search_started_at is not None
+        was_search = bool(self._search_pending_pairs)
         if was_search:
+            self._record_active_search_failure(message)
+            self._auto_rewrite_workbook()
             self._active_search_report_patient_ids = []
         self._set_ready()
         if not self.run_progress.isHidden():
@@ -3142,6 +3140,15 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "status_matrix"):
             return
         variants = self.result.variants if self.result else []
+        searchable_keys = {
+            BrowserReviewService.variant_key(variant)
+            for variant in self._variants_for_search()
+        }
+        skipped_keys = {
+            BrowserReviewService.variant_key(variant)
+            for variant in variants
+            if BrowserReviewService.variant_key(variant) not in searchable_keys
+        }
         report_statuses = {
             patient_id: outcome.status
             for patient_id, outcome in self.report_outcomes.items()
@@ -3151,14 +3158,17 @@ class MainWindow(QMainWindow):
                 variants,
                 databases=self.databases,
                 evidence=self.evidence,
-                skipped_keys=self.database_skip_keys,
+                skipped_keys=skipped_keys,
                 report_outcomes=report_statuses,
+                active=self._active_sources,
+                active_keys=self._search_pending_pairs,
             )
         )
         self._update_priority_controls()
-        self.retry_report_saves_button.setVisible(
-            any(outcome.status == "locked" for outcome in self.report_outcomes.values())
-        )
+        if hasattr(self, "retry_report_saves_button"):
+            self.retry_report_saves_button.setVisible(
+                any(outcome.status == "locked" for outcome in self.report_outcomes.values())
+            )
 
     def _retry_pending_report_saves(self) -> None:
         if self.result is None or self.result.output_path is None:
@@ -3223,7 +3233,59 @@ class MainWindow(QMainWindow):
         self.evidence_summary.setText(
             f"{source_text} · {variant_text} · {browser_mode}"
         )
-        self._update_priority_controls()
+        self._refresh_operations_cockpit()
+
+    def _prepare_search_status(self, variants, databases, completed_sources) -> None:
+        self._active_sources.clear()
+        self._search_pending_pairs = {
+            (BrowserReviewService.variant_key(variant), database)
+            for variant in variants
+            for database in databases
+            if (BrowserReviewService.variant_key(variant), database) not in completed_sources
+        }
+
+    def _source_state_changed(self, patient_id: str, database: str, running: bool) -> None:
+        pair = (patient_id, database)
+        if running:
+            self._active_sources.add(pair)
+        else:
+            self._active_sources.discard(pair)
+        self._refresh_operations_cockpit()
+
+    def _search_evidence_updated(self, evidence: dict) -> None:
+        _merge_evidence_results(self.evidence, evidence)
+        self._update_evidence_summary()
+
+    def _record_active_search_failure(self, message: str) -> None:
+        if self.result is None or not self._active_sources:
+            return
+        failures = {}
+        for variant in self.result.variants:
+            key = BrowserReviewService.variant_key(variant)
+            by_database = {item.database: item for item in self.evidence.get(key, [])}
+            for patient_id, database in self._active_sources:
+                if (
+                    patient_id != variant.patient_id
+                    or (key, database) not in self._search_pending_pairs
+                ):
+                    continue
+                previous = by_database.get(database)
+                if previous is not None and is_completed_evidence(previous):
+                    continue
+                # Preserve MTBP's remote report ID and captures so retry can resume it.
+                item = (
+                    deepcopy(previous) if previous
+                    else DatabaseEvidence(database, "error")
+                )
+                item.status = (
+                    "timeout"
+                    if "timed out" in message.casefold() or "timeout" in message.casefold()
+                    else "error"
+                )
+                item.summary = f"Browser lookup interrupted: {message}"
+                failures.setdefault(key, []).append(item)
+        if failures:
+            _merge_evidence_results(self.evidence, failures)
 
     def _update_run_progress(self, current: int, total: int, detail: str) -> None:
         self.activity_progress.hide()
@@ -3319,6 +3381,8 @@ class MainWindow(QMainWindow):
 
     def _set_ready(self) -> None:
         self._operation_active = False
+        self._active_sources.clear()
+        self._search_pending_pairs.clear()
         self.run_status_strip.set_snapshot(RunSnapshot())
         self.status_badge.setText("Ready")
         self.status_badge.setStyleSheet("")
@@ -3336,7 +3400,7 @@ class MainWindow(QMainWindow):
         self.rewrite_btn.setEnabled(self.result is not None)
         self.patient_excel_btn.setEnabled(self.result is not None)
         self.resume_btn.setEnabled(True)
-        self._update_priority_controls()
+        self._update_evidence_summary()
         self.status_bar.showMessage("Ready", 3000)
 
     def _update_process_state(self) -> None:
