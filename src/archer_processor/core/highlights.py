@@ -3,13 +3,14 @@ from __future__ import annotations
 from typing import Any
 
 from archer_processor.core.models import VariantRecord
+from archer_processor.core.rules import normalize_artifact_hgvsc
 
 
 def variant_highlight(variant: VariantRecord) -> str:
     if _is_artifact(variant):
         if (
             variant.symbol.upper() == "ASXL1"
-            and variant.hgvsc == "NM_015338.5:c.1934dup"
+            and normalize_artifact_hgvsc(variant.hgvsc) == "NM_015338:c.1934dup"
             and variant.af is not None
             and 0.05 < variant.af <= 0.055
         ):

@@ -89,7 +89,7 @@ class ProcessedWorkbookLoader:
             raw_headers = [
                 header
                 for header in header_values
-                if header not in {SKIP_HEADER, "WHO drivergen", "Run_dato"}
+                if header not in {SKIP_HEADER, "WHO drivergen", "Run_dato", "Run date"}
                 and not header.endswith(" Evidence")
             ]
             variants: list[VariantRecord] = []
@@ -169,6 +169,7 @@ class ProcessedWorkbookLoader:
             rules_applied=[rule.rule_id for rule in self.filter_engine.rules],
             started_at=timestamp,
             finished_at=timestamp,
+            archer_version=self.reader.detect_version(raw_headers),
         )
         return ProcessedWorkbookState(result, evidence, skip_keys)
 

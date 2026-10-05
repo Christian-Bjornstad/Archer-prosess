@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from collections.abc import Iterable
 from typing import Any
 
 import pandas as pd
@@ -9,6 +10,18 @@ from archer_processor.core.models import VariantRecord
 
 
 class ArcherTsvReader:
+    @staticmethod
+    def detect_version(columns: Iterable[str]) -> str:
+        columns = set(columns)
+        if "ClinVar Significance" in columns:
+            return "v7"
+        if "Clinical Significance" in columns:
+            return "v6"
+        return "unknown"
+
+    def version(self, path: Path) -> str:
+        return self.detect_version(pd.read_csv(path, sep="\t", nrows=0).columns)
+
     required_columns = {
         "Sample",
         "Symbol",
@@ -81,7 +94,10 @@ class ArcherTsvReader:
             quality_score=self._float(row.get("Quality Score")),
             gnomad_af=self._float(row.get("gnomAD AF")),
             consequence=self._text(row.get("Consequence")),
-            clinical_significance=self._text(row.get("Clinical Significance")),
+            clinical_significance=(
+                self._text(row.get("ClinVar Significance"))
+                or self._text(row.get("Clinical Significance"))
+            ),
             cosmic_id=self._text(row.get("COSMICID")),
             dbsnp_id=self._text(row.get("DBSNPID")),
             source_caller=self._text(row.get("Source")),

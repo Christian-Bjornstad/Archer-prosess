@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from archer_processor.core import default_artifact_rules
+from archer_processor.core.rules import legacy_artifact_rules, merge_v7_artifacts
 from archer_processor.services import credentials
 
 
@@ -34,7 +35,7 @@ class AppSettings:
     mtbp_cancer_type: str = "Blood"
     last_processed_workbook: str = ""
     offer_recent_analysis: bool = True
-    artifact_catalog_version: int = 3
+    artifact_catalog_version: int = 4
     artifact_rules: list[dict[str, str]] = field(default_factory=default_artifact_rules)
     enabled_databases: list[str] = field(
         default_factory=lambda: [
@@ -100,7 +101,7 @@ class AppSettings:
             }
             former_v2_hgvsc = {
                 str(entry.get("hgvsc") or "").strip()
-                for entry in default_artifact_rules()
+                for entry in legacy_artifact_rules()
                 if str(entry.get("hgvsc") or "").strip()
                 not in fragmentation_v1_additions
             }
@@ -111,6 +112,9 @@ class AppSettings:
             if configured_hgvsc == former_v2_hgvsc:
                 settings.artifact_rules = default_artifact_rules()
             settings.artifact_catalog_version = 3
+        if int(data.get("artifact_catalog_version", 0) or 0) < 4:
+            settings.artifact_rules = merge_v7_artifacts(settings.artifact_rules)
+            settings.artifact_catalog_version = 4
         settings.browser_delay_seconds = max(0, int(settings.browser_delay_seconds))
         settings.browser_delay_max_seconds = max(
             settings.browser_delay_seconds,

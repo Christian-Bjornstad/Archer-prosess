@@ -5,7 +5,7 @@ import re
 from .models import FilterRule, VariantRecord
 
 
-def default_artifact_rules() -> list[dict[str, str]]:
+def legacy_artifact_rules() -> list[dict[str, str]]:
     return [
         {
             "gene": "ASXL1",
@@ -66,6 +66,51 @@ def default_artifact_rules() -> list[dict[str, str]]:
     ]
 
 
+def normalize_artifact_hgvsc(value: str) -> str:
+    """Ignore accession version only; retain accession and the full cDNA change."""
+    return re.sub(r"\.\d+(?=:)", "", value.strip())
+
+
+def v7_artifact_additions() -> list[dict[str, str]]:
+    # Unique new entries from Artefakter v7_ (2026-10-01); no sample data.
+    return [
+        {"gene": gene, "hgvsc": hgvsc, "reason": reason}
+        for gene, hgvsc, reason in [
+            ("EZH2", "NM_004456:c.404G>T", "Artefakt (p-verdi)."),
+            ("EZH2", "NM_004456:c.569G>T", "SeqDirBias artefakt; bekreftet i IGV."),
+            ("FBXW7", "NM_033632:c.585-7_585-5del", "Artefakt i intron homopolymer."),
+            ("KDM6A", "NM_001291415:c.-167_-165del", "Artefakt i GCC-repeat i 5'UTR."),
+            ("KMT2A", "NM_001197104:c.2629_2630del", "Artefakt i AG-repeat."),
+            ("NOTCH1", "NM_017617:c.6260G>T", "Strand Bias artefakt."),
+            ("PHF6", "NM_001015877:c.585+14del", "Artefakt i intron A-polymer."),
+            ("PTEN", "NM_000314:c.834C>G", "Artefakt; feil NM-beskrivelse i v6."),
+            ("RAD21", "NM_006265:c.1162-8_1162-6del", "Artefakt i homopolymer."),
+            ("RAD21", "NM_006265:c.1162-8_1162-6dup", "Artefakt i homopolymer."),
+            ("RUNX1", "NM_001754:c.1270T>C", "Lavfrekvent artefakt."),
+            ("RUNX1", "NM_001754:c.1267C>T", "Lavfrekvent artefakt."),
+        ]
+    ]
+
+
+def merge_v7_artifacts(entries: list[dict[str, str]]) -> list[dict[str, str]]:
+    merged = [dict(entry) for entry in entries]
+    keys = {
+        (str(e.get("gene") or "").strip().upper(),
+         normalize_artifact_hgvsc(str(e.get("hgvsc") or "")))
+        for e in merged
+    }
+    for entry in v7_artifact_additions():
+        key = (entry["gene"], normalize_artifact_hgvsc(entry["hgvsc"]))
+        if key not in keys:
+            merged.append(entry)
+            keys.add(key)
+    return merged
+
+
+def default_artifact_rules() -> list[dict[str, str]]:
+    return merge_v7_artifacts(legacy_artifact_rules())
+
+
 def production_rules(artifact_rules: list[dict[str, str]] | None = None) -> list[FilterRule]:
     return artifact_filter_rules(
         default_artifact_rules() if artifact_rules is None else artifact_rules
@@ -116,7 +161,7 @@ class FilterEngine:
     def _matches(self, rule: FilterRule, variant: VariantRecord) -> bool:
         if rule.gene and variant.symbol.upper() != rule.gene.upper():
             return False
-        if variant.hgvsc != rule.hgvsc:
+        if normalize_artifact_hgvsc(variant.hgvsc) != normalize_artifact_hgvsc(rule.hgvsc):
             return False
         if rule.max_af_exclusive is None:
             if rule.max_af_inclusive is None:

@@ -104,6 +104,9 @@ class ProcessingWorker(QObject):
             filter_engine = FilterEngine(production_rules(self.settings.artifact_rules))
             processor = VariantProcessor(filter_engine=filter_engine)
             result = processor.process(self.input_path, self.run_date, self.output_path)
+            self.status.emit(f"Archer version detected: {result.archer_version} (TSV headers)")
+            for warning in result.warnings:
+                self.status.emit(warning)
             self.status.emit("Writing review workbook")
             ExcelReportWriter(
                 load_who_driver_genes(self.settings.who_driver_genes_path)

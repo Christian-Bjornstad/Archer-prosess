@@ -1,6 +1,7 @@
 import json
 
 from archer_processor.core import default_artifact_rules
+from archer_processor.core.rules import legacy_artifact_rules, v7_artifact_additions
 from archer_processor.services import AppSettings
 from archer_processor.reports.who_genes import WHO_DRIVER_GENES, load_who_driver_genes
 from openpyxl import Workbook
@@ -275,7 +276,7 @@ def test_legacy_four_artifact_defaults_migrate_to_fragmentation_v2_catalog(
 
     loaded = AppSettings.load()
 
-    assert loaded.artifact_catalog_version == 3
+    assert loaded.artifact_catalog_version == 4
     assert loaded.artifact_rules == default_artifact_rules()
 
 
@@ -293,8 +294,8 @@ def test_custom_artifacts_are_preserved_during_catalog_version_migration(
 
     loaded = AppSettings.load()
 
-    assert loaded.artifact_rules == custom
-    assert loaded.artifact_catalog_version == 3
+    assert loaded.artifact_rules == custom + v7_artifact_additions()
+    assert loaded.artifact_catalog_version == 4
 
 
 def test_fragmentation_v2_defaults_migrate_to_v3_catalog(tmp_path, monkeypatch):
@@ -311,7 +312,7 @@ def test_fragmentation_v2_defaults_migrate_to_v3_catalog(tmp_path, monkeypatch):
     }
     former_v2 = [
         entry
-        for entry in default_artifact_rules()
+        for entry in legacy_artifact_rules()
         if entry["hgvsc"] not in v1_additions
     ]
     config_path.write_text(
@@ -326,5 +327,5 @@ def test_fragmentation_v2_defaults_migrate_to_v3_catalog(tmp_path, monkeypatch):
 
     loaded = AppSettings.load()
 
-    assert loaded.artifact_catalog_version == 3
+    assert loaded.artifact_catalog_version == 4
     assert loaded.artifact_rules == default_artifact_rules()

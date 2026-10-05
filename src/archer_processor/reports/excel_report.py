@@ -20,6 +20,8 @@ from archer_processor.core.highlights import (
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
 from archer_processor.core.sorting import variant_sort_key
 from archer_processor.reports.who_genes import WHO_DRIVER_GENES
+from archer_processor.reports.archer_layout import V7_COLUMNS, V7_HIDDEN_COLUMNS
+from archer_processor.io.tsv_reader import ArcherTsvReader
 
 
 DEFAULT_DATABASE_COLUMNS = [
@@ -124,6 +126,10 @@ class ExcelReportWriter:
         workbook.custom_doc_props.append(
             StringProperty(name="VPMRunDate", value=result.run_date)
         )
+        version = result.archer_version
+        if version == "unknown":
+            version = ArcherTsvReader.detect_version(self._raw_columns(result.variants))
+        workbook.custom_doc_props.append(StringProperty(name="ArcherVersion", value=version))
         workbook.remove(workbook.active)
         self._raw_variant_sheet(
             workbook,
@@ -134,6 +140,7 @@ class ExcelReportWriter:
             include_selection=True,
             database_skip_keys=database_skip_keys or set(),
             run_date=result.run_date,
+            archer_version=version,
         )
         self._raw_variant_sheet(
             workbook,
@@ -146,6 +153,7 @@ class ExcelReportWriter:
             evidence,
             hide_excluded,
             run_date=result.run_date,
+            archer_version=version,
         )
         self._evidence_storage_sheet(workbook, evidence)
         for ws in workbook.worksheets:
@@ -592,20 +600,28 @@ class ExcelReportWriter:
         database_skip_keys: set[str] | None = None,
         include_database_evidence: bool = True,
         preserve_variant_order: bool = False,
+        archer_version: str = "unknown",
         run_date: str = "",
     ) -> None:
         ws = workbook.create_sheet(title)
         raw_columns = self._raw_columns(variants)
+        is_v7 = archer_version == "v7"
+        if is_v7:
+            raw_columns = list(V7_COLUMNS) + [
+                column for column in raw_columns
+                if column not in V7_COLUMNS and column != "Run date"
+            ]
         database_columns = []
         headers = (
             (["Skip Database Search (X)"] if include_selection else [])
             + raw_columns
+            + (["Run date"] if is_v7 and run_date else [])
             + [f"{database} Evidence" for database in database_columns]
-            + (["Run_dato"] if run_date else [])
+            + (["Run_dato"] if run_date and not is_v7 else [])
         )
         self._headers(ws, headers)
         raw_offset = 1 if include_selection else 0
-        evidence_start = raw_offset + len(raw_columns) + 1
+        evidence_start = raw_offset + len(raw_columns) + 1 + int(is_v7 and bool(run_date))
         evidence_columns = set(range(evidence_start, evidence_start + len(database_columns)))
         skip_keys = database_skip_keys or set()
 
@@ -633,10 +649,11 @@ class ExcelReportWriter:
                     )
                     for column in raw_columns
                 ],
+                *([run_date.replace("-", "_")] if is_v7 and run_date else []),
                 *[self._evidence_cell(evidence_by_database.get(database, [])) for database in database_columns],
                 *([
                     run_date.replace("-", "_"),
-                ] if run_date else []),
+                ] if run_date and not is_v7 else []),
             ]
             for col_index, value in enumerate(values, start=1):
                 cell = ws.cell(row_index, col_index, value)
@@ -664,7 +681,11 @@ class ExcelReportWriter:
             ws.row_dimensions[row_index].height = 18
             if hide_excluded and variant.decision == "excluded":
                 ws.row_dimensions[row_index].hidden = True
-        ws.freeze_panes = "G2" if include_selection else "F2"
+        if is_v7:
+            # Template I1 freezes through Depth; shift once for the review selector.
+            ws.freeze_panes = "J1" if include_selection else "I1"
+        else:
+            ws.freeze_panes = "G2" if include_selection else "F2"
         ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{len(variants) + 1}"
         self._fit(ws, max_width=46)
         if include_selection:
@@ -673,7 +694,7 @@ class ExcelReportWriter:
             ws["A1"].font = Font(bold=True, color=self.colors["navy"])
         for index, header in enumerate(headers, start=1):
             letter = get_column_letter(index)
-            if header in REFERENCE_HIDDEN_COLUMNS:
+            if header in (V7_HIDDEN_COLUMNS if is_v7 else REFERENCE_HIDDEN_COLUMNS):
                 ws.column_dimensions[letter].hidden = True
             elif header.endswith(" Evidence"):
                 ws.column_dimensions[letter].width = 34

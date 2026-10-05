@@ -70,6 +70,25 @@ flowchart LR
    written to `VEDLEGG_APP` beside the review workbook as
    `<DIT>_VPM_Tolkning_APP.xlsx`.
 
+Archer Analysis **v6 and v7** exports are supported. Import detects the version
+from `Clinical Significance` (v6) or `ClinVar Significance` (v7) and writes the
+selected version to the timestamped log. An unrecognised header set is logged as
+unknown rather than guessed. V7's ClinVar field feeds the same interpretation
+data as the v6 field; original source columns remain available in the workbook.
+
+V7 review sheets use the column order and hidden columns from the supplied
+2 October 2026 template, including `Run date`. They freeze through `Depth`
+(`I1`, or `J1` with the app's skip-search selector). V6 keeps its existing layout.
+Review selections and stored evidence survive saving and reopening either version.
+
+Both versions use one shared artifact catalog: the existing 39 rules plus
+12 unique additions from the v7 list. Existing settings receive these additions
+without replacing local rules or AF overrides. Artifact matching ignores the
+transcript accession's version suffix, while retaining its accession and exact
+cDNA change. ASXL1 `NM_015338:c.1934dup` remains an artifact through **5.5% AF**,
+with the existing lighter marking above 5% through 5.5%. The supplied workbooks
+are reference inputs; patient and sample data from them are not bundled with the app.
+
 Use **Pause Search** to pause at the next safe browser checkpoint and **Resume
 Search** to continue the same queue without repeating completed work. **Stop
 Search** ends the run, retains every completed provider result, and updates the

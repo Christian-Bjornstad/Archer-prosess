@@ -35,6 +35,7 @@ class VariantProcessor:
             or run_date
         )
         variants = self.reader.read(input_path)
+        archer_version = self.reader.version(input_path)
         self.filter_engine.apply(variants)
         if self.history:
             self.history.annotate(variants)
@@ -46,4 +47,9 @@ class VariantProcessor:
             rules_applied=[rule.rule_id for rule in self.filter_engine.rules],
             started_at=started,
             finished_at=datetime.now(),
+            archer_version=archer_version,
+            warnings=(
+                ["Archer version could not be identified from the TSV headers."]
+                if archer_version == "unknown" else []
+            ),
         )

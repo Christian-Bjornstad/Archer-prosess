@@ -186,7 +186,7 @@ def test_artifact_settings_show_catalog_and_af_exception(qt_app):
         for index in range(window.artifact_table.columnCount())
     ]
 
-    assert window.artifact_table.rowCount() == 39
+    assert window.artifact_table.rowCount() == 51
     assert headers == ["Gene", "HGVSc", "Artifact through AF", "Reason"]
     assert window.artifact_table.item(0, 1).text() == "NM_015338.5:c.1934dup"
     assert window.artifact_table.item(0, 2).text() == "5.5%"
