@@ -179,10 +179,12 @@ class AppSettings:
         for item in fields(self):
             if item.metadata.get("persist") is False:
                 data.pop(item.name, None)
-        temporary = path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        temporary.replace(path)
+        # A managed credential store can reject a save. Keep the previous
+        # configuration until every password has been accepted.
         credentials.save_password("OncoKB", self.oncokb_email, self.oncokb_password)
         credentials.save_password("COSMIC", self.cosmic_email, self.cosmic_password)
         credentials.save_password("Franklin", self.franklin_email, self.franklin_password)
         credentials.save_password("MTBP", self.mtbp_email, self.mtbp_password)
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        temporary.replace(path)
