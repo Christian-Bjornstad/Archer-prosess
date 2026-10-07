@@ -17,6 +17,7 @@ from PIL import Image, PngImagePlugin
 
 from archer_processor.core.highlights import is_automatic_database_skip
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
+from archer_processor.core.variant_key_guard import validate_variant_keys
 from archer_processor.services.genomic_notation import format_mtbp_grch37
 from archer_processor.services.capture_layout import expanded_capture_layout
 from archer_processor.services.provider_failures import (
@@ -249,6 +250,7 @@ class BrowserReviewService:
         prior_evidence: dict[str, list[DatabaseEvidence]] | None = None,
     ) -> dict[str, list[DatabaseEvidence]]:
         variant_list = list(variants)
+        validate_variant_keys(variant_list)
         searchable_variants = [
             variant
             for variant in variant_list
