@@ -35,12 +35,16 @@ def main() -> None:
             (2, "ASXL1", "c.1934dup"), (3, "JAK2", "c.1849G>T"),
         ], start=2)
     ]
-    for width, height in ((1024, 640), (1440, 900)):
+    for width, height in ((920, 600), (1024, 640), (1440, 900)):
         window.resize(width, height)
         window._switch_page(0)
         window.show()
         app.processEvents()
         window.grab().save(str(output / f"import-{width}.png"))
+        window._set_import_mode(1)
+        app.processEvents()
+        window.grab().save(str(output / f"resume-{width}.png"))
+        window._set_import_mode(0)
 
     window.result = ProcessingResult(Path("synthetic.tsv"), output / "DEMO_VPM_review.xlsx", "2026-10-07", variants, [])
     window.evidence = {
@@ -56,10 +60,10 @@ def main() -> None:
     window._set_busy("Searching")
     window._source_state_changed("DEMO-01", "Franklin", True)
     window._source_state_changed("DEMO-01", "COSMIC", True)
-    window._update_run_progress(0, 3, "DEMO-01 · 2 variants · 5 sources")
+    window._update_run_progress(0, 3, "DEMO-01 · 2 varianter · 5 kilder")
     window._search_started_at = 1.0
     window._log("Franklin: checking the exact variant before evidence capture")
-    for width, height in ((1024, 640), (1440, 900)):
+    for width, height in ((920, 600), (1024, 640), (1440, 900)):
         window.resize(width, height)
         window._switch_page(1)
         window.database_scroll.verticalScrollBar().setValue(0)
@@ -77,7 +81,7 @@ def main() -> None:
     window.who_genes_edit.setText(str(ROOT / "reference_lists" / "WHO-drivergener.xlsx"))
     window._validate_artifact_path()
     window._validate_who_path()
-    for width, height in ((1024, 640), (1440, 900)):
+    for width, height in ((920, 600), (1024, 640), (1440, 900)):
         window.resize(width, height)
         window._switch_page(2)
         window.settings_scroll.verticalScrollBar().setValue(0)

@@ -48,7 +48,7 @@ def test_provider_update_keeps_current_cell_selection_and_existing_items(qt_app)
     assert matrix.item(1, 0) is patient_item
     assert matrix.item(1, 2) is changed_item
     assert matrix.item(0, 2) is unchanged_item
-    assert changed_item.text() == "Complete"
+    assert changed_item.text() == "Utført"
     assert changed_item.toolTip() == "Matched"
     assert selection_events == []
 

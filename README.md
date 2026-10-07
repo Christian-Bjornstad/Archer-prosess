@@ -59,14 +59,17 @@ flowchart LR
 1. Import an Archer variant TSV and create the review workbook.
 2. Review **With Artifacts** and mark `X` in **Skip Database Search (X)** where appropriate.
 3. Load the reviewed workbook back into the application.
-4. Select the evidence sources. To handle urgent cases first, select one or more
-   rows in **Patient progress** and click **Kjør valgte pasienter**. Their
+4. Select the evidence sources. To handle urgent cases first, check one or more
+   patients in **Kilder og søk** and use the main search button. Its label shows
+   the checked scope. Their
    unfinished lookups run first and their reports are generated after the
    evidence workbook has been saved.
-5. Verify and answer the prioritized reports, then click **Kjør resterende**.
+5. Verify and answer the prioritized reports, then clear the patient checkboxes
+   and use the main search button to continue remaining work.
    Only patients with unfinished source lookups enter the second queue.
-6. For a manual report run, select one or more patient rows, or leave the table
-   unselected for all patients, and click **Generer VEDLEGG_APP**. Reports are
+6. For a manual report run, check one or more patients, or leave all checkboxes
+   clear for all patients. The **Vedlegg for …** button states its scope. Row
+   focus only selects the patient shown in **Detaljer**. Reports are
    written to `VEDLEGG_APP` beside the review workbook as
    `<DIT>_VPM_Tolkning_APP.xlsx`.
 
@@ -89,50 +92,54 @@ cDNA change. ASXL1 `NM_015338:c.1934dup` remains an artifact through **5.5% AF**
 with the existing lighter marking above 5% through 5.5%. The supplied workbooks
 are reference inputs; patient and sample data from them are not bundled with the app.
 
-Use **Pause Search** to pause at the next safe browser checkpoint and **Resume
-Search** to continue the same queue without repeating completed work. **Stop
-Search** ends the run, retains every completed provider result, and updates the
-review workbook whenever it is writable. **Resume Incomplete Search** skips fully
+Use **Pause** in the progress strip to pause at the next safe browser checkpoint
+and **Fortsett** to continue the same queue without repeating completed work.
+**Stopp** ends the run, retains every completed provider result, and updates the
+review workbook whenever it is writable. The main search action skips fully
 completed patients and sources, while retrying errors, timeouts, and unfinished
 work. Log lines include clock timestamps and completed/stopped runs include total
 elapsed time.
 
 Automated Edge windows run minimized by default so the workstation remains usable.
-Manual **Sign In** windows still open visibly. Variant-to-variant pacing remains
+Manual **Logg inn** windows still open visibly. Variant-to-variant pacing remains
 randomized according to Settings; switching between providers uses a fixed 3-second
 transition.
 
-The desktop interface is organised around three pages: **Import**, **Evidence**,
-and **Settings**. The review workbook opens in the computer's spreadsheet app;
-the desktop interface does not duplicate its variant grid. A persistent progress strip
-distinguishes Ready, Running, Paused, Interrupted, Complete, Retry available, and
-Report save pending. The entire Evidence workspace scrolls, including **Run queue**,
-source selection, **Patient progress**, browser sessions and report controls.
+The compact native workstation has persistent left navigation for **Importer**,
+**Kilder og søk**, and **Innstillinger**. The review workbook opens in the
+computer's spreadsheet app. One progress strip contains Pause/Stop and the
+patient count. The patient table takes the available space; report actions stay
+visible below the scroll area. Additional retry and browser controls are under
+**Avansert**. **Detaljer** updates when new evidence arrives.
 Settings accepts an optional local `.xlsx`, `.csv`, or `.txt` WHO driver-gene list;
 an empty path uses the bundled list, while an invalid path blocks saving with a clear error.
 There is no duplicate activity panel or evidence matrix; the copyable, timestamped
-log lives in **Import**. Resume incomplete work from the main queue controls.
+log lives in **Importer**. Resume incomplete work from the main search action.
 Startup can offer
 the most recent local workbook, but it never loads data or contacts a provider
-until **Restore analysis** is selected. **Retry Pending Saves** retries only
+until **Gjenåpne** is selected under **Fortsett analyse · Excel**.
+**Prøv ventende lagring igjen** retries only
 locked report files and never repeats database searches.
 
 The Import page also accepts a single local TSV or processed `.xlsx` dropped
 onto **Slipp filen her**. Dropping a TSV prepares the input/output paths without
 starting processing; dropping a workbook restores the existing analysis. After
-creating the review file, use **Åpne Excel-fil**, review the X selections, then
-**Til Evidence**. The current review filename remains visible on Evidence.
+creating the review file, use **Åpne i Excel**, review and save the X selections,
+then **Til kilder og søk** and **Hent X-valg fra Excel**. The import action
+advances after file creation instead of recreating the same workbook.
+The current review filename remains visible on the search page.
 
 Use **Sjekk innlogging** before a run to check all five dedicated Edge profiles.
 Each source reports confirmed sign-in, public access (ClinVar), sign-in required,
 unconfirmed access, or an error. The check does not enter credentials or submit
 variants. Results show the time checked; hover a status for details. Choose the
-provider and **Sign In** when needed, then check again. Checks and changes to
+source's **Logg inn** action when needed, then **Sjekk** again. These actions also
+work when a selected reference file is unavailable. Checks and changes to
 sources/import paths are disabled while an operation runs.
 
 Evidence cells now update as each variant result is persisted, rather than
 waiting for all variants at a provider. The table keeps selection, current cell
-and scroll position; unselected sources without evidence show **Not selected**.
+and scroll position; unselected sources without evidence show **Ikke valgt**.
 Search startup brings patient progress into view. Small workstation windows
 use horizontal table scrolling to keep patient identifiers and status text
 readable. Workbook checkpoints remain grouped per patient.
@@ -141,8 +148,9 @@ readable. Workbook checkpoints remain grouped per patient.
 
 The supplied [Excel reference lists](reference_lists/README.md) contain the
 current **51 artifact rules** and **54 WHO driver genes**, unchanged. Select
-the files in **Settings → Local files**, then **Save Configuration**. Edit and
-save those files in Excel to update the app without changing code.
+the files in **Innstillinger → Referanselister**, then **Lagre innstillinger**. Edit and
+save those files in Excel to update the app without changing code. File-choice
+edits are marked **Ikke lagret** until configuration saving succeeds.
 
 A selected artifact workbook replaces the complete catalog at the next TSV
 processing or analysis restore. Manual rules remain stored as the fallback
@@ -274,7 +282,7 @@ the application. The loader restores:
 
 New searches merge with restored evidence instead of discarding earlier results.
 Errors, timeouts, identity mismatches, unverified ClinVar records, and partial
-captures remain pending when **Resume Incomplete Search** is used.
+captures remain pending when the main search action resumes unfinished work.
 
 ## Priority colours
 
@@ -323,7 +331,7 @@ python -m archer_processor
 
 ## Configuration
 
-Use the in-app **Settings** page to configure:
+Use the in-app **Innstillinger** page to configure:
 
 - default output directory;
 - provider sign-in details;

@@ -111,7 +111,7 @@ def test_live_source_rows_follow_selection(window):
     window.db_checks["Franklin"].setChecked(False)
     window._refresh_operations_cockpit()
     column = window.databases.index("Franklin") + 2
-    assert window.status_matrix.item(0, column).text() == "Not selected"
+    assert window.status_matrix.item(0, column).text() == "Ikke valgt"
 
 
 def test_drop_routes_one_local_workbook_and_rejects_multiple_files(qt_app, tmp_path):
@@ -193,7 +193,7 @@ def test_new_analysis_clears_previous_report_status(window, monkeypatch, tmp_pat
     assert window.report_outcomes == {}
     assert not window.status_matrix.selectionModel().selectedRows()
     assert window.continue_evidence_btn.isEnabled()
-    assert window.status_matrix.item(0, window.status_matrix.columnCount() - 1).text() == "Not ready"
+    assert window.status_matrix.item(0, window.status_matrix.columnCount() - 1).text() == "Ikke klar"
 
 
 def test_main_worker_updates_variants_live_but_checkpoints_patient_once(qt_app, monkeypatch, tmp_path):
