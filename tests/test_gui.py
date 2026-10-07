@@ -49,7 +49,7 @@ def test_primary_and_secondary_text_actions_are_at_least_44px(qt_app):
     ]
 
     assert all(button.minimumHeight() >= 44 for button in text_actions)
-    assert window.patient_excel_btn.text() == "Generer VEDLEGG_APP"
+    assert window.patient_excel_btn.text() == "Generer vedlegg"
     assert window.patient_excel_btn.parent().objectName() == "ReportsGroup"
 
 
@@ -73,13 +73,16 @@ def test_evidence_actions_fit_target_window_sizes(qt_app):
             assert point.x() + button.width() <= viewport.width()
 
 
-def test_entire_evidence_page_scrolls_and_import_keeps_log(qt_app):
+def test_advanced_evidence_scrolls_with_report_actions_fixed(qt_app):
     window = MainWindow()
     window._switch_page(1)
     window.resize(1120, 720)
     window.show()
     qt_app.processEvents()
+    window.advanced_evidence_btn.click()
+    qt_app.processEvents()
     before = window.search_btn.mapTo(window, window.search_btn.rect().topLeft())
+    reports_before = window.patient_excel_btn.mapTo(window, window.patient_excel_btn.rect().topLeft())
     window.database_scroll.verticalScrollBar().setValue(window.database_scroll.verticalScrollBar().maximum())
     qt_app.processEvents()
     after = window.search_btn.mapTo(window, window.search_btn.rect().topLeft())
@@ -87,7 +90,11 @@ def test_entire_evidence_page_scrolls_and_import_keeps_log(qt_app):
     assert not hasattr(window, "evidence_splitter")
     assert not hasattr(window, "evidence_log")
     assert window.database_scroll.geometry().top() == 0
-    assert window.database_scroll.geometry().bottom() >= window.database_scroll.parentWidget().height() - 2
+    reports = window.patient_excel_btn.parentWidget()
+    assert reports.parentWidget() is window.database_scroll.parentWidget()
+    assert window.database_scroll.geometry().bottom() < reports.geometry().top()
+    assert reports.geometry().bottom() >= reports.parentWidget().height() - 2
+    assert window.patient_excel_btn.mapTo(window, window.patient_excel_btn.rect().topLeft()) == reports_before
     window._log('Test log message')
     assert 'Test log message' in window.log.toPlainText()
     window.close()
@@ -164,9 +171,9 @@ def test_database_tab_contains_current_sources(qt_app):
     assert window.browser_signin_btn.isEnabled()
     assert not window.browser_review_btn.isEnabled()
     assert not window.stop_search_btn.isEnabled()
-    assert window.stop_search_btn.text() == "Stop Search"
+    assert window.stop_search_btn.text() == "Stopp"
     assert not window.pause_search_btn.isEnabled()
-    assert window.pause_search_btn.text() == "Pause Search"
+    assert window.pause_search_btn.text() == "Pause"
     assert not window.patient_excel_btn.isEnabled()
     assert not hasattr(window, "patient_pdf_btn")
     assert not hasattr(window, "clinvar_key_edit")
@@ -187,7 +194,7 @@ def test_artifact_settings_show_catalog_and_af_exception(qt_app):
     ]
 
     assert window.artifact_table.rowCount() == 51
-    assert headers == ["Gene", "HGVSc", "Artifact through AF", "Reason"]
+    assert headers == ["Gen", "HGVSc", "Artefakt til og med AF", "Begrunnelse"]
     assert window.artifact_table.item(0, 1).text() == "NM_015338.5:c.1934dup"
     assert window.artifact_table.item(0, 2).text() == "5.5%"
     assert window._artifact_rules_from_table() == default_artifact_rules()
@@ -197,10 +204,10 @@ def test_settings_are_grouped_into_four_operator_sections(qt_app):
     window = MainWindow()
 
     assert [group.title() for group in window.settings_groups] == [
-        "Local files",
-        "Browser access",
-        "Search pacing",
-        "Artifact rules",
+        "Rapportmappe og referanselister",
+        "Tilgang i Edge",
+        "Søkevalg",
+        "Manuelle artefaktregler",
     ]
     assert not hasattr(window, "history_edit")
 
@@ -216,7 +223,7 @@ def test_sidebar_navigation_switches_workspace_pages(qt_app):
 
     assert window.tabs.currentIndex() == 1
     assert window.nav_buttons[1].isChecked()
-    assert window.page_title.text() == "Evidence search"
+    assert window.page_title.text() == "Kilder og søk"
     assert window.page_eyebrow.text().endswith("EVIDENCE")
 
 
@@ -225,11 +232,11 @@ def test_navigation_uses_short_labels_without_numbered_workflow_copy(qt_app):
 
     labels = [button.text() for button in window.navigation.buttons]
 
-    assert labels == ["Import", "Evidence", "Settings"]
+    assert labels == ["Importer", "Kilder og søk", "Innstillinger"]
     assert all(not re.match(r"\d", label) for label in labels)
 
 
-def test_run_status_strip_exposes_interrupted_recovery_action(qt_app):
+def test_run_status_strip_exposes_interruption_without_duplicate_search_action(qt_app):
     strip = RunStatusStrip()
     strip.set_snapshot(
         RunSnapshot(
@@ -240,9 +247,9 @@ def test_run_status_strip_exposes_interrupted_recovery_action(qt_app):
         )
     )
 
-    assert strip.phase_label.text() == "Interrupted · resume available"
+    assert strip.phase_label.text() == "Stoppet"
     assert "7 / 28" in strip.progress_label.text()
-    assert not strip.resume_button.isHidden()
+    assert strip.resume_button.isHidden()
 
 
 def test_status_matrix_renders_visible_text_for_every_state(qt_app):
@@ -261,9 +268,9 @@ def test_status_matrix_renders_visible_text_for_every_state(qt_app):
         ]
     )
 
-    assert matrix.item(0, 2).text() == "Complete"
-    assert matrix.item(0, 3).text() == "Retry"
-    assert matrix.item(0, 4).text() == "Save pending"
+    assert matrix.item(0, 2).text() == "Utført"
+    assert matrix.item(0, 3).text() == "Prøv igjen"
+    assert matrix.item(0, 4).text() == "Lagring venter"
 
 
 def test_activity_is_logged_without_duplicate_evidence_panel(qt_app):
@@ -288,7 +295,7 @@ def test_evidence_has_run_queue_without_redundant_retry_button(qt_app):
     from PyQt6.QtWidgets import QLabel
     window = MainWindow()
     labels = {label.text() for label in window.database_scroll.findChildren(QLabel)}
-    assert "Run queue" in labels
+    assert "Ingen review-fil lastet" in labels
     assert "Research queue" not in labels
     assert not hasattr(window, "rerun_failed_btn")
     window._set_busy("Searching")
@@ -333,6 +340,7 @@ def test_selected_patient_ids_deduplicate_selected_rows(qt_app, tmp_path):
     window._refresh_operations_cockpit()
     first_patient = window.status_matrix.item(0, 0).text()
     window.status_matrix.selectRow(0)
+    window.status_matrix.set_selected_patients([window.status_matrix.item(0, 0).text()])
 
     assert window._selected_patient_ids() == [first_patient]
 
@@ -365,7 +373,7 @@ def test_priority_controls_require_an_explicit_patient_selection(qt_app, tmp_pat
     assert window._explicitly_selected_patient_ids() == []
     assert not window.priority_search_btn.isEnabled()
     assert not window.retry_selected_btn.isEnabled()
-    assert window.priority_selection_status.text() == "0 pasienter valgt"
+    assert window.priority_selection_status.text() == "Ingen avkrysset · søk gjelder alle"
     assert (
         window.status_matrix.selectionMode()
         == QAbstractItemView.SelectionMode.ExtendedSelection
@@ -374,12 +382,13 @@ def test_priority_controls_require_an_explicit_patient_selection(qt_app, tmp_pat
 
     first_patient = window.status_matrix.item(0, 0).text()
     window.status_matrix.selectRow(0)
+    window.status_matrix.set_selected_patients([window.status_matrix.item(0, 0).text()])
     qt_app.processEvents()
 
     assert window._explicitly_selected_patient_ids() == [first_patient]
     assert window.priority_search_btn.isEnabled()
     assert not window.retry_selected_btn.isEnabled()
-    assert window.priority_selection_status.text() == "1 pasient valgt"
+    assert window.priority_selection_status.text().startswith("1 av ")
 
 
 def test_matrix_tracks_source_completion_failure_and_search_scope(qt_app, tmp_path, monkeypatch):
@@ -400,19 +409,20 @@ def test_matrix_tracks_source_completion_failure_and_search_scope(qt_app, tmp_pa
     window._source_state_changed(variant.patient_id, "Franklin", True)
     clinvar_column = 2 + window.databases.index("ClinVar")
     franklin_column = 2 + window.databases.index("Franklin")
-    assert window.status_matrix.item(0, clinvar_column).text() == "Running"
+    assert window.status_matrix.item(0, clinvar_column).text() == "Søker"
     window._search_evidence_updated({key: [DatabaseEvidence("ClinVar", "found", "ok")]})
     window._source_state_changed(variant.patient_id, "ClinVar", False)
-    assert window.status_matrix.item(0, clinvar_column).text() == "Complete"
+    assert window.status_matrix.item(0, clinvar_column).text() == "Utført"
 
     monkeypatch.setattr(window, "_auto_rewrite_workbook", lambda: None)
     monkeypatch.setattr("archer_processor.gui.app.QMessageBox.critical", lambda *args: None)
     window._search_started_at = time.monotonic()
     window.status_matrix.selectRow(0)
+    window.status_matrix.set_selected_patients([window.status_matrix.item(0, 0).text()])
     window._worker_failed("Microsoft Edge timed out during Runtime.evaluate")
 
-    assert window.status_matrix.item(0, franklin_column).text() == "Retry"
-    assert window.status_matrix.item(1, franklin_column).text() == "Queued"
+    assert window.status_matrix.item(0, franklin_column).text() == "Prøv igjen"
+    assert window.status_matrix.item(1, franklin_column).text() == "Venter"
     assert future_key not in window.evidence
     assert window.retry_selected_btn.isEnabled()
     assert not window._active_sources
@@ -430,7 +440,7 @@ def test_matrix_marks_unsearched_variants_as_skipped(qt_app, tmp_path):
     )
     window.result.variants = [automatic_skip]
     window._refresh_operations_cockpit()
-    assert window.status_matrix.item(0, 2).text() == "Skipped"
+    assert window.status_matrix.item(0, 2).text() == "Hoppet over"
 
 
 def test_source_failure_keeps_mtbp_resume_id_and_completed_evidence(qt_app, tmp_path):
@@ -474,6 +484,7 @@ def test_retry_selected_enables_only_for_attempted_failures(qt_app, tmp_path, mo
         if window.status_matrix.item(row, 0).text() == first_patient
     )
     window.status_matrix.selectRow(patient_row)
+    window.status_matrix.set_selected_patients([first_patient])
     qt_app.processEvents()
 
     assert not window.retry_selected_btn.isEnabled()
@@ -619,6 +630,7 @@ def test_priority_action_starts_only_selected_patient_scope(qt_app, tmp_path, mo
     window._refresh_operations_cockpit()
     first_patient = window.status_matrix.item(0, 0).text()
     window.status_matrix.selectRow(0)
+    window.status_matrix.set_selected_patients([window.status_matrix.item(0, 0).text()])
     qt_app.processEvents()
     launches = []
     monkeypatch.setattr(
@@ -1175,7 +1187,7 @@ def test_processed_workbook_can_resume_into_review_pages(qt_app, tmp_path, monke
     assert window.tabs.currentIndex() == 1
     assert window.status_badge.text() == "Workbook loaded"
     assert window.resume_edit.text() == str(output)
-    assert "Restored 5 variants" in window.resume_status.text()
+    assert "Gjenåpnet 5 varianter" in window.resume_status.text()
     assert not window.included_only_check.isChecked()
     assert window.settings.last_processed_workbook == str(output)
     assert saved == [True]
@@ -1856,7 +1868,7 @@ def test_stop_search_requests_safe_interruption_and_keeps_status(
 
     assert thread.interrupted
     assert not worker.pause_control.pause_requested
-    assert window.stop_search_btn.text() == "Stopping…"
+    assert window.stop_search_btn.text() == "Stopper…"
     assert "already collected" in window.run_progress.detail.text()
 
     window._search_cancelled()
@@ -1882,12 +1894,12 @@ def test_pause_and_resume_keep_the_same_active_search_queue(qt_app, tmp_path):
     window._toggle_search_pause()
 
     assert worker.pause_control.pause_requested
-    assert window.pause_search_btn.text() == "Resume Search"
+    assert window.pause_search_btn.text() == "Fortsett"
     assert window.status_badge.text() == "Pausing"
     assert "current browser action" in window.run_progress.detail.text()
 
     window._toggle_search_pause()
 
     assert not worker.pause_control.pause_requested
-    assert window.pause_search_btn.text() == "Pause Search"
+    assert window.pause_search_btn.text() == "Pause"
     assert window.status_badge.text() == "Resuming"

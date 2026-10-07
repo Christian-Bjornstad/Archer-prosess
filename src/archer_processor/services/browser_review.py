@@ -11,12 +11,13 @@ from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from PIL import Image, PngImagePlugin
 
 from archer_processor.core.highlights import is_automatic_database_skip
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
+from archer_processor.core.variant_key_guard import validate_variant_keys
 from archer_processor.services.genomic_notation import format_mtbp_grch37
 from archer_processor.services.capture_layout import expanded_capture_layout
 from archer_processor.services.provider_failures import (
@@ -149,6 +150,7 @@ class BrowserReviewService:
         self.capture_validator = capture_validator
         self._cosmic_cache: dict[str, DatabaseEvidence] = {}
         self._mtbp_rejected_transcript_queries: set[str] = set()
+        self._variant_result_callback: Callable[[VariantRecord, DatabaseEvidence], None] | None = None
 
     @staticmethod
     def dependency_available() -> bool:
@@ -248,6 +250,7 @@ class BrowserReviewService:
         prior_evidence: dict[str, list[DatabaseEvidence]] | None = None,
     ) -> dict[str, list[DatabaseEvidence]]:
         variant_list = list(variants)
+        validate_variant_keys(variant_list)
         searchable_variants = [
             variant
             for variant in variant_list
@@ -290,21 +293,12 @@ class BrowserReviewService:
                 )
             provider_started_at = time.monotonic()
             provider_directory = artifact_root / database.lower().replace(" ", "-")
-            database_results = self._search_database(
-                database,
-                pending_variants,
-                provider_directory,
-                progress=provider_progress,
-                prior_evidence=prior_evidence,
-            )
-            provider_duration = time.monotonic() - provider_started_at
             variants_by_key = {
                 self.variant_key(variant): variant for variant in pending_variants
             }
-            for key, evidence in database_results.items():
-                variant = variants_by_key.get(key)
-                if variant is None:
-                    continue
+            published: dict[str, DatabaseEvidence] = {}
+
+            def persist_result(variant: VariantRecord, evidence: DatabaseEvidence) -> None:
                 query_attempts = evidence.raw.get("query_attempts", [])
                 try:
                     write_evidence_audit(
@@ -315,7 +309,7 @@ class BrowserReviewService:
                         query_attempts=(
                             query_attempts if isinstance(query_attempts, list) else []
                         ),
-                        duration_seconds=provider_duration,
+                        duration_seconds=time.monotonic() - provider_started_at,
                     )
                 except OSError as exc:
                     if progress:
@@ -323,6 +317,35 @@ class BrowserReviewService:
                             f"{database}: audit could not be written; result remains "
                             f"in memory for workbook checkpoint ({exc})"
                         )
+
+            def publish_result(variant: VariantRecord, evidence: DatabaseEvidence) -> None:
+                key = self.variant_key(variant)
+                persist_result(variant, evidence)
+                published[key] = evidence
+                if checkpoint:
+                    checkpoint(deepcopy({key: [evidence]}))
+
+            previous_callback = self._variant_result_callback
+            self._variant_result_callback = publish_result
+            try:
+                database_results = self._search_database(
+                    database,
+                    pending_variants,
+                    provider_directory,
+                    progress=provider_progress,
+                    prior_evidence=prior_evidence,
+                )
+            finally:
+                self._variant_result_callback = previous_callback
+            provider_duration = time.monotonic() - provider_started_at
+            unpublished_results = {
+                key: evidence for key, evidence in database_results.items()
+                if published.get(key) is not evidence
+            }
+            for key, evidence in unpublished_results.items():
+                variant = variants_by_key.get(key)
+                if variant is not None:
+                    persist_result(variant, evidence)
             self._report_provider_results(
                 database,
                 pending_variants,
@@ -332,12 +355,12 @@ class BrowserReviewService:
             )
             for key, evidence in database_results.items():
                 results[key].append(evidence)
-            if checkpoint and database_results:
+            if checkpoint and unpublished_results:
                 checkpoint(
-                    {
+                    deepcopy({
                         key: [evidence]
-                        for key, evidence in database_results.items()
-                    }
+                        for key, evidence in unpublished_results.items()
+                    })
                 )
             if activity:
                 activity(database, "Provider finished")
@@ -349,6 +372,12 @@ class BrowserReviewService:
                     progress=provider_progress,
                 )
         return results
+
+    def _publish_variant_result(
+        self, variant: VariantRecord, evidence: DatabaseEvidence
+    ) -> None:
+        if self._variant_result_callback is not None:
+            self._variant_result_callback(variant, evidence)
 
     def _report_provider_results(
         self,
@@ -482,6 +511,7 @@ class BrowserReviewService:
                         results[key] = DatabaseEvidence(
                             database, "invalid_query", f"Cannot build a {database} web query."
                         )
+                        self._publish_variant_result(variant, results[key])
                         continue
                     if progress:
                         progress(
@@ -514,6 +544,7 @@ class BrowserReviewService:
                             accession=_review_query(variant),
                             url=query_url,
                         )
+                    self._publish_variant_result(variant, results[key])
                     if index < len(variants):
                         self._wait_between_queries(
                             page, database, progress=progress
@@ -704,6 +735,7 @@ class BrowserReviewService:
                             accession=variant.cosmic_id,
                             url=self.query_url("COSMIC", variant),
                         )
+                    self._publish_variant_result(variant, results[key])
                     if index < len(searchable_variants):
                         self._wait_between_queries(page, "COSMIC", progress=progress)
             finally:
@@ -783,6 +815,7 @@ class BrowserReviewService:
     ) -> DatabaseEvidence:
         """Retry one transient COSMIC navigation/render failure without changing identity."""
         for attempt in range(2):
+            self._check_cancelled()
             try:
                 page.goto(
                     query_url,
@@ -805,23 +838,24 @@ class BrowserReviewService:
                     variant, page, artifact_directory
                 )
             except ProviderLookupError as exc:
-                return DatabaseEvidence(
-                    "COSMIC",
-                    exc.kind.value,
-                    str(exc),
-                    accession=_cosmic_identifier(variant.cosmic_id),
-                    url=page.url,
-                    raw={"failure_kind": exc.kind.value},
-                )
-            except Exception:
-                if attempt == 1:
-                    raise
-                if progress:
-                    progress(
-                        f"COSMIC: transient page failure for {variant.cosmic_id}; "
-                        "retrying once"
+                if exc.kind != ProviderFailureKind.TRANSIENT or attempt == 1:
+                    return DatabaseEvidence(
+                        "COSMIC",
+                        exc.kind.value,
+                        str(exc),
+                        accession=_cosmic_identifier(variant.cosmic_id),
+                        url=page.url,
+                        raw={"failure_kind": exc.kind.value},
                     )
-                page.wait_for_timeout(750)
+            except Exception as exc:
+                if attempt == 1 or not _transient_browser_failure(exc):
+                    raise
+            if progress:
+                progress(
+                    f"COSMIC: transient page failure for {variant.cosmic_id}; "
+                    "retrying once"
+                )
+            self._interruptible_page_wait(page, 750)
         raise RuntimeError("COSMIC retry loop ended unexpectedly.")
 
     def _resolve_cosmic_mutation_page(
@@ -831,14 +865,20 @@ class BrowserReviewService:
         cosmic_number = _cosmic_numeric_id(variant.cosmic_id)
         if not cosmic_number:
             raise ValueError("COSMIC identifier is missing its numeric component.")
+        if self._login_required("COSMIC", page.url):
+            raise ProviderLookupError(
+                ProviderFailureKind.LOGIN_REQUIRED,
+                "COSMIC session expired; use Sign In / Refresh and retry.",
+            )
         if "/cosmic/mutation/overview" not in page.url:
             links = page.locator("a[href*='/cosmic/mutation/overview']")
             attempts = max(1, self.navigation_timeout_ms // 500)
             for _ in range(attempts):
+                self._check_cancelled()
                 candidates = [
                     href
                     for href in links.evaluate_all("nodes => nodes.map(node => node.href)")
-                    if href and f"merge={cosmic_number}" in href
+                    if href and parse_qs(urlsplit(href).query).get("merge") == [cosmic_number]
                 ]
                 candidates = list(dict.fromkeys(candidates))
                 if len(candidates) == 1:
@@ -853,16 +893,18 @@ class BrowserReviewService:
                         ProviderFailureKind.AMBIGUOUS,
                         f"COSMIC returned multiple canonical pages for {variant.cosmic_id}."
                     )
+                self._raise_for_cosmic_terminal_page(page)
                 page.wait_for_timeout(500)
             else:
                 raise ProviderLookupError(
-                    ProviderFailureKind.NOT_FOUND,
-                    f"COSMIC did not expose a canonical mutation link for {variant.cosmic_id}."
+                    ProviderFailureKind.TRANSIENT,
+                    f"COSMIC did not finish rendering a canonical mutation link for {variant.cosmic_id}."
                 )
 
         grch37_links = page.locator("a[href*='genome=37'][href*='id=']")
         candidates: list[str] = []
         for _ in range(max(1, self.navigation_timeout_ms // 500)):
+            self._check_cancelled()
             candidates = list(
                 dict.fromkeys(
                     href
@@ -874,11 +916,12 @@ class BrowserReviewService:
             )
             if candidates:
                 break
+            self._raise_for_cosmic_terminal_page(page)
             page.wait_for_timeout(500)
         if not candidates:
             raise ProviderLookupError(
-                ProviderFailureKind.NOT_FOUND,
-                "COSMIC did not expose a GRCh37 mutation link.",
+                ProviderFailureKind.TRANSIENT,
+                "COSMIC did not finish rendering a GRCh37 mutation link.",
             )
         if len(candidates) > 1:
             raise ProviderLookupError(
@@ -891,6 +934,19 @@ class BrowserReviewService:
             timeout=self.navigation_timeout_ms,
         )
         self._verify_cosmic_grch37(page)
+
+    def _raise_for_cosmic_terminal_page(self, page: Any) -> None:
+        if self._login_required("COSMIC", page.url):
+            raise ProviderLookupError(
+                ProviderFailureKind.LOGIN_REQUIRED,
+                "COSMIC session expired; use Sign In / Refresh and retry.",
+            )
+        body_text = page.locator("body").inner_text()
+        if re.search(r"\b(?:mutation not found|no results found|no results were found)\b", body_text, re.I):
+            raise ProviderLookupError(
+                ProviderFailureKind.NOT_FOUND,
+                "COSMIC explicitly reported no matching mutation.",
+            )
 
     def _cosmic_grch37_options(self, page: Any) -> list[dict[str, str]]:
         options = page.locator("a[href*='genome=37']").evaluate_all(
@@ -979,6 +1035,7 @@ class BrowserReviewService:
                             url=page.url,
                             raw={"failure_stage": "website lookup"},
                         )
+                    self._publish_variant_result(variant, results[key])
                     if index < len(variants):
                         self._wait_between_queries(page, "ClinVar", progress=progress)
             finally:
@@ -995,6 +1052,7 @@ class BrowserReviewService:
         artifact_directory: Path,
     ) -> DatabaseEvidence:
         attempts: list[str] = []
+        rejected_records: set[str] = set()
         for query in _clinvar_queries(variant):
             protein_fallback = query == _clinvar_protein_query(variant)
             attempts.append(query)
@@ -1007,21 +1065,26 @@ class BrowserReviewService:
                 wait_until="domcontentloaded",
                 timeout=self.navigation_timeout_ms,
             )
-            body_text = page.locator("body").inner_text(
-                timeout=self.navigation_timeout_ms
-            )
-            if "/clinvar/variation/" not in page.url:
-                links = page.locator(
-                    "a[href*='/clinvar/variation/']"
-                ).evaluate_all(
-                    "nodes => nodes.map(node => ({"
-                    "text: (node.closest('tr, article, li, .rprt')?.innerText || "
-                    "node.parentElement?.innerText || node.innerText).trim(), "
-                    "href: node.href}))"
+            try:
+                body_text, links = self._wait_for_clinvar_result(page)
+            except TimeoutError as exc:
+                return DatabaseEvidence(
+                    "ClinVar", "error", str(exc),
+                    accession=_review_query(variant), url=page.url,
+                    raw={
+                        "failure_kind": ProviderFailureKind.TRANSIENT.value,
+                        "failure_stage": "result_rendering",
+                        "query_attempts": list(attempts),
+                    },
                 )
+            if "/clinvar/variation/" not in page.url:
                 candidates = _matching_clinvar_links(
                     links, variant, allow_protein=protein_fallback
                 )
+                candidates = [
+                    candidate for candidate in candidates
+                    if urlsplit(candidate).path.rstrip("/") not in rejected_records
+                ]
                 if len(candidates) > 1:
                     return DatabaseEvidence(
                         "ClinVar",
@@ -1039,13 +1102,23 @@ class BrowserReviewService:
                     wait_until="domcontentloaded",
                     timeout=self.navigation_timeout_ms,
                 )
-                body_text = page.locator("body").inner_text(
-                    timeout=self.navigation_timeout_ms
-                )
+                try:
+                    body_text, _ = self._wait_for_clinvar_result(page)
+                except TimeoutError as exc:
+                    return DatabaseEvidence(
+                        "ClinVar", "error", str(exc),
+                        accession=_review_query(variant), url=page.url,
+                        raw={
+                            "failure_kind": ProviderFailureKind.TRANSIENT.value,
+                            "failure_stage": "result_rendering",
+                            "query_attempts": list(attempts),
+                        },
+                    )
             verification = _clinvar_identity(
                 body_text, variant, allow_protein=protein_fallback
             )
             if not verification.accepted:
+                rejected_records.add(urlsplit(page.url).path.rstrip("/"))
                 continue
             accession_match = re.search(
                 r"Accession:\s*(VCV\d+(?:\.\d+)?)", body_text, re.IGNORECASE
@@ -1075,6 +1148,57 @@ class BrowserReviewService:
             url=page.url,
             raw={"query_attempts": attempts},
         )
+
+    def _wait_for_clinvar_result(
+        self, page: Any
+    ) -> tuple[str, list[dict[str, str]]]:
+        """Read a completed search or record before deciding identity or absence."""
+        for poll in range(max(1, self.navigation_timeout_ms // 250) + 1):
+            self._check_cancelled()
+            body_text = page.locator("body").inner_text(
+                timeout=self.navigation_timeout_ms
+            )
+            if "/clinvar/variation/" in page.url:
+                if (
+                    re.search(r"\b(?:Variation ID|VCV\d+)", body_text, re.I)
+                    and re.search(
+                        r"\b(?:\d{1,2}|X|Y|M|MT):\s*\d+\s*\(GRCh37\)",
+                        body_text, re.I,
+                    )
+                    # Record metadata can render before the gene/HGVS title.
+                    # Any complete identity may be verified, including a mismatch.
+                    and re.search(
+                        r"(?m)^[ \t]*(?:[A-Za-z][\w.-]*[ \t]*"
+                        r"\([A-Za-z][\w.-]*\)[ \t]*:[ \t]*|"
+                        r"(?!(?:HGVS|Name|Gene|Location|Variation|Accession)\b)"
+                        r"[A-Za-z][A-Za-z0-9-]*(?:[ \t]*:[ \t]*|[ \t]+))"
+                        r"[cnpg]\.\S+",
+                        body_text, re.I,
+                    )
+                ):
+                    return body_text, []
+            else:
+                links = page.locator("a[href*='/clinvar/variation/']").evaluate_all(
+                    "nodes => nodes.map(node => ({"
+                    "text: (node.closest('tr, article, li, .rprt')?.innerText || "
+                    "node.parentElement?.innerText || node.innerText).trim(), "
+                    "href: node.href}))"
+                )
+                if any(
+                    isinstance(item, dict)
+                    and item.get("href")
+                    and re.search(r"\b[cnpg]\.", str(item.get("text") or ""), re.I)
+                    for item in links
+                ):
+                    return body_text, links
+                if re.search(
+                    r"\b(?:no items found|no results found|0 results|"
+                    r"your search did not find)", body_text, re.I,
+                ):
+                    return body_text, []
+            if poll < max(1, self.navigation_timeout_ms // 250):
+                self._interruptible_page_wait(page, 250)
+        raise TimeoutError("ClinVar did not finish rendering the website result.")
 
     def _capture_clinvar_result(
         self,
@@ -1331,7 +1455,12 @@ class BrowserReviewService:
                             progress=progress,
                         )
                         results[key] = evidence
-                        if evidence.status in retryable_statuses:
+                        self._publish_variant_result(variant, evidence)
+                        if (
+                            evidence.status in retryable_statuses
+                            and str(evidence.raw.get("failure_kind") or "")
+                            in {"", ProviderFailureKind.TRANSIENT.value}
+                        ):
                             retry_variants.append(variant)
                         if index < len(pending):
                             self._wait_between_queries(
@@ -1397,6 +1526,12 @@ class BrowserReviewService:
                 )
             if evidence.status == "found":
                 break
+            if str(evidence.raw.get("failure_kind") or "") in {
+                ProviderFailureKind.LAYOUT_CHANGED.value,
+                ProviderFailureKind.AMBIGUOUS.value,
+                ProviderFailureKind.LOGIN_REQUIRED.value,
+            }:
+                break
             if evidence.status not in {
                 "identity_mismatch",
                 "timeout",
@@ -1426,6 +1561,7 @@ class BrowserReviewService:
     ) -> DatabaseEvidence:
         _, _, browser_timeout = self._browser_api()
         last_text = ""
+        failure_kind = ProviderFailureKind.TRANSIENT
         stage = "opening the Franklin search page"
         try:
             page.goto(
@@ -1494,11 +1630,19 @@ class BrowserReviewService:
                 if "Something went wrong" in last_text
                 else "Franklin classification did not finish rendering within 60 seconds."
             )
+        except ProviderLookupError as exc:
+            status = exc.kind.value
+            failure_kind = exc.kind
+            error = f"Franklin failed while {stage}: {exc}"
         except browser_timeout:
             status = "timeout"
             error = f"Franklin timed out while {stage}."
         except Exception as exc:
             status = "error"
+            failure_kind = (
+                ProviderFailureKind.TRANSIENT if _transient_browser_failure(exc)
+                else ProviderFailureKind.LAYOUT_CHANGED
+            )
             error = f"Franklin failed while {stage}: {exc}"
         return DatabaseEvidence(
             "Franklin",
@@ -1507,6 +1651,7 @@ class BrowserReviewService:
             accession=query,
             url=page.url,
             raw={
+                "failure_kind": failure_kind.value,
                 "failure_stage": stage,
                 "visible_text_preview": last_text[:12_000],
             },
@@ -1564,7 +1709,8 @@ class BrowserReviewService:
                     except Exception:
                         page.wait_for_timeout(500)
                         continue
-                raise ValueError(
+                raise ProviderLookupError(
+                    ProviderFailureKind.AMBIGUOUS,
                     f"Franklin returned {len(option_texts)} ambiguous variants for "
                     f"{_franklin_search_query(variant)}."
                 )
@@ -1580,8 +1726,16 @@ class BrowserReviewService:
     def _select_franklin_search_mode(self, page: Any) -> None:
         """Choose the explicitly requested GRCh37/hg19 somatic search mode."""
         comboboxes = page.get_by_role("combobox")
+        for _ in range(max(1, self.navigation_timeout_ms // 250)):
+            self._check_cancelled()
+            if comboboxes.count() >= 2:
+                break
+            self._interruptible_page_wait(page, 250)
         if comboboxes.count() < 2:
-            raise RuntimeError("Franklin reference/type selectors were not available.")
+            raise ProviderLookupError(
+                ProviderFailureKind.LAYOUT_CHANGED,
+                "Franklin reference/type selectors were not available.",
+            )
         for combobox, option_name in (
             (comboboxes.nth(0), "hg19"),
             (comboboxes.nth(1), "Somatic"),
@@ -1598,7 +1752,8 @@ class BrowserReviewService:
             option = page.get_by_role("option", name=option_name, exact=True)
             option.wait_for(state="visible", timeout=self.navigation_timeout_ms)
             if option.count() != 1:
-                raise RuntimeError(
+                raise ProviderLookupError(
+                    ProviderFailureKind.LAYOUT_CHANGED,
                     f"Franklin search option was not uniquely available: {option_name}"
                 )
             option_click = getattr(option, "click_physical", option.click)
@@ -3934,6 +4089,17 @@ def _cosmic_identifier(value: str | None) -> str:
     return identifiers[0] if identifiers else ""
 
 
+def _transient_browser_failure(exc: Exception) -> bool:
+    """Limit automatic query replays to timeouts and recoverable network errors."""
+    return isinstance(exc, (TimeoutError, ConnectionError)) or bool(
+        re.search(
+            r"\bnet::ERR_(?:CONNECTION_RESET|CONNECTION_CLOSED|CONNECTION_ABORTED|"
+            r"TIMED_OUT|NETWORK_CHANGED|NAME_NOT_RESOLVED|INTERNET_DISCONNECTED)\b",
+            str(exc), re.I,
+        )
+    )
+
+
 def _cosmic_identifiers(value: str | None) -> list[str]:
     identifiers: list[str] = []
     seen: set[str] = set()
@@ -3999,17 +4165,35 @@ def _oncokb_page_matches_variant(
     if expected_hgvsg.startswith("chr"):
         expected_hgvsg = expected_hgvsg[3:]
     if "/hgvsg/" in url.casefold() and expected_hgvsg:
-        normalized_url = url.replace("%3E", ">").replace("%3e", ">")
+        parsed_url = urlsplit(url)
+        reference_genomes = [
+            value.casefold()
+            for key, values in parse_qs(parsed_url.query).items()
+            if key.casefold() == "refgenome"
+            for value in values
+        ]
         return (
-            f"/hgvsg/{expected_hgvsg}" in normalized_url
-            and "refgenome=grch37" in normalized_url.casefold()
+            unquote(parsed_url.path).rstrip("/") == f"/hgvsg/{expected_hgvsg}"
+            and reference_genomes == ["grch37"]
         )
-    compact = re.sub(r"[^A-Za-z0-9*]", "", body_text or "").casefold()
     alteration = _protein_change(variant.hgvsp) or _cdna_change(variant.hgvsc)
-    expected = re.sub(
-        r"[^A-Za-z0-9*]", "", f"{variant.symbol}{alteration}"
-    ).casefold()
-    return bool(expected and expected in compact)
+    return bool(
+        variant.symbol and alteration and re.search(
+            r"(?<![A-Za-z0-9_])" + re.escape(variant.symbol)
+            + r"[\s:(),;/|\-]*" + re.escape(alteration)
+            + r"(?![A-Za-z0-9_*>+\-])", body_text or "", re.I,
+        )
+    )
+
+
+def _contains_hgvs_change(text: str, change: str) -> bool:
+    if not change:
+        return False
+    pattern = r"\s*".join(re.escape(character) for character in change)
+    return bool(re.search(
+        r"(?<![A-Za-z0-9_])" + pattern + r"(?![A-Za-z0-9_*>+\-])",
+        text or "", re.I,
+    ))
 
 
 def _clinvar_queries(variant: VariantRecord) -> list[str]:
@@ -4065,14 +4249,15 @@ def _clinvar_identity(
         return IdentityVerification(
             False, "variant_change", "ClinVar page did not show the requested gene."
         )
-    if cdna and cdna in compact and transcript and transcript in compact:
+    cdna_matches = _contains_hgvs_change(body_text, cdna)
+    if cdna_matches and transcript and transcript in compact:
         return IdentityVerification(
             True,
             "exact_transcript_grch37",
             "Transcript cDNA and GRCh37 location matched.",
             expected,
         )
-    if cdna and cdna in compact:
+    if cdna_matches:
         return IdentityVerification(
             True, "gene_cdna_grch37",
             "Gene, cDNA change, and GRCh37 location matched.", expected,
@@ -4104,9 +4289,9 @@ def _matching_clinvar_links(
     for item in links:
         if not isinstance(item, dict):
             continue
-        text = re.sub(r"\s+", "", str(item.get("text") or "")).casefold()
+        text = str(item.get("text") or "")
         href = str(item.get("href") or "").strip()
-        matched_change = bool(cdna and cdna in text)
+        matched_change = _contains_hgvs_change(text, cdna)
         if allow_protein:
             matched_change = matched_change or _clinvar_protein_matches(
                 str(item.get("text") or ""), variant
@@ -4458,30 +4643,29 @@ def _franklin_identity(
     url: str,
     variant: VariantRecord,
 ) -> IdentityVerification:
-    compact = re.sub(r"\s+", "", body_text or "").casefold()
-    if variant.symbol and variant.symbol.casefold() not in compact:
+    if variant.symbol and not re.search(rf"\b{re.escape(variant.symbol)}\b", body_text or "", re.I):
         return IdentityVerification(False, "none", "Gene symbol did not match.")
+    expected = genomic_identity(variant)
+    returned = _franklin_genomic_identity(body_text, url)
+    if expected and returned and expected != returned:
+        return IdentityVerification(
+            False,
+            "grch37_genomic",
+            "Returned GRCh37 genomic identity differed from the requested variant.",
+            returned,
+        )
     cdna = _cdna_change(variant.hgvsc)
-    if cdna and cdna.casefold() in compact:
+    if _contains_hgvs_change(body_text, cdna):
         return IdentityVerification(
             True,
             "exact_transcript",
             "Transcript cDNA matched exactly.",
         )
-    expected = genomic_identity(variant)
-    returned = _franklin_genomic_identity(body_text, url)
     if expected and returned:
-        if expected == returned:
-            return IdentityVerification(
-                True,
-                "grch37_genomic",
-                "GRCh37 chromosome, position, reference, and alternate matched.",
-                returned,
-            )
         return IdentityVerification(
-            False,
+            True,
             "grch37_genomic",
-            "Returned GRCh37 genomic identity differed from the requested variant.",
+            "GRCh37 chromosome, position, reference, and alternate matched.",
             returned,
         )
     protein = _mtbp_normalized_protein(_protein_change(variant.hgvsp))

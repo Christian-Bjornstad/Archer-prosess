@@ -13,9 +13,10 @@ from typing import Any
 
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
 from archer_processor.services.capture_validation import validate_capture
+from archer_processor.services.variant_identity import genomic_identity
 
 
-AUDIT_SCHEMA_VERSION = 2
+AUDIT_SCHEMA_VERSION = 3
 RETRYABLE_EVIDENCE_STATUSES = frozenset(
     {
         "error",
@@ -71,9 +72,10 @@ class EvidenceAuditIndex:
         return cls(root=root, by_digest=dict(by_digest))
 
     def candidates(self, database: str, variant: VariantRecord) -> list[Path]:
-        digest = audit_digest(database, variant)
+        digests = {audit_digest(database, variant), _legacy_audit_digest(database, variant)}
         return [
             path
+            for digest in digests
             for path in self.by_digest.get(digest, [])
             if path.parent.name.casefold() == database.casefold()
         ]
@@ -82,6 +84,8 @@ class EvidenceAuditIndex:
         self,
         database: str,
         variant: VariantRecord,
+        *,
+        patient_index: int | None = None,
     ) -> tuple[Path, dict[str, Any]] | None:
         canonical_name = f"{audit_digest(database, variant)}.audit.json"
         ranked: list[tuple[tuple[int, int, int, float], Path, dict[str, Any]]] = []
@@ -91,6 +95,8 @@ class EvidenceAuditIndex:
             except (OSError, json.JSONDecodeError, UnicodeError):
                 continue
             if not isinstance(payload, dict):
+                continue
+            if not _audit_matches_variant(payload, path, database, variant, patient_index):
                 continue
             raw = payload.get("raw") if isinstance(payload.get("raw"), dict) else {}
             verification = raw.get("identity_verification")
@@ -192,8 +198,84 @@ def _rebase_path(value: str, artifact_root: Path) -> str:
 
 
 def audit_digest(database: str, variant: VariantRecord) -> str:
+    identity = json.dumps(
+        [database, _requested_identity(database, variant)],
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+
+
+def _legacy_audit_digest(database: str, variant: VariantRecord) -> str:
     identity = f"{database}|{variant.symbol}|{variant.hgvsc}|{variant.hgvsp}"
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+
+
+def _requested_identity(database: str, variant: VariantRecord) -> dict[str, Any]:
+    identity = {
+        "sample": variant.sample,
+        "symbol": variant.symbol.strip().upper(),
+        "hgvsc": variant.hgvsc.strip(),
+        "hgvsp": variant.hgvsp.strip(),
+        "transcript": variant.transcript.strip(),
+        "genomic_location": re.sub(r"\s+", "", variant.genomic_location).casefold(),
+        "ref_allele": re.sub(r"\s+", "", variant.ref_allele).upper(),
+        "alt_allele": re.sub(r"\s+", "", variant.alt_allele).upper(),
+    }
+    if database == "COSMIC":
+        identity["cosmic_ids"] = list(dict.fromkeys(
+            match.group(0).upper()
+            for match in re.finditer(r"\bCOS(?:M|V)\d+\b", variant.cosmic_id or "", re.I)
+        ))
+    return identity
+
+
+def _audit_matches_variant(
+    payload: dict[str, Any], path: Path, database: str,
+    variant: VariantRecord, patient_index: int | None,
+) -> bool:
+    if payload.get("database") not in {None, "", database}:
+        return False
+    saved_key = payload.get("variant_key")
+    if saved_key is not None and saved_key != f"{variant.sample}|{variant.hgvsc}":
+        return False
+    requested = payload.get("requested_identity")
+    if requested is not None:
+        return requested == _requested_identity(database, variant)
+    schema_version = payload.get("schema_version")
+    if isinstance(schema_version, int) and schema_version >= AUDIT_SCHEMA_VERSION:
+        return False
+    if saved_key is None:
+        # Identity-poor legacy captures cannot follow another patient's newer file.
+        if patient_index is None or path.parent.parent.name != f"patient-{patient_index:03d}":
+            return False
+    raw = payload.get("raw")
+    verification = raw.get("identity_verification") if isinstance(raw, dict) else None
+    if isinstance(verification, dict):
+        expected = genomic_identity(variant)
+        saved_genomic = verification.get("requested")
+        if saved_genomic is None and verification.get("accepted") is True:
+            saved_genomic = verification.get("returned")
+        if isinstance(saved_genomic, dict):
+            if expected is None:
+                return False
+            normalized = asdict(expected)
+            for key, value in saved_genomic.items():
+                if key not in normalized:
+                    continue
+                if key == "position":
+                    try:
+                        value = int(value)
+                    except (TypeError, ValueError):
+                        return False
+                elif key == "chromosome":
+                    value = str(value).upper().removeprefix("CHR")
+                    if value == "MT":
+                        value = "M"
+                elif key in {"reference", "alternate"}:
+                    value = re.sub(r"\s+", "", str(value)).upper()
+                if value != normalized[key]:
+                    return False
+    return True
 
 
 def write_evidence_audit(
@@ -213,6 +295,7 @@ def write_evidence_audit(
             "schema_version": AUDIT_SCHEMA_VERSION,
             "retryable": not is_completed_evidence(evidence),
             "variant_key": f"{variant.sample}|{variant.hgvsc}",
+            "requested_identity": _requested_identity(database, variant),
             "query_attempts": list(query_attempts),
             "duration_seconds": round(max(0.0, duration_seconds), 3),
             "written_at": datetime.now(timezone.utc).isoformat(),

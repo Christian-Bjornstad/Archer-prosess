@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from archer_processor.core import default_artifact_rules
-from archer_processor.core.rules import legacy_artifact_rules, merge_v7_artifacts
+from archer_processor.core.rules import artifact_filter_rules, legacy_artifact_rules, merge_v7_artifacts
 from archer_processor.services import credentials
 
 
@@ -14,6 +14,8 @@ from archer_processor.services import credentials
 class AppSettings:
     default_output_dir: str = str(Path.home() / "Desktop")
     who_driver_genes_path: str = ""
+    artifact_rules_path: str = ""
+    load_warnings: list[str] = field(default_factory=list, metadata={"persist": False})
     clinvar_api_key: str = ""
     cosmic_email: str = ""
     cosmic_password: str = field(default="", repr=False, metadata={"persist": False})
@@ -58,14 +60,42 @@ class AppSettings:
             return cls()
         try:
             data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("Configuration must contain a JSON object")
+            data = dict(data)
+            defaults = cls()
+            warnings = []
             persisted_fields = {
                 item.name
                 for item in fields(cls)
                 if item.metadata.get("persist") is not False
             }
+            for name in data.keys() & persisted_fields:
+                value, expected = data[name], getattr(defaults, name)
+                valid = type(value) is type(expected)
+                if type(expected) is int:
+                    valid = type(value) is int and value >= 0
+                elif isinstance(expected, list):
+                    valid = isinstance(value, list)
+                    if valid and name == "enabled_databases":
+                        valid = all(isinstance(item, str) and item in defaults.enabled_databases for item in value)
+                    elif valid and name == "artifact_rules":
+                        valid = all(isinstance(item, dict) and all(isinstance(key, str) and isinstance(entry, str)
+                                    for key, entry in item.items()) for item in value)
+                        if valid:
+                            try:
+                                artifact_filter_rules(value)
+                            except ValueError:
+                                valid = False
+                if not valid:
+                    data[name] = expected
+                    warnings.append(f"Ugyldig innstilling '{name}': standardverdien er brukt. Kontroller Innstillinger.")
             settings = cls(**{key: value for key, value in data.items() if key in persisted_fields})
+            settings.load_warnings = warnings
         except Exception:
-            return cls()
+            settings = cls()
+            settings.load_warnings = ["Innstillingsfilen kunne ikke leses. Standardverdier er brukt; kontroller Innstillinger før behandling."]
+            return settings
         # Migrate former defaults to the new 3-8 second website-only range while
         # preserving any delay range the user actually customized.
         legacy_fixed_delay = (
@@ -149,10 +179,12 @@ class AppSettings:
         for item in fields(self):
             if item.metadata.get("persist") is False:
                 data.pop(item.name, None)
-        temporary = path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        temporary.replace(path)
+        # A managed credential store can reject a save. Keep the previous
+        # configuration until every password has been accepted.
         credentials.save_password("OncoKB", self.oncokb_email, self.oncokb_password)
         credentials.save_password("COSMIC", self.cosmic_email, self.cosmic_password)
         credentials.save_password("Franklin", self.franklin_email, self.franklin_password)
         credentials.save_password("MTBP", self.mtbp_email, self.mtbp_password)
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        temporary.replace(path)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import errno
 import io
 import math
 import json
@@ -15,7 +16,7 @@ import urllib.parse
 import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, BinaryIO, Callable, Iterator
 
 import websocket
 from PIL import Image
@@ -27,6 +28,14 @@ class EdgeCdpError(RuntimeError):
 
 class EdgeCdpTimeout(TimeoutError):
     """A CDP navigation or DOM wait exceeded its configured timeout."""
+
+
+class EdgeCdpPolicyError(EdgeCdpError):
+    """Managed policy prevents a safe, isolated Edge launch."""
+
+
+class EdgeCdpProfileInUse(EdgeCdpError):
+    """The dedicated profile is occupied or cannot be confirmed idle."""
 
 
 def find_edge_executable() -> Path:
@@ -106,7 +115,7 @@ class EdgeCdpLauncher:
                     background=background,
                 )
                 break
-            except EdgeCdpTimeout:
+            except (EdgeCdpTimeout, EdgeCdpPolicyError, EdgeCdpProfileInUse):
                 raise
             except EdgeCdpError as exc:
                 last_error = exc
@@ -137,6 +146,7 @@ class EdgeCdpContext:
         self.profile_directory = profile_directory
         self._page_by_target: dict[str, EdgeCdpPage] = {}
         self._closed = False
+        self._profile_lease: BinaryIO | None = None
 
     @classmethod
     def launch(
@@ -147,13 +157,44 @@ class EdgeCdpContext:
         accept_downloads: bool,
         background: bool = False,
     ) -> "EdgeCdpContext":
-        profile_directory.mkdir(parents=True, exist_ok=True)
+        from archer_processor.services.edge_diagnostics import collect_edge_diagnostics
+
+        diagnostics = collect_edge_diagnostics()
+        if diagnostics.launch_problems:
+            raise EdgeCdpPolicyError(" ".join(diagnostics.launch_problems))
         edge = find_edge_executable()
+        profile_directory = profile_directory.resolve()
+        profile_directory.mkdir(parents=True, exist_ok=True)
+        lease = _acquire_profile_lease(profile_directory)
+        try:
+            context = cls._launch_owned(
+                profile_directory, edge, viewport=viewport,
+                accept_downloads=accept_downloads, background=background,
+            )
+        except BaseException:
+            lease.close()
+            raise
+        context._profile_lease = lease
+        return context
+
+    @classmethod
+    def _launch_owned(
+        cls,
+        profile_directory: Path,
+        edge: Path,
+        *,
+        viewport: dict[str, int],
+        accept_downloads: bool,
+        background: bool,
+    ) -> "EdgeCdpContext":
         # Managed Edge can hand the requested DevTools port to its process
         # broker and announce a different port. Requesting port 0 lets Edge
         # choose a free port itself, which the DevToolsActivePort file in the
         # profile then reports reliably. Never assume the requested port.
         port_file = profile_directory / "DevToolsActivePort"
+        # The lease excludes current Archer processes; this separate check
+        # protects profiles opened by older versions or manual Edge launches.
+        _ensure_profile_idle(profile_directory)
         try:
             port_file.unlink()
         except FileNotFoundError:
@@ -214,7 +255,7 @@ class EdgeCdpContext:
                                 "downloadPath": str(download_directory),
                             },
                         )
-                    except EdgeCdpError:
+                    except (EdgeCdpError, EdgeCdpTimeout):
                         pass
                 return context
             except Exception as exc:
@@ -279,11 +320,19 @@ class EdgeCdpContext:
         if self._closed:
             return
         self._closed = True
+        try:
+            self._close_owned_browser()
+        finally:
+            if self._profile_lease is not None:
+                self._profile_lease.close()
+                self._profile_lease = None
+
+    def _close_owned_browser(self) -> None:
         pages = list(self._page_by_target.values())
         if pages:
             try:
                 pages[0]._connection.call("Browser.close", timeout_ms=2_000)
-            except EdgeCdpError:
+            except (EdgeCdpError, EdgeCdpTimeout):
                 pass
         for page in pages:
             page.close_connection()
@@ -292,7 +341,7 @@ class EdgeCdpContext:
         while time.monotonic() < shutdown_deadline:
             try:
                 _http_json(f"{self.endpoint}/json/version", timeout=0.25)
-            except EdgeCdpError:
+            except (EdgeCdpError, EdgeCdpTimeout):
                 break
             time.sleep(0.1)
         try:
@@ -368,13 +417,17 @@ class _CdpConnection:
         if params:
             payload["params"] = params
         try:
-            self._socket.send(json.dumps(payload))
-            self._socket.settimeout(max(0.1, timeout_ms / 1_000))
             deadline = time.monotonic() + timeout_ms / 1_000
+            self._socket.settimeout(max(0.001, timeout_ms / 1_000))
+            self._socket.send(json.dumps(payload))
             while time.monotonic() < deadline:
                 pending = self._pending.pop(command_id, None)
                 if pending is not None:
                     return self._result(method, pending)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._socket.settimeout(remaining)
                 try:
                     message = json.loads(self._socket.recv())
                 except websocket.WebSocketTimeoutException as exc:
@@ -386,7 +439,7 @@ class _CdpConnection:
                     self._pending[response_id] = message
                 else:
                     self._handle_event(message)
-        except EdgeCdpError:
+        except (EdgeCdpError, EdgeCdpTimeout):
             raise
         except Exception as exc:
             raise EdgeCdpError(f"Microsoft Edge CDP failed during {method}: {exc}") from exc
@@ -445,7 +498,7 @@ class EdgeCdpPage:
             value = self._evaluate_value("location.href", timeout_ms=2_000)
             if value:
                 self._last_url = str(value)
-        except EdgeCdpError:
+        except (EdgeCdpError, EdgeCdpTimeout):
             pass
         return self._last_url
 
@@ -476,7 +529,7 @@ class EdgeCdpPage:
                         self._evaluate_value("location.href", timeout_ms=2_000) or url
                     )
                     return
-            except EdgeCdpError:
+            except (EdgeCdpError, EdgeCdpTimeout):
                 pass
             time.sleep(0.05)
         raise EdgeCdpTimeout(f"Edge did not finish navigating to {url}.")
@@ -540,12 +593,13 @@ class EdgeCdpPage:
     def get_by_text(self, text: str, *, exact: bool = False) -> "EdgeCdpLocator":
         return EdgeCdpLocator(self, _text_expression(text, exact))
 
-    def evaluate(self, script: str) -> Any:
+    def evaluate(self, script: str, *, timeout_ms: int = 30_000) -> Any:
         # Match the page API contract: function expressions are called, while
         # ordinary expressions/statements return their evaluated value.
         return self._evaluate_value(
             "(() => { const value = (0, eval)(" + json.dumps(script) + "); "
-            "return typeof value === 'function' ? value() : value; })()"
+            "return typeof value === 'function' ? value() : value; })()",
+            timeout_ms=timeout_ms,
         )
 
     def once(self, event: str, handler: Callable[[_Dialog], None]) -> None:
@@ -886,7 +940,7 @@ def _close_failed_browser(process, version: dict[str, Any]) -> None:
         try:
             connection = _CdpConnection(websocket_url)
             connection.call("Browser.close", timeout_ms=2_000)
-        except EdgeCdpError:
+        except (EdgeCdpError, EdgeCdpTimeout):
             pass
         finally:
             if connection is not None:
@@ -914,18 +968,101 @@ def _read_devtools_active_port(port_file: Path) -> int:
     return port
 
 
+def _acquire_profile_lease(profile_directory: Path) -> BinaryIO:
+    """Reserve a canonical profile until the owning context closes.
+
+    The OS releases this lock if the app exits or crashes. The file remains:
+    deleting it could let concurrent processes lock different file instances.
+    """
+    lease: BinaryIO | None = None
+    try:
+        lease = (profile_directory.resolve() / "vpm-edge-profile.lock").open("a+b")
+        lease.seek(0, os.SEEK_END)
+        if lease.tell() == 0:
+            lease.write(b"\0")
+            lease.flush()
+        lease.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(lease.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lease.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, ImportError) as exc:
+        if lease is not None:
+            lease.close()
+        raise EdgeCdpProfileInUse(
+            "Could not exclusively reserve the dedicated Edge evidence profile. "
+            "Finish any other Archer search or login using it, or ask IT to "
+            "check access to the profile folder. Leave other Edge and Citrix "
+            "windows open."
+        ) from exc
+    return lease
+
+
+def _ensure_profile_idle(profile_directory: Path) -> None:
+    """Only a missing announcement or refused listener is confidently stale."""
+    try:
+        existing_port = _read_devtools_active_port(profile_directory / "DevToolsActivePort")
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError, IndexError) as exc:
+        raise EdgeCdpProfileInUse(
+            "Could not confirm the dedicated evidence profile is idle: its "
+            "DevTools announcement is unreadable or invalid. Leave the profile "
+            "untouched and ask IT to inspect it."
+        ) from exc
+    try:
+        _http_json(f"http://127.0.0.1:{existing_port}/json/version", timeout=0.5)
+    except (EdgeCdpError, EdgeCdpTimeout) as exc:
+        if _is_connection_refused(exc):
+            return
+        raise EdgeCdpProfileInUse(
+            "Could not confirm the dedicated evidence profile is idle: its "
+            "existing DevTools endpoint did not respond reliably. Finish any "
+            "search or login using it, or ask IT to inspect the connection. "
+            "Leave other Edge and Citrix windows open."
+        ) from exc
+    raise EdgeCdpProfileInUse(
+        "The dedicated evidence profile is already in use. Finish the evidence "
+        "search or login using this profile and retry. Leave other Edge and "
+        "Citrix windows open."
+    )
+
+
+def _is_connection_refused(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if (
+            isinstance(current, ConnectionRefusedError)
+            or getattr(current, "errno", None) in {errno.ECONNREFUSED, 10061}
+            or getattr(current, "winerror", None) == 10061
+        ):
+            return True
+        reason = getattr(current, "reason", None)
+        current = reason if isinstance(reason, BaseException) else current.__cause__
+    return False
+
+
 def _http_json(
     url: str,
     *,
     method: str = "GET",
     timeout: float = 3,
 ) -> Any:
+    address = urllib.parse.urlsplit(url)
+    if address.scheme != "http" or address.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        raise EdgeCdpError("DevTools HTTP must use a local loopback address.")
     request = urllib.request.Request(url, method=method)
     for attempt in range(3):
         try:
             # This helper only communicates with our local DevTools listener.
             # Enterprise/Citrix proxy settings must not route it off the machine.
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            opener = urllib.request.build_opener(_LocalDevToolsHandler({}))
             with opener.open(request, timeout=timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
         except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
@@ -941,6 +1078,19 @@ def _http_json(
                 f"Edge DevTools endpoint failed: {url}: {exc}"
             ) from exc
     raise AssertionError("unreachable")
+
+
+class _LocalDevToolsHandler(urllib.request.ProxyHandler):
+    """Keep the no-proxy DevTools transport local, including redirects."""
+
+    def http_error_302(self, request, response, code, message, headers):
+        response.close()
+        raise urllib.error.URLError("DevTools HTTP redirects are not permitted")
+
+    http_error_301 = http_error_302
+    http_error_303 = http_error_302
+    http_error_307 = http_error_302
+    http_error_308 = http_error_302
 
 
 def _is_windows_socket_address_collision(exc: BaseException) -> bool:

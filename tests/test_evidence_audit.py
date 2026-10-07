@@ -109,7 +109,7 @@ def test_canonical_audit_contains_resume_metadata(tmp_path):
 
     assert path.name == f"{audit_digest('Franklin', variant())}.audit.json"
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert payload["retryable"] is True
     assert payload["variant_key"] == "SYNTHETIC_VPM_1|NM_016019.4:c.784dup"
     assert payload["query_attempts"] == [

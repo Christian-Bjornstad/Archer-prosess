@@ -9,6 +9,7 @@ from archer_processor.knowledge.history import VariantHistoryRepository
 from .models import ProcessingResult
 from .run_date import sequencing_date_from_path
 from .rules import FilterEngine
+from .variant_key_guard import validate_variant_keys
 
 if TYPE_CHECKING:
     from archer_processor.io.tsv_reader import ArcherTsvReader
@@ -35,6 +36,7 @@ class VariantProcessor:
             or run_date
         )
         variants = self.reader.read(input_path)
+        validate_variant_keys(variants)
         archer_version = self.reader.version(input_path)
         self.filter_engine.apply(variants)
         if self.history:
