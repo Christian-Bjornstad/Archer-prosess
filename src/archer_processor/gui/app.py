@@ -76,6 +76,7 @@ from archer_processor.gui.theme import Palette, application_stylesheet
 from archer_processor.gui.widgets.navigation import NavigationRail
 from archer_processor.gui.widgets.run_status import RunStatusStrip
 from archer_processor.gui.widgets.status_matrix import StatusMatrix
+from archer_processor.gui.widgets.file_drop import AnalysisFileDrop
 from archer_processor import __version__
 from archer_processor.services.run_journal import RunJournal
 
@@ -384,6 +385,7 @@ class DatabaseWorker(QObject):
     finished = pyqtSignal(object)
     cancelled = pyqtSignal()
     patient_finished = pyqtSignal(object)
+    evidence_updated = pyqtSignal(object)
     source_state = pyqtSignal(str, str, bool)
     failed = pyqtSignal(str)
     status = pyqtSignal(str)
@@ -476,6 +478,7 @@ class DatabaseWorker(QObject):
                         f"{prefix}: searching {database} for "
                         f"{len(pending_variants)} pending variant(s)"
                     )
+                    self.source_state.emit(patient_id, database, True)
                     database_evidence: dict[str, list[DatabaseEvidence]] = {}
                     for variant in pending_variants:
                         self._check_cancelled()
@@ -488,8 +491,9 @@ class DatabaseWorker(QObject):
                             database_evidence[key] = [
                                 DatabaseEvidence(database, "error", str(exc))
                             ]
+                        self.evidence_updated.emit({key: deepcopy(database_evidence[key])})
                     _merge_evidence_results(patient_evidence, database_evidence)
-                    self.patient_finished.emit(database_evidence)
+                    self.source_state.emit(patient_id, database, False)
 
                 if self.browser_databases:
                     if patient_index > 1:
@@ -506,6 +510,7 @@ class DatabaseWorker(QObject):
                     _merge_evidence_results(patient_evidence, browser_evidence)
 
                 _merge_evidence_results(all_evidence, patient_evidence)
+                self.patient_finished.emit(patient_evidence)
                 self.status.emit(f"{prefix}: complete")
                 self.progress.emit(
                     patient_index,
@@ -591,7 +596,7 @@ class DatabaseWorker(QObject):
                 f"{p} · {lane}: {message}"
             ),
             completed_sources=self.completed_sources,
-            checkpoint=self.patient_finished.emit,
+            checkpoint=self.evidence_updated.emit,
             activity=lambda database, action: self.source_state.emit(
                 patient_id, database, action == "Starting provider"
             ) if action in {"Starting provider", "Provider finished"} else None,
@@ -725,6 +730,21 @@ class BrowserLoginWorker(QObject):
                 browser_background=self.settings.browser_background,
             )
             self.finished.emit(service.open_login(self.database))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class BrowserSessionCheckWorker(QObject):
+    checked = pyqtSignal(object)
+    finished = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def run(self) -> None:
+        try:
+            from archer_processor.services.browser_sessions import BrowserSessionCheckService
+
+            service = BrowserSessionCheckService(BrowserReviewService(browser_background=True))
+            self.finished.emit(service.check_all(on_result=self.checked.emit))
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -1241,6 +1261,9 @@ class MainWindow(QMainWindow):
         self.report_retry_thread: QThread | None = None
         self.database_thread: QThread | None = None
         self.browser_thread: QThread | None = None
+        self.session_check_thread: QThread | None = None
+        self.session_check_worker: BrowserSessionCheckWorker | None = None
+        self._session_results: dict[str, object] = {}
         self.processing_worker: ProcessingWorker | None = None
         self.workbook_load_worker: ProcessedWorkbookWorker | None = None
         self.database_worker: DatabaseWorker | None = None
@@ -1251,6 +1274,7 @@ class MainWindow(QMainWindow):
         self._operation_active = False
         self._active_sources: set[tuple[str, str]] = set()
         self._search_pending_pairs: set[tuple[str, str]] = set()
+        self._queue_databases: set[str] = set()
         self._active_search_report_patient_ids: list[str] = []
         self._pending_report_after_workbook: list[str] = []
         self.workbook_write_pending = False
@@ -1264,10 +1288,29 @@ class MainWindow(QMainWindow):
         if self.app_icon_path.exists():
             self.setWindowIcon(QIcon(str(self.app_icon_path)))
         self.resize(1440, 900)
-        self.setMinimumSize(1120, 720)
+        self.setMinimumSize(920, 600)
         self._build_ui()
         self._update_evidence_summary()
         self._apply_style()
+
+    def closeEvent(self, event) -> None:
+        for thread in (
+            self.processing_thread, self.workbook_load_thread, self.workbook_write_thread,
+            self.patient_report_thread, self.report_retry_thread, self.database_thread,
+            self.browser_thread, self.session_check_thread,
+        ):
+            if thread is None:
+                continue
+            try:
+                running = thread.isRunning()
+            except RuntimeError:
+                # Qt may already have disposed a completed thread via deleteLater.
+                continue
+            if running:
+                event.ignore()
+                self.status_bar.showMessage("Vent til arbeidet er ferdig før du lukker appen. Et aktivt søk kan avsluttes med Stop Search.")
+                return
+        super().closeEvent(event)
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -1298,11 +1341,11 @@ class MainWindow(QMainWindow):
             "Start from a variant dataset or resume a processed review workbook"
         )
         self.page_subtitle.setObjectName("PageSubtitle")
+        self.page_subtitle.setWordWrap(True)
         title_box.addWidget(self.page_eyebrow)
         title_box.addWidget(self.page_title)
         title_box.addWidget(self.page_subtitle)
-        header.addLayout(title_box)
-        header.addStretch()
+        header.addLayout(title_box, 1)
         self.activity_progress = QProgressBar()
         self.activity_progress.setObjectName("ActivityProgress")
         self.activity_progress.setRange(0, 0)
@@ -1368,7 +1411,11 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(content)
         layout.setSpacing(14)
 
-        files = QGroupBox("Analysis input")
+        self.file_drop = AnalysisFileDrop()
+        self.file_drop.file_selected.connect(self._open_analysis_file)
+        layout.addWidget(self.file_drop)
+
+        files = QGroupBox("Ny analyse fra TSV")
         grid = QGridLayout(files)
         grid.setContentsMargins(16, 24, 16, 16)
         grid.setVerticalSpacing(12)
@@ -1378,16 +1425,20 @@ class MainWindow(QMainWindow):
         grid.setColumnStretch(1, 1)
         self.input_edit = QLineEdit()
         self.input_edit.setPlaceholderText("Select the filtered variant TSV")
+        self.input_edit.setAccessibleName("Input variant TSV")
         self.input_edit.textChanged.connect(self._update_process_state)
         self.input_edit.textChanged.connect(self._sync_run_date_from_paths)
         input_btn = QPushButton("Browse")
         input_btn.clicked.connect(self._browse_input)
+        self.input_browse_btn = input_btn
         self.output_edit = QLineEdit()
         self.output_edit.setPlaceholderText("Clinical review workbook (.xlsx)")
+        self.output_edit.setAccessibleName("Output review workbook")
         self.output_edit.textChanged.connect(self._update_process_state)
         self.output_edit.textChanged.connect(self._sync_run_date_from_paths)
         output_btn = QPushButton("Browse")
         output_btn.clicked.connect(self._browse_output)
+        self.output_browse_btn = output_btn
         self.run_date = QDateEdit()
         self.run_date.setCalendarPopup(True)
         self.run_date.setDisplayFormat("yyyy-MM-dd")
@@ -1418,11 +1469,21 @@ class MainWindow(QMainWindow):
         self.open_workbook_btn.setObjectName("OutlineButton")
         self.open_workbook_btn.setEnabled(False)
         self.open_workbook_btn.clicked.connect(self._open_review_workbook)
+        self.continue_evidence_btn = QPushButton("Til Evidence")
+        self.continue_evidence_btn.setEnabled(False)
+        self.continue_evidence_btn.clicked.connect(lambda: self._switch_page(1))
         actions.addStretch()
         actions.addWidget(self.validate_btn)
         actions.addWidget(self.open_workbook_btn)
         actions.addWidget(self.process_btn)
         layout.addLayout(actions)
+        review_guidance = QHBoxLayout()
+        self.import_guidance = QLabel("Velg en TSV for å opprette en review-fil, eller åpne en tidligere analyse nedenfor.")
+        self.import_guidance.setObjectName("HelperText")
+        self.import_guidance.setWordWrap(True)
+        review_guidance.addWidget(self.import_guidance, 1)
+        review_guidance.addWidget(self.continue_evidence_btn)
+        layout.addLayout(review_guidance)
 
         self.recent_analysis_panel = QFrame()
         self.recent_analysis_panel.setObjectName("RecentAnalysisPanel")
@@ -1466,7 +1527,7 @@ class MainWindow(QMainWindow):
                 self.recent_analysis_panel.show()
         layout.addWidget(self.recent_analysis_panel)
 
-        resume = QGroupBox("Continue previous analysis")
+        resume = QGroupBox("Fortsett fra Excel")
         resume_layout = QVBoxLayout(resume)
         resume_layout.setSpacing(8)
         resume_help = QLabel(
@@ -1553,7 +1614,17 @@ class MainWindow(QMainWindow):
             QSizePolicy.Policy.Preferred,
         )
         command_copy.addWidget(command_title)
+        self.current_workbook_label = QLabel("Ingen analyse lastet")
+        self.current_workbook_label.setObjectName("FieldLabel")
+        self.current_workbook_label.setWordWrap(True)
+        self.current_workbook_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        command_copy.addWidget(self.current_workbook_label)
         command_copy.addWidget(self.evidence_summary)
+        self.latest_action_label = QLabel("Klar til søk")
+        self.latest_action_label.setObjectName("HelperText")
+        self.latest_action_label.setWordWrap(True)
+        self.latest_action_label.setTextFormat(Qt.TextFormat.PlainText)
+        command_copy.addWidget(self.latest_action_label)
         command_layout.addLayout(command_copy, 0, 0, 1, 3)
         self.search_btn = QPushButton("Run Evidence Search")
         self.search_btn.setObjectName("PrimaryButton")
@@ -1587,10 +1658,18 @@ class MainWindow(QMainWindow):
         layout.addWidget(command)
 
         checks = QGroupBox("Evidence sources")
-        checks.setMinimumHeight(250)
         grid = QGridLayout(checks)
         grid.setHorizontalSpacing(9)
         grid.setVerticalSpacing(6)
+        self.check_sessions_btn = QPushButton("Sjekk innlogging")
+        self.check_sessions_btn.setObjectName("OutlineButton")
+        self.check_sessions_btn.setToolTip("Sjekk tilgang til alle kilder i Edge uten å sende varianter eller endre innlogging.")
+        self.check_sessions_btn.clicked.connect(self._start_session_check)
+        self.session_check_summary = QLabel("Innlogging er ikke sjekket i denne økten.")
+        self.session_check_summary.setObjectName("HelperText")
+        self.session_check_summary.setWordWrap(True)
+        grid.addWidget(self.session_check_summary, 0, 0, 1, 2)
+        grid.addWidget(self.check_sessions_btn, 0, 2)
         source_copy = {
             "MTBP": "Report synthesis",
             "Franklin": "Variant prediction",
@@ -1599,24 +1678,37 @@ class MainWindow(QMainWindow):
             "COSMIC": "Tumour evidence",
         }
         self.db_checks: dict[str, QCheckBox] = {}
+        self.session_status_labels: dict[str, QLabel] = {}
         for index, database in enumerate(self.databases):
-            check = QCheckBox(f"{database}\n{source_copy[database]}")
+            check = QCheckBox(database)
             check.setObjectName("SourceCard")
-            check.setMinimumHeight(60)
+            check.setMinimumHeight(44)
             check.setChecked(database in self.settings.enabled_databases)
             if database in BROWSER_DATABASES:
                 check.setProperty("loginSource", True)
-                check.setToolTip("Uses the saved signed-in browser session.")
+                check.setToolTip(f"{source_copy[database]}. Uses the saved Edge browser profile.")
             self.db_checks[database] = check
             check.stateChanged.connect(self._update_evidence_summary)
-            row, column = divmod(index, 2)
-            grid.addWidget(check, row, column)
+            tile = QWidget()
+            tile.setObjectName("SourceTile")
+            tile_layout = QVBoxLayout(tile)
+            tile_layout.setContentsMargins(0, 0, 0, 0)
+            tile_layout.setSpacing(2)
+            tile_layout.addWidget(check)
+            status = QLabel("Ikke sjekket")
+            status.setObjectName("HelperText")
+            status.setWordWrap(True)
+            status.setAccessibleName(f"{database} innloggingsstatus")
+            tile_layout.addWidget(status)
+            self.session_status_labels[database] = status
+            row, column = divmod(index, 3)
+            grid.addWidget(tile, row + 1, column)
             grid.setColumnStretch(column, 1)
         layout.addWidget(checks)
 
         status_group = QGroupBox("Patient progress")
         status_layout = QVBoxLayout(status_group)
-        priority_layout = QHBoxLayout()
+        priority_layout = QGridLayout()
         self.priority_selection_status = QLabel("0 pasienter valgt")
         self.priority_selection_status.setObjectName("HelperText")
         self.priority_selection_status.setWordWrap(True)
@@ -1649,9 +1741,11 @@ class MainWindow(QMainWindow):
             "Fortsett med bare pasienter som fortsatt har uferdige oppslag."
         )
         self.remaining_search_btn.clicked.connect(self._start_remaining_search)
-        priority_layout.addWidget(self.priority_selection_status, 1)
-        priority_layout.addWidget(self.priority_search_btn)
-        priority_layout.addWidget(self.remaining_search_btn)
+        priority_layout.addWidget(self.priority_selection_status, 0, 0, 1, 2)
+        priority_layout.addWidget(self.priority_search_btn, 1, 0)
+        priority_layout.addWidget(self.remaining_search_btn, 1, 1)
+        priority_layout.setColumnStretch(0, 1)
+        priority_layout.setColumnStretch(1, 1)
         status_layout.addLayout(priority_layout)
         status_layout.addWidget(
             self.retry_selected_btn, alignment=Qt.AlignmentFlag.AlignLeft
@@ -1678,14 +1772,14 @@ class MainWindow(QMainWindow):
         self.included_only_check.setToolTip(
             "When enabled, excluded and flagged variants are not sent to any database website."
         )
-        options_grid.addWidget(self.included_only_check, 0, 1, 1, 3)
+        options_grid.addWidget(self.included_only_check, 0, 1, 1, 2)
         selection_label = QLabel("Reviewed workbook")
         selection_label.setObjectName("FieldLabel")
         options_grid.addWidget(selection_label, 2, 0)
         self.selection_status = QLabel("No skip list loaded")
         self.selection_status.setObjectName("HelperText")
         self.selection_status.setWordWrap(True)
-        options_grid.addWidget(self.selection_status, 2, 1, 1, 2)
+        options_grid.addWidget(self.selection_status, 1, 1, 1, 2)
         self.load_selection_btn = QPushButton("Load Selection Workbook")
         self.load_selection_btn.setFixedWidth(190)
         self.load_selection_btn.setEnabled(False)
@@ -1693,7 +1787,7 @@ class MainWindow(QMainWindow):
             "Load the processed workbook and skip rows marked X on With Artifacts."
         )
         self.load_selection_btn.clicked.connect(self._load_database_selection)
-        options_grid.addWidget(self.load_selection_btn, 2, 3)
+        options_grid.addWidget(self.load_selection_btn, 2, 1, 1, 2)
 
         browser_label = QLabel("Browser provider")
         browser_label.setObjectName("FieldLabel")
@@ -1716,13 +1810,13 @@ class MainWindow(QMainWindow):
         options_grid.addWidget(browser_label, 3, 0)
         options_grid.addWidget(self.browser_database_combo, 3, 1)
         options_grid.addWidget(self.browser_signin_btn, 3, 2)
-        options_grid.addWidget(self.browser_review_btn, 3, 3)
+        options_grid.addWidget(self.browser_review_btn, 4, 1, 1, 2)
         layout.addWidget(options)
 
         exports = QGroupBox("Reports")
         exports.setObjectName("ReportsGroup")
         exports.setMinimumHeight(105)
-        export_layout = QHBoxLayout(exports)
+        export_layout = QGridLayout(exports)
         export_help = QLabel(
             "Generate VPM interpretation workbooks with Oversikt, Vedlegg, variant sheets, evidence links, and screenshots."
         )
@@ -1744,10 +1838,12 @@ class MainWindow(QMainWindow):
         self.retry_report_saves_button.setObjectName("OutlineButton")
         self.retry_report_saves_button.clicked.connect(self._retry_pending_report_saves)
         self.retry_report_saves_button.hide()
-        export_layout.addWidget(export_help, 1)
-        export_layout.addWidget(self.rewrite_btn)
-        export_layout.addWidget(self.patient_excel_btn)
-        export_layout.addWidget(self.retry_report_saves_button)
+        export_layout.addWidget(export_help, 0, 0, 1, 2)
+        export_layout.addWidget(self.rewrite_btn, 1, 0)
+        export_layout.addWidget(self.patient_excel_btn, 1, 1)
+        export_layout.addWidget(self.retry_report_saves_button, 2, 0, 1, 2)
+        export_layout.setColumnStretch(0, 1)
+        export_layout.setColumnStretch(1, 1)
         layout.addWidget(exports)
 
         self.database_scroll.setWidget(database_content)
@@ -1956,9 +2052,22 @@ class MainWindow(QMainWindow):
     def _browse_input(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Select variant TSV", "", "TSV files (*.tsv *.txt);;All files (*.*)")
         if path:
-            self.input_edit.setText(path)
-            output = Path(self.settings.default_output_dir) / f"{Path(path).stem}_VPM_review.xlsx"
+            self._open_analysis_file(path)
+
+    def _open_analysis_file(self, filename: str) -> None:
+        if self._operation_active:
+            return
+        path = Path(filename)
+        if not path.is_file():
+            return
+        if path.suffix.casefold() == ".xlsx":
+            self._load_processed_workbook(path)
+        elif path.suffix.casefold() in {".tsv", ".txt"}:
+            self.input_edit.setText(str(path))
+            output = Path(self.settings.default_output_dir) / f"{path.stem}_VPM_review.xlsx"
             self.output_edit.setText(str(output))
+            self.import_guidance.setText("Opprett review-filen, gjennomgå den i Excel og marker X for oppslag som skal hoppes over.")
+            self._switch_page(0)
 
     def _sync_run_date_from_paths(self) -> None:
         run_date = (
@@ -2066,9 +2175,11 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Validation failed", "\n".join(errors))
 
     def _start_processing(self) -> None:
+        if self._operation_active:
+            return
         input_path = Path(self.input_edit.text())
         output_path = Path(self.output_edit.text())
-        if not input_path.exists() or not self.output_edit.text().strip():
+        if not input_path.is_file() or not self.output_edit.text().strip():
             QMessageBox.warning(self, "Missing files", "Select an input TSV and output workbook.")
             return
         if output_path.suffix.lower() != ".xlsx":
@@ -2100,11 +2211,16 @@ class MainWindow(QMainWindow):
         thread.start()
 
     def _processing_finished(self, result: ProcessingResult) -> None:
+        self.status_matrix.clearSelection()
+        self.status_matrix.setCurrentCell(-1, -1)
+        self.latest_action_label.setText("Klar til søk")
         self.result = result
         self.evidence = {}
         self.database_skip_keys = set()
+        self.report_outcomes = {}
         self.resume_edit.clear()
         self.resume_status.setText("New review workbook created from the selected TSV.")
+        self.import_guidance.setText("Review-filen er klar. Åpne den i Excel, marker X ved oppslag som skal hoppes over, og gå til Evidence.")
         self.selection_status.setText("No skip list loaded")
         self._log(f"Complete: {result.total_count} variants, {len(result.included)} included, {len(result.excluded)} excluded")
         self._refresh_metrics()
@@ -2157,7 +2273,7 @@ class MainWindow(QMainWindow):
         scope_label: str = "alle pasienter",
         retry_failed_only: bool = False,
     ) -> None:
-        if not self.result:
+        if self._operation_active or not self.result:
             return
         if not self._save_settings(silent=True):
             return
@@ -2259,6 +2375,7 @@ class MainWindow(QMainWindow):
         worker.progress.connect(self._update_run_progress)
         worker.paused.connect(self._search_pause_changed)
         worker.patient_finished.connect(self._database_patient_finished)
+        worker.evidence_updated.connect(self._search_evidence_updated)
         worker.source_state.connect(self._source_state_changed)
         worker.report_outcome.connect(self._patient_report_outcome)
         if hasattr(worker, "activity"):
@@ -2301,6 +2418,8 @@ class MainWindow(QMainWindow):
         self._auto_rewrite_workbook()
 
     def _start_browser_login(self) -> None:
+        if self._operation_active:
+            return
         database = self.browser_database_combo.currentText()
         if not self._save_settings(silent=True):
             return
@@ -2322,9 +2441,77 @@ class MainWindow(QMainWindow):
 
     def _browser_login_finished(self, message: str) -> None:
         self._log(message)
+        database = self.browser_database_combo.currentText()
+        self._session_results.pop(database, None)
+        self.session_status_labels[database].setText("Sjekk på nytt")
+        self.session_status_labels[database].setStyleSheet("")
+        self.session_status_labels[database].setToolTip("Innlogging kan være endret siden forrige sjekk.")
+        self.session_check_summary.setText("Innlogging kan være endret. Bruk Sjekk innlogging for å bekrefte tilgangen.")
+        self._set_ready()
+
+    def _start_session_check(self) -> None:
+        if self._operation_active:
+            return
+        self._session_results.clear()
+        self._set_busy("Checking browser sessions")
+        self.session_check_summary.setText("Sjekker alle fem kilder i Edge …")
+        for label in self.session_status_labels.values():
+            label.setText("Sjekker …")
+            label.setStyleSheet("")
+            label.setToolTip("")
+        worker = BrowserSessionCheckWorker()
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.checked.connect(self._session_checked)
+        worker.finished.connect(self._session_check_finished)
+        worker.failed.connect(self._session_check_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self.session_check_worker = worker
+        self.session_check_thread = thread
+        thread.start()
+
+    def _session_checked(self, result) -> None:
+        self._session_results[result.database] = result
+        text, color = {
+            "authenticated": ("Innlogget", Palette.green),
+            "public": ("Offentlig tilgang", Palette.blue),
+            "login_required": ("Krever innlogging", Palette.yellow),
+            "unknown": ("Ikke bekreftet", Palette.yellow),
+            "error": ("Kunne ikke sjekke", Palette.red),
+        }.get(result.status, ("Ikke bekreftet", Palette.yellow))
+        label = self.session_status_labels[result.database]
+        label.setText(text)
+        label.setStyleSheet(f"color: {color};")
+        label.setToolTip(f"Sjekket {datetime.now():%H:%M:%S}\n{result.message}")
+        self._log(f"{result.database}: {text} — {result.message}")
+
+    def _session_check_finished(self, results) -> None:
+        ready = sum(item.status in {"authenticated", "public"} for item in results)
+        detail = (
+            "Alle kilder har bekreftet tilgang."
+            if ready == len(self.databases)
+            else "Se status ved hver kilde. Velg kilde og Sign In ved behov."
+        )
+        self.session_check_summary.setText(f"Sjekket {datetime.now():%H:%M} · {ready}/{len(self.databases)} klare. {detail}")
+        self._set_ready()
+
+    def _session_check_failed(self, message: str) -> None:
+        for database, label in self.session_status_labels.items():
+            if database not in self._session_results:
+                label.setText("Kunne ikke sjekke")
+                label.setToolTip(message)
+                label.setStyleSheet(f"color: {Palette.red};")
+        self.session_check_summary.setText(f"Innloggingssjekken feilet: {message}")
+        self._log(f"Browser session check failed: {message}")
         self._set_ready()
 
     def _start_browser_review(self) -> None:
+        if self._operation_active:
+            return
         if not self.result:
             return
         if not self._save_settings(silent=True):
@@ -2520,6 +2707,8 @@ class MainWindow(QMainWindow):
             self._load_processed_workbook(Path(path))
 
     def _load_processed_workbook(self, workbook_path: Path) -> None:
+        if self._operation_active:
+            return
         if self.workbook_load_thread and self.workbook_load_thread.isRunning():
             return
         self._start_run_journal(workbook_path.parent, "resume")
@@ -2547,9 +2736,14 @@ class MainWindow(QMainWindow):
         self.run_progress.update_progress(current, total, detail)
 
     def _processed_workbook_loaded(self, workbook_path: Path, state) -> None:
+        self.status_matrix.clearSelection()
+        self.status_matrix.setCurrentCell(-1, -1)
+        self.latest_action_label.setText("Klar til søk")
         self.result = state.result
         self.evidence = state.evidence
         self.database_skip_keys = state.database_skip_keys
+        self.report_outcomes = {}
+        self.import_guidance.setText("Analysen er gjenopprettet. Fortsett uferdige oppslag på Evidence-siden.")
         self.workbook_write_pending = False
         self._workbook_lock_warning_shown = False
         self.output_edit.setText(str(workbook_path))
@@ -3137,7 +3331,6 @@ class MainWindow(QMainWindow):
         if not self.result:
             return
         self._update_evidence_summary()
-        self._refresh_operations_cockpit()
 
     def _refresh_operations_cockpit(self) -> None:
         if not hasattr(self, "status_matrix"):
@@ -3165,6 +3358,7 @@ class MainWindow(QMainWindow):
                 report_outcomes=report_statuses,
                 active=self._active_sources,
                 active_keys=self._search_pending_pairs,
+                selected_sources=self._selected_queue_sources(),
             )
         )
         self._update_priority_controls()
@@ -3174,6 +3368,8 @@ class MainWindow(QMainWindow):
             )
 
     def _retry_pending_report_saves(self) -> None:
+        if self._operation_active:
+            return
         if self.result is None or self.result.output_path is None:
             return
         locked = {
@@ -3201,11 +3397,13 @@ class MainWindow(QMainWindow):
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         self.report_retry_thread = thread
+        self._set_busy("Saving pending reports")
         thread.start()
 
     def _report_retry_finished(self, outcomes: list[PatientReportOutcome]) -> None:
         for outcome in outcomes:
             self._patient_report_outcome(outcome)
+        self._set_ready()
 
     def _activity_received(self, activity: RunActivity) -> None:
         self._log(activity.message or activity.action)
@@ -3213,7 +3411,7 @@ class MainWindow(QMainWindow):
     def _update_evidence_summary(self) -> None:
         if not hasattr(self, "evidence_summary"):
             return
-        selected = [name for name, check in self.db_checks.items() if check.isChecked()]
+        selected = [name for name in self.databases if name in self._selected_queue_sources()]
         variant_count = len(self._variants_for_search()) if self.result else 0
         pending_count = (
             len(self._pending_variants_for_search(selected))
@@ -3236,16 +3434,26 @@ class MainWindow(QMainWindow):
         self.evidence_summary.setText(
             f"{source_text} · {variant_text} · {browser_mode}"
         )
+        if hasattr(self, "current_workbook_label"):
+            path = self.result.output_path if self.result else None
+            self.current_workbook_label.setText(Path(path).name if path else "Ingen review-fil lastet")
+            self.current_workbook_label.setToolTip(str(path) if path else "")
         self._refresh_operations_cockpit()
 
     def _prepare_search_status(self, variants, databases, completed_sources) -> None:
         self._active_sources.clear()
+        self._queue_databases = set(databases)
         self._search_pending_pairs = {
             (BrowserReviewService.variant_key(variant), database)
             for variant in variants
             for database in databases
             if (BrowserReviewService.variant_key(variant), database) not in completed_sources
         }
+
+    def _selected_queue_sources(self) -> set[str]:
+        if self._operation_active and self._queue_databases:
+            return self._queue_databases
+        return {name for name, check in self.db_checks.items() if check.isChecked()}
 
     def _source_state_changed(self, patient_id: str, database: str, running: bool) -> None:
         pair = (patient_id, database)
@@ -3376,16 +3584,23 @@ class MainWindow(QMainWindow):
         self.stop_search_btn.setText("Stop Search")
         self.stop_search_btn.setEnabled(is_search)
         self.browser_signin_btn.setEnabled(False)
+        self.check_sessions_btn.setEnabled(False)
         self.browser_review_btn.setEnabled(False)
         self.rewrite_btn.setEnabled(False)
         self.patient_excel_btn.setEnabled(False)
         self.resume_btn.setEnabled(False)
+        self.retry_report_saves_button.setEnabled(False)
+        self._set_analysis_controls_enabled(False)
         self.status_bar.showMessage(label)
+        if is_search:
+            self._switch_page(1)
+            QTimer.singleShot(0, self._show_patient_progress)
 
     def _set_ready(self) -> None:
         self._operation_active = False
         self._active_sources.clear()
         self._search_pending_pairs.clear()
+        self._queue_databases.clear()
         self.run_status_strip.set_snapshot(RunSnapshot())
         self.status_badge.setText("Ready")
         self.status_badge.setStyleSheet("")
@@ -3399,21 +3614,47 @@ class MainWindow(QMainWindow):
         self.stop_search_btn.setText("Stop Search")
         self.stop_search_btn.setEnabled(False)
         self.browser_signin_btn.setEnabled(True)
+        self.check_sessions_btn.setEnabled(True)
         self.browser_review_btn.setEnabled(self.result is not None)
         self.rewrite_btn.setEnabled(self.result is not None)
         self.patient_excel_btn.setEnabled(self.result is not None)
         self.resume_btn.setEnabled(True)
+        self.retry_report_saves_button.setEnabled(True)
+        self._set_analysis_controls_enabled(True)
+        self.continue_evidence_btn.setEnabled(self.result is not None)
         self._update_evidence_summary()
         self.status_bar.showMessage("Ready", 3000)
 
     def _update_process_state(self) -> None:
-        has_input = Path(self.input_edit.text()).exists()
+        has_input = Path(self.input_edit.text()).is_file()
         has_output = bool(self.output_edit.text().strip())
-        self.process_btn.setEnabled(has_input and has_output)
+        self.process_btn.setEnabled(has_input and has_output and not self._operation_active)
+
+    def _show_patient_progress(self) -> None:
+        if self._operation_active:
+            self.database_scroll.ensureWidgetVisible(self.status_matrix, 0, 12)
+
+    def _set_analysis_controls_enabled(self, enabled: bool) -> None:
+        for control in (
+            self.input_edit, self.output_edit, self.input_browse_btn, self.output_browse_btn,
+            self.hide_excluded, self.file_drop, self.validate_btn, self.restore_recent_button,
+            self.dismiss_recent_button, self.included_only_check, self.browser_database_combo,
+            *self.db_checks.values(),
+        ):
+            control.setEnabled(enabled)
+        self.load_selection_btn.setEnabled(enabled and self.result is not None)
+        self.run_date.setEnabled(enabled and not (
+            sequencing_date_from_path(Path(self.input_edit.text()))
+            or sequencing_date_from_path(Path(self.output_edit.text()))
+        ))
+        self.tabs.widget(2).setEnabled(enabled)
 
     def _log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log.appendPlainText(f"[{timestamp}] {message}")
+        if self._operation_active and self._search_started_at is not None and hasattr(self, "latest_action_label"):
+            self.latest_action_label.setText(f"{timestamp} · {message[:220]}")
+            self.latest_action_label.setToolTip(message)
         if self.run_journal is not None and not self.run_journal.record(message):
             if not self._run_log_warning_shown:
                 self._run_log_warning_shown = True
@@ -3661,6 +3902,14 @@ class MainWindow(QMainWindow):
                 border-radius: 7px;
                 padding: 9px 10px;
                 font-weight: 650;
+            }}
+            QWidget#SourceTile {{
+                background: transparent;
+            }}
+            QFrame#AnalysisFileDrop {{
+                background: {Palette.pale_blue};
+                border: 1px dashed {Palette.blue};
+                border-radius: 8px;
             }}
             QCheckBox#SourceCard:hover {{
                 background: {Palette.pale_blue};
