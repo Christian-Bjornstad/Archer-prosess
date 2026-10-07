@@ -1930,7 +1930,9 @@ def test_clinvar_website_lookup_uses_exact_row_from_grch37_fallback(
             self.selector = selector
 
         def inner_text(self, **kwargs):
-            return exact_body if self.page.url == exact_url else "Search results"
+            if self.page.url == exact_url:
+                return exact_body
+            return "Search results" if "chrpos37" in self.page.last_query else "No items found."
 
         def evaluate_all(self, script):
             if "chrpos37" not in self.page.last_query:
