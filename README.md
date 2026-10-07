@@ -137,6 +137,20 @@ Search startup brings patient progress into view. Small workstation windows
 use horizontal table scrolling to keep patient identifiers and status text
 readable. Workbook checkpoints remain grouped per patient.
 
+## Editable reference lists
+
+The supplied [Excel reference lists](reference_lists/README.md) contain the
+current **51 artifact rules** and **54 WHO driver genes**, unchanged. Select
+the files in **Settings → Local files**, then **Save Configuration**. Edit and
+save those files in Excel to update the app without changing code.
+
+A selected artifact workbook replaces the complete catalog at the next TSV
+processing or analysis restore. Manual rules remain stored as the fallback
+when no file is selected; the hardcoded defaults remain available. The WHO list
+is read again whenever a review workbook or patient attachment is written.
+Explicitly selected files with invalid rows, formulas, duplicate artifact keys
+or unreadable content stop the operation with an actionable error.
+
 ## Evidence sources
 
 All browser sources are queried with the somatic workflow and GRCh37/hg19 where
