@@ -54,6 +54,8 @@ from archer_processor.reports import (
     PatientReportOutcome,
 )
 from archer_processor.reports.who_genes import load_who_driver_genes
+from archer_processor.services.artifact_catalog import load_artifact_rules
+from archer_processor.services.credentials import CredentialStoreError
 from archer_processor.services import (
     AppSettings,
     BROWSER_DATABASES,
@@ -102,7 +104,9 @@ class ProcessingWorker(QObject):
     def run(self) -> None:
         try:
             self.status.emit("Reading variant TSV")
-            filter_engine = FilterEngine(production_rules(self.settings.artifact_rules))
+            filter_engine = FilterEngine(production_rules(load_artifact_rules(
+                self.settings.artifact_rules_path, fallback=self.settings.artifact_rules,
+            )))
             processor = VariantProcessor(filter_engine=filter_engine)
             result = processor.process(self.input_path, self.run_date, self.output_path)
             self.status.emit(f"Archer version detected: {result.archer_version} (TSV headers)")
@@ -131,7 +135,9 @@ class ProcessedWorkbookWorker(QObject):
         try:
             state = ProcessedWorkbookLoader(
                 filter_engine=FilterEngine(
-                    production_rules(self.settings.artifact_rules)
+                    production_rules(load_artifact_rules(
+                        self.settings.artifact_rules_path, fallback=self.settings.artifact_rules,
+                    ))
                 ),
             ).load(self.workbook_path, progress=self.progress.emit)
             self.finished.emit(self.workbook_path, state)
@@ -1259,6 +1265,7 @@ class MainWindow(QMainWindow):
         self.patient_report_thread: QThread | None = None
         self.patient_report_worker: PatientReportWorker | None = None
         self.report_retry_thread: QThread | None = None
+        self.report_retry_worker: ReportRetryWorker | None = None
         self.database_thread: QThread | None = None
         self.browser_thread: QThread | None = None
         self.session_check_thread: QThread | None = None
@@ -1277,6 +1284,7 @@ class MainWindow(QMainWindow):
         self._queue_databases: set[str] = set()
         self._active_search_report_patient_ids: list[str] = []
         self._pending_report_after_workbook: list[str] = []
+        self._waiting_final_workbook = False
         self.workbook_write_pending = False
         self._workbook_lock_warning_shown = False
         self.run_journal: RunJournal | None = None
@@ -1292,6 +1300,30 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._update_evidence_summary()
         self._apply_style()
+        for warning in self.settings.load_warnings:
+            self._log(warning)
+
+    @staticmethod
+    def _thread_is_running(thread) -> bool:
+        try:
+            return thread is not None and thread.isRunning()
+        except RuntimeError:
+            return False
+
+    def _worker_thread_finished(self) -> None:
+        finished = self.sender()
+        for thread_name, worker_name in (
+            ("processing_thread", "processing_worker"),
+            ("workbook_load_thread", "workbook_load_worker"),
+            ("patient_report_thread", "patient_report_worker"),
+            ("report_retry_thread", "report_retry_worker"),
+            ("database_thread", "database_worker"),
+            ("browser_thread", "browser_worker"),
+            ("session_check_thread", "session_check_worker"),
+        ):
+            if getattr(self, thread_name) is finished:
+                setattr(self, thread_name, None)
+                setattr(self, worker_name, None)
 
     def closeEvent(self, event) -> None:
         for thread in (
@@ -1299,14 +1331,7 @@ class MainWindow(QMainWindow):
             self.patient_report_thread, self.report_retry_thread, self.database_thread,
             self.browser_thread, self.session_check_thread,
         ):
-            if thread is None:
-                continue
-            try:
-                running = thread.isRunning()
-            except RuntimeError:
-                # Qt may already have disposed a completed thread via deleteLater.
-                continue
-            if running:
+            if self._thread_is_running(thread):
                 event.ignore()
                 self.status_bar.showMessage("Vent til arbeidet er ferdig før du lukker appen. Et aktivt søk kan avsluttes med Stop Search.")
                 return
@@ -1888,6 +1913,24 @@ class MainWindow(QMainWindow):
         self.who_path_status.setWordWrap(True)
         local_grid.addWidget(self.who_path_status, 2, 1, 1, 2)
         self._validate_who_path()
+        if self.settings.load_warnings:
+            settings_warning = QLabel("\n".join(self.settings.load_warnings))
+            settings_warning.setWordWrap(True)
+            settings_warning.setStyleSheet(f"color: {Palette.red};")
+            local_grid.addWidget(settings_warning, 5, 0, 1, 3)
+        self.artifact_path_edit = QLineEdit(self.settings.artifact_rules_path)
+        self.artifact_path_edit.setPlaceholderText("Lagrede artefaktregler brukes når feltet er tomt")
+        self.artifact_path_edit.setAccessibleName("Artefaktliste i Excel")
+        self.artifact_path_edit.editingFinished.connect(self._validate_artifact_path)
+        artifact_file_btn = QPushButton("Velg fil")
+        artifact_file_btn.clicked.connect(self._browse_artifact_catalog)
+        local_grid.addWidget(QLabel("Artefaktliste"), 3, 0)
+        local_grid.addWidget(self.artifact_path_edit, 3, 1)
+        local_grid.addWidget(artifact_file_btn, 3, 2)
+        self.artifact_path_status = QLabel()
+        self.artifact_path_status.setObjectName("HelperText")
+        self.artifact_path_status.setWordWrap(True)
+        local_grid.addWidget(self.artifact_path_status, 4, 1, 1, 2)
         layout.addWidget(local_group)
 
         access_group = QGroupBox("Browser access")
@@ -1998,8 +2041,10 @@ class MainWindow(QMainWindow):
         artifact_group = QGroupBox("Artifact rules")
         artifact_layout = QVBoxLayout(artifact_group)
         artifact_note = QLabel(
-            "Defaults: 36 HGVSc entries from ‘Artefakter DNA Fragmentering v2’. "
-            "ASXL1 NM_015338.5:c.1934dup is kept when AF is above 5.5%."
+            f"Innebygd liste: {len(default_artifact_rules())} regler, inkludert Artefakter v7. "
+            "Reglene under brukes når ingen Excel-liste er valgt. "
+            "En valgt Excel-liste erstatter hele listen ved neste behandling eller gjenåpning. "
+            "ASXL1 NM_015338.5:c.1934dup beholdes når AF er over 5.5%."
         )
         artifact_note.setObjectName("HelperText")
         artifact_note.setWordWrap(True)
@@ -2022,12 +2067,15 @@ class MainWindow(QMainWindow):
         remove_artifact_btn.clicked.connect(self._remove_selected_artifact)
         reset_artifact_btn = QPushButton("Reset Defaults")
         reset_artifact_btn.clicked.connect(self._reset_default_artifacts)
+        self.artifact_edit_buttons = [add_artifact_btn, remove_artifact_btn, reset_artifact_btn]
         artifact_actions.addWidget(add_artifact_btn)
         artifact_actions.addWidget(remove_artifact_btn)
         artifact_actions.addWidget(reset_artifact_btn)
         artifact_actions.addStretch()
         artifact_layout.addWidget(self.artifact_table)
         artifact_layout.addLayout(artifact_actions)
+        self.artifact_path_edit.textChanged.connect(self._artifact_source_changed)
+        self._validate_artifact_path()
         layout.addWidget(artifact_group)
         self.settings_groups = [
             local_group,
@@ -2122,6 +2170,38 @@ class MainWindow(QMainWindow):
         self.who_path_status.setStyleSheet(f"color: {Palette.green};")
         return True
 
+    def _browse_artifact_catalog(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Velg artefaktliste", self.artifact_path_edit.text(), "Excel-liste (*.xlsx)",
+        )
+        if path:
+            self.artifact_path_edit.setText(path)
+            self._validate_artifact_path()
+
+    def _artifact_source_changed(self) -> None:
+        manual = not self.artifact_path_edit.text().strip()
+        self.artifact_table.setEnabled(manual)
+        for button in self.artifact_edit_buttons:
+            button.setEnabled(manual)
+        self.artifact_path_status.setText("Listevalget er endret. Lagre innstillinger for å validere.")
+        self.artifact_path_status.setStyleSheet("")
+
+    def _validate_artifact_path(self) -> bool:
+        self._artifact_source_changed()
+        path = self.artifact_path_edit.text().strip()
+        try:
+            count = len(load_artifact_rules(path, fallback=self._artifact_rules_from_table()))
+        except (OSError, ValueError) as exc:
+            self.artifact_path_status.setText(str(exc))
+            self.artifact_path_status.setStyleSheet(f"color: {Palette.red};")
+            return False
+        source = Path(path).name if path else "Lagrede / innebygde regler"
+        self.artifact_path_status.setText(
+            f"{source}: {count} regler. Excel-endringer leses ved neste behandling / gjenåpning."
+        )
+        self.artifact_path_status.setStyleSheet(f"color: {Palette.green};")
+        return True
+
     def _load_artifact_table(self, artifacts: list[dict[str, str]]) -> None:
         self.artifact_table.setRowCount(0)
         for artifact in artifacts:
@@ -2206,6 +2286,7 @@ class MainWindow(QMainWindow):
         worker.failed.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._worker_thread_finished)
         self.processing_thread = thread
         self.processing_worker = worker
         thread.start()
@@ -2218,6 +2299,7 @@ class MainWindow(QMainWindow):
         self.evidence = {}
         self.database_skip_keys = set()
         self.report_outcomes = {}
+        self._pending_report_after_workbook = []
         self.resume_edit.clear()
         self.resume_status.setText("New review workbook created from the selected TSV.")
         self.import_guidance.setText("Review-filen er klar. Åpne den i Excel, marker X ved oppslag som skal hoppes over, og gå til Evidence.")
@@ -2388,6 +2470,7 @@ class MainWindow(QMainWindow):
         worker.failed.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._worker_thread_finished)
         self.database_thread = thread
         self.database_worker = worker
         thread.start()
@@ -2400,7 +2483,7 @@ class MainWindow(QMainWindow):
         self._log(_evidence_completion_summary(self.evidence))
         self._refresh_operations_cockpit()
         self._queue_evidence_workbook_write()
-        self._set_ready()
+        self._finish_search_workbook_checkpoint()
         self._complete_run_progress("Evidence search complete")
         self.search_btn.setText("Run Evidence Search")
         self._log(
@@ -2435,6 +2518,7 @@ class MainWindow(QMainWindow):
         worker.failed.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._worker_thread_finished)
         self.browser_thread = thread
         self.browser_worker = worker
         thread.start()
@@ -2470,6 +2554,7 @@ class MainWindow(QMainWindow):
         worker.failed.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._worker_thread_finished)
         self.session_check_worker = worker
         self.session_check_thread = thread
         thread.start()
@@ -2583,6 +2668,7 @@ class MainWindow(QMainWindow):
         worker.failed.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._worker_thread_finished)
         self.browser_thread = thread
         self.browser_worker = worker
         thread.start()
@@ -2709,7 +2795,7 @@ class MainWindow(QMainWindow):
     def _load_processed_workbook(self, workbook_path: Path) -> None:
         if self._operation_active:
             return
-        if self.workbook_load_thread and self.workbook_load_thread.isRunning():
+        if self._thread_is_running(self.workbook_load_thread):
             return
         self._start_run_journal(workbook_path.parent, "resume")
         self._set_busy("Loading workbook")
@@ -2726,6 +2812,7 @@ class MainWindow(QMainWindow):
         worker.failed.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._worker_thread_finished)
         self.workbook_load_worker = worker
         self.workbook_load_thread = thread
         thread.start()
@@ -2743,6 +2830,7 @@ class MainWindow(QMainWindow):
         self.evidence = state.evidence
         self.database_skip_keys = state.database_skip_keys
         self.report_outcomes = {}
+        self._pending_report_after_workbook = []
         self.import_guidance.setText("Analysen er gjenopprettet. Fortsett uferdige oppslag på Evidence-siden.")
         self.workbook_write_pending = False
         self._workbook_lock_warning_shown = False
@@ -2785,7 +2873,10 @@ class MainWindow(QMainWindow):
 
     def _remember_recent_workbook(self, workbook_path: Path) -> None:
         self.settings.last_processed_workbook = str(workbook_path)
-        self.settings.save()
+        try:
+            self.settings.save()
+        except (OSError, CredentialStoreError) as exc:
+            self._log(f"Kunne ikke lagre nylig analyse: {exc}")
         self.recent_analysis_panel.hide()
 
     def _processed_workbook_failed(self, message: str) -> None:
@@ -2801,7 +2892,7 @@ class MainWindow(QMainWindow):
         self._merge_browser_evidence(browser_evidence)
         self._refresh_operations_cockpit()
         self._auto_rewrite_workbook()
-        self._set_ready()
+        self._finish_search_workbook_checkpoint()
         self._complete_run_progress("Browser evidence complete")
         self.search_btn.setText("Run Evidence Search")
         self._log(f"Browser evidence lookup complete ({self._search_elapsed_text()})")
@@ -2838,8 +2929,7 @@ class MainWindow(QMainWindow):
             (self.browser_thread, self.browser_worker),
         ):
             if (
-                thread is not None
-                and thread.isRunning()
+                self._thread_is_running(thread)
                 and isinstance(worker, (DatabaseWorker, BrowserReviewWorker))
             ):
                 thread.requestInterruption()
@@ -2875,8 +2965,7 @@ class MainWindow(QMainWindow):
             (self.browser_thread, self.browser_worker),
         ):
             if (
-                thread is not None
-                and thread.isRunning()
+                self._thread_is_running(thread)
                 and isinstance(worker, (DatabaseWorker, BrowserReviewWorker))
             ):
                 active_workers.append(worker)
@@ -2948,14 +3037,16 @@ class MainWindow(QMainWindow):
         self._active_search_report_patient_ids = []
         self._refresh_operations_cockpit()
         self._auto_rewrite_workbook()
-        self._set_ready()
+        self._finish_search_workbook_checkpoint()
         self.run_progress.show()
         self.run_progress.title.setText("Evidence search stopped")
         detail = (
             "Completed source results were kept and written to the review workbook. "
             "Resume Incomplete Search continues with only unfinished work."
         )
-        if self.workbook_write_pending:
+        if self.workbook_write_thread is not None:
+            detail = "Completed results were kept. Saving them to the review workbook before the next operation."
+        elif self.workbook_write_pending:
             detail = (
                 "Completed results were kept, but the workbook is open in Excel. "
                 "Close it, then click Update Review Workbook."
@@ -2991,6 +3082,10 @@ class MainWindow(QMainWindow):
             )
             self._set_search_complete_status(save_pending=False)
         QMessageBox.information(self, "Workbook Updated", f"Evidence written to:\n{self.result.output_path}")
+        patient_ids = self._pending_report_after_workbook
+        self._pending_report_after_workbook = []
+        if patient_ids:
+            self._start_patient_reports(patient_ids)
 
     def _selected_patient_ids(self) -> list[str]:
         if self.result is None:
@@ -3084,12 +3179,18 @@ class MainWindow(QMainWindow):
     def _start_patient_reports(self, patient_ids: list[str]) -> None:
         if not self.result or not self.result.output_path or not patient_ids:
             return
+        try:
+            who_genes = load_who_driver_genes(self.settings.who_driver_genes_path)
+        except (OSError, ValueError) as exc:
+            self._pending_report_after_workbook = list(patient_ids)
+            self._set_ready()
+            self._log(f"Rapportgenerering venter på gyldig WHO-drivergenliste: {exc}")
+            QMessageBox.warning(self, "WHO-drivergenlisten kunne ikke leses", str(exc))
+            return
         self._set_busy("Generating reports")
         coordinator = PatientReportCoordinator(
             self.result, self.result.variants, self.evidence,
-            writer=PatientExcelReportWriter(
-                load_who_driver_genes(self.settings.who_driver_genes_path)
-            ),
+            writer=PatientExcelReportWriter(who_genes),
         )
         worker = PatientReportWorker(coordinator, patient_ids)
         thread = QThread(self)
@@ -3102,6 +3203,7 @@ class MainWindow(QMainWindow):
         worker.failed.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._worker_thread_finished)
         self.patient_report_worker = worker
         self.patient_report_thread = thread
         self.patient_excel_btn.setEnabled(False)
@@ -3139,6 +3241,17 @@ class MainWindow(QMainWindow):
 
     def _auto_rewrite_workbook(self) -> None:
         self._queue_evidence_workbook_write()
+
+    def _finish_search_workbook_checkpoint(self) -> None:
+        if self.workbook_write_thread is None:
+            self._set_ready()
+            return
+        # A delayed save must finish its reports before another run can own
+        # the analysis. Otherwise the callback could use a newly loaded file.
+        self._waiting_final_workbook = True
+        self._active_sources.clear()
+        self.pause_search_btn.setEnabled(False)
+        self.stop_search_btn.setEnabled(False)
 
     def _queue_evidence_workbook_write(self) -> None:
         if not self.result or not self.result.output_path:
@@ -3208,11 +3321,18 @@ class MainWindow(QMainWindow):
         if write_again:
             self._queue_evidence_workbook_write()
             return
+        waiting_final = self._waiting_final_workbook
+        self._waiting_final_workbook = False
         if error is None and saved_path is not None:
             patient_ids = list(self._pending_report_after_workbook)
             self._pending_report_after_workbook = []
             if patient_ids:
                 self._start_patient_reports(patient_ids)
+                return
+        if waiting_final:
+            self._set_ready()
+            if "complete" in self.run_progress.title.text().casefold():
+                self._complete_run_progress(self.run_progress.title.text())
 
     def _try_write_evidence_workbook(self, *, show_errors: bool) -> bool:
         try:
@@ -3259,7 +3379,9 @@ class MainWindow(QMainWindow):
             self._record_active_search_failure(message)
             self._auto_rewrite_workbook()
             self._active_search_report_patient_ids = []
-        self._set_ready()
+            self._finish_search_workbook_checkpoint()
+        else:
+            self._set_ready()
         if not self.run_progress.isHidden():
             self.run_progress.title.setText("Search stopped")
             self.run_progress.detail.setText(message)
@@ -3274,24 +3396,35 @@ class MainWindow(QMainWindow):
     def _save_settings(self, silent: bool = False) -> bool:
         output_dir = self.output_dir_edit.text().strip()
         who_path = self.who_genes_edit.text().strip()
+        artifact_path = self.artifact_path_edit.text().strip()
+        manual_artifacts = self._artifact_rules_from_table()
+        invalid_field = self.output_dir_edit
         try:
             if not output_dir or not Path(output_dir).expanduser().is_dir():
                 raise ValueError("Velg en eksisterende mappe for rapporter.")
             output_dir = str(Path(output_dir).expanduser().resolve())
+            invalid_field = self.who_genes_edit
             if who_path:
                 who_path = str(Path(who_path).expanduser().resolve())
             load_who_driver_genes(who_path)
+            invalid_field = self.artifact_path_edit
+            if artifact_path:
+                artifact_path = str(Path(artifact_path).expanduser().resolve())
+            production_rules(load_artifact_rules(artifact_path, fallback=manual_artifacts))
         except (OSError, ValueError) as exc:
             self._validate_who_path()
+            self._validate_artifact_path()
             QMessageBox.warning(self, "Ugyldige filinnstillinger", str(exc))
             self._switch_page(2)
-            (self.output_dir_edit if not output_dir or not Path(output_dir).expanduser().is_dir()
-             else self.who_genes_edit).setFocus()
+            invalid_field.setFocus()
             return False
         self.settings.default_output_dir = output_dir
         self.settings.who_driver_genes_path = who_path
+        self.settings.artifact_rules_path = artifact_path
         self.output_dir_edit.setText(output_dir)
         self.who_genes_edit.setText(who_path)
+        self.artifact_path_edit.setText(artifact_path)
+        self._validate_artifact_path()
         self.settings.clinvar_api_key = ""
         self.settings.cosmic_email = self.cosmic_email_edit.text()
         self.settings.cosmic_password = self.cosmic_password_edit.text()
@@ -3316,11 +3449,11 @@ class MainWindow(QMainWindow):
         self.settings.browser_background = self.browser_background_check.isChecked()
         self.settings.search_included_only = self.included_only_check.isChecked()
         self.settings.mtbp_cancer_type = self.mtbp_cancer_type_edit.text().strip() or "Blood"
-        self.settings.artifact_rules = self._artifact_rules_from_table()
+        self.settings.artifact_rules = manual_artifacts
         self.settings.enabled_databases = [name for name, check in self.db_checks.items() if check.isChecked()]
         try:
             self.settings.save()
-        except OSError as exc:
+        except (OSError, CredentialStoreError) as exc:
             QMessageBox.warning(self, "Kunne ikke lagre innstillinger", str(exc))
             return False
         if not silent:
@@ -3396,7 +3529,9 @@ class MainWindow(QMainWindow):
         worker.failed.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._worker_thread_finished)
         self.report_retry_thread = thread
+        self.report_retry_worker = worker
         self._set_busy("Saving pending reports")
         thread.start()
 
@@ -3442,6 +3577,7 @@ class MainWindow(QMainWindow):
 
     def _prepare_search_status(self, variants, databases, completed_sources) -> None:
         self._active_sources.clear()
+        self._pending_report_after_workbook = []
         self._queue_databases = set(databases)
         self._search_pending_pairs = {
             (BrowserReviewService.variant_key(variant), database)
@@ -3515,7 +3651,9 @@ class MainWindow(QMainWindow):
         self.run_progress.show()
         self.run_progress.title.setText(title)
         detail = "All queued patients have been processed. Results are ready for review."
-        if self.workbook_write_pending:
+        if self.workbook_write_thread is not None:
+            detail = "Saving the completed results to the review workbook. Priority reports follow after the save."
+        elif self.workbook_write_pending:
             detail = (
                 "Search finished, but the workbook is still open in Excel. Close it, "
                 "then click Rewrite Workbook With Evidence."

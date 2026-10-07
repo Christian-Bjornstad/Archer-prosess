@@ -71,6 +71,18 @@ def main() -> None:
         window.database_scroll.verticalScrollBar().setValue(window.database_scroll.verticalScrollBar().maximum())
         app.processEvents()
         window.grab().save(str(output / f"evidence-controls-{width}.png"))
+    window._set_ready()
+    window.run_progress.hide()
+    window.artifact_path_edit.setText(str(ROOT / "reference_lists" / "Artefaktliste.xlsx"))
+    window.who_genes_edit.setText(str(ROOT / "reference_lists" / "WHO-drivergener.xlsx"))
+    window._validate_artifact_path()
+    window._validate_who_path()
+    for width, height in ((1024, 640), (1440, 900)):
+        window.resize(width, height)
+        window._switch_page(2)
+        window.settings_scroll.verticalScrollBar().setValue(0)
+        app.processEvents()
+        window.grab().save(str(output / f"settings-{width}.png"))
     window.close()
     print(output)
 
