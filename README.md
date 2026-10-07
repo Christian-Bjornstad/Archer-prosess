@@ -117,6 +117,26 @@ the most recent local workbook, but it never loads data or contacts a provider
 until **Restore analysis** is selected. **Retry Pending Saves** retries only
 locked report files and never repeats database searches.
 
+The Import page also accepts a single local TSV or processed `.xlsx` dropped
+onto **Slipp filen her**. Dropping a TSV prepares the input/output paths without
+starting processing; dropping a workbook restores the existing analysis. After
+creating the review file, use **Åpne Excel-fil**, review the X selections, then
+**Til Evidence**. The current review filename remains visible on Evidence.
+
+Use **Sjekk innlogging** before a run to check all five dedicated Edge profiles.
+Each source reports confirmed sign-in, public access (ClinVar), sign-in required,
+unconfirmed access, or an error. The check does not enter credentials or submit
+variants. Results show the time checked; hover a status for details. Choose the
+provider and **Sign In** when needed, then check again. Checks and changes to
+sources/import paths are disabled while an operation runs.
+
+Evidence cells now update as each variant result is persisted, rather than
+waiting for all variants at a provider. The table keeps selection, current cell
+and scroll position; unselected sources without evidence show **Not selected**.
+Search startup brings patient progress into view. Small workstation windows
+use horizontal table scrolling to keep patient identifiers and status text
+readable. Workbook checkpoints remain grouped per patient.
+
 ## Evidence sources
 
 All browser sources are queried with the somatic workflow and GRCh37/hg19 where
@@ -153,6 +173,12 @@ This design requires no:
 Each provider receives its own persistent Edge profile under
 `%USERPROFILE%\.archer-prosess\browser_profiles`. This allows signed-in sessions
 to be reused while keeping browser activity visible and auditable.
+
+Startup checks managed Edge policy before opening a profile. Disabled remote
+debugging, a mandatory profile-directory override, unreadable policy, or an
+already-owned evidence profile produce an actionable error. No policy or
+certificate settings are changed. See [workstation validation](docs/workstation-improvements.md)
+for the work-PC checks and remaining live-environment validation.
 
 > [!WARNING]
 > Browser profiles contain authenticated session data. Do not copy, share, or
