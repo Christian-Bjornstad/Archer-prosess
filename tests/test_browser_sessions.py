@@ -183,3 +183,53 @@ def test_unrelated_redirect_with_password_form_does_not_claim_provider_login(tmp
     result = BrowserSessionCheckService(BrowserReviewService(profile_root=tmp_path)).inspect_page("OncoKB", page)
 
     assert result.status == "unknown"
+
+
+def test_single_provider_check_opens_and_releases_only_requested_profile(tmp_path, monkeypatch):
+    from archer_processor.services.browser_sessions import BrowserSessionCheckService
+
+    review = BrowserReviewService(profile_root=tmp_path)
+    # Simulate the login page redirecting to the signed-in provider home.
+    page = Page("https://www.oncokb.org/", controls=("Sign out",))
+    launches, closed = [], []
+
+    def launch(profile, **kwargs):
+        launches.append(Path(profile).name)
+        return SimpleNamespace(pages=[page], close=lambda: closed.append("OncoKB"))
+
+    @contextmanager
+    def browser():
+        yield SimpleNamespace(chromium=SimpleNamespace(launch_persistent_context=launch))
+
+    monkeypatch.setattr(review, "_browser_api", lambda: (browser, RuntimeError, TimeoutError))
+
+    result = BrowserSessionCheckService(review).check("OncoKB")
+
+    assert result.database == "OncoKB"
+    assert result.status == "authenticated"
+    assert launches == ["oncokb"]
+    assert closed == ["OncoKB"]
+    assert page.navigations == [review.login_url("OncoKB")]
+
+
+def test_single_provider_check_rejects_unknown_provider_before_browser_launch(tmp_path, monkeypatch):
+    from archer_processor.services.browser_sessions import BrowserSessionCheckService
+
+    review = BrowserReviewService(profile_root=tmp_path)
+    monkeypatch.setattr(review, "_browser_api", lambda: pytest.fail("Unknown provider must never launch Edge"))
+
+    with pytest.raises(ValueError):
+        BrowserSessionCheckService(review).check("Unexpected")
+
+
+def test_single_provider_check_honors_cancellation_before_browser_launch(tmp_path, monkeypatch):
+    from archer_processor.services.browser_sessions import BrowserSessionCheckService
+
+    review = BrowserReviewService(profile_root=tmp_path, stop_requested=lambda: True)
+    monkeypatch.setattr(review, "_browser_api", lambda: pytest.fail("Cancelled check must never launch Edge"))
+
+    result = BrowserSessionCheckService(review).check("Franklin")
+
+    assert result.database == "Franklin"
+    assert result.status == "unknown"
+    assert "cancel" in result.message.lower()

@@ -59,14 +59,23 @@ class BrowserSessionCheckService:
     ) -> list[BrowserSessionStatus]:
         results = []
         for database in BROWSER_DATABASES:
-            if self.review_service.stop_requested():
-                result = BrowserSessionStatus(database, "unknown", "Session check cancelled.")
-            else:
-                result = self._check_provider(database)
+            result = self.check(database)
             results.append(result)
             if on_result is not None:
                 on_result(result)
         return results
+
+    def check(self, database: str) -> BrowserSessionStatus:
+        """Check one known provider, using only its dedicated profile.
+
+        Unknown providers raise ValueError before opening any browser. Runtime
+        failures and cancellation use the same status contract as check_all.
+        """
+        if database not in BROWSER_DATABASES:
+            raise ValueError(f"Unknown evidence provider: {database!r}")
+        if self.review_service.stop_requested():
+            return BrowserSessionStatus(database, "unknown", "Session check cancelled.")
+        return self._check_provider(database)
 
     def _check_provider(self, database: str) -> BrowserSessionStatus:
         review = self.review_service
