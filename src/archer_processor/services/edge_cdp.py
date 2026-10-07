@@ -255,7 +255,7 @@ class EdgeCdpContext:
                                 "downloadPath": str(download_directory),
                             },
                         )
-                    except EdgeCdpError:
+                    except (EdgeCdpError, EdgeCdpTimeout):
                         pass
                 return context
             except Exception as exc:
@@ -332,7 +332,7 @@ class EdgeCdpContext:
         if pages:
             try:
                 pages[0]._connection.call("Browser.close", timeout_ms=2_000)
-            except EdgeCdpError:
+            except (EdgeCdpError, EdgeCdpTimeout):
                 pass
         for page in pages:
             page.close_connection()
@@ -341,7 +341,7 @@ class EdgeCdpContext:
         while time.monotonic() < shutdown_deadline:
             try:
                 _http_json(f"{self.endpoint}/json/version", timeout=0.25)
-            except EdgeCdpError:
+            except (EdgeCdpError, EdgeCdpTimeout):
                 break
             time.sleep(0.1)
         try:
@@ -417,13 +417,17 @@ class _CdpConnection:
         if params:
             payload["params"] = params
         try:
-            self._socket.send(json.dumps(payload))
-            self._socket.settimeout(max(0.1, timeout_ms / 1_000))
             deadline = time.monotonic() + timeout_ms / 1_000
+            self._socket.settimeout(max(0.001, timeout_ms / 1_000))
+            self._socket.send(json.dumps(payload))
             while time.monotonic() < deadline:
                 pending = self._pending.pop(command_id, None)
                 if pending is not None:
                     return self._result(method, pending)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._socket.settimeout(remaining)
                 try:
                     message = json.loads(self._socket.recv())
                 except websocket.WebSocketTimeoutException as exc:
@@ -435,7 +439,7 @@ class _CdpConnection:
                     self._pending[response_id] = message
                 else:
                     self._handle_event(message)
-        except EdgeCdpError:
+        except (EdgeCdpError, EdgeCdpTimeout):
             raise
         except Exception as exc:
             raise EdgeCdpError(f"Microsoft Edge CDP failed during {method}: {exc}") from exc
@@ -494,7 +498,7 @@ class EdgeCdpPage:
             value = self._evaluate_value("location.href", timeout_ms=2_000)
             if value:
                 self._last_url = str(value)
-        except EdgeCdpError:
+        except (EdgeCdpError, EdgeCdpTimeout):
             pass
         return self._last_url
 
@@ -525,7 +529,7 @@ class EdgeCdpPage:
                         self._evaluate_value("location.href", timeout_ms=2_000) or url
                     )
                     return
-            except EdgeCdpError:
+            except (EdgeCdpError, EdgeCdpTimeout):
                 pass
             time.sleep(0.05)
         raise EdgeCdpTimeout(f"Edge did not finish navigating to {url}.")
@@ -936,7 +940,7 @@ def _close_failed_browser(process, version: dict[str, Any]) -> None:
         try:
             connection = _CdpConnection(websocket_url)
             connection.call("Browser.close", timeout_ms=2_000)
-        except EdgeCdpError:
+        except (EdgeCdpError, EdgeCdpTimeout):
             pass
         finally:
             if connection is not None:

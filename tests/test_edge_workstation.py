@@ -319,3 +319,92 @@ def test_profile_lease_released_after_lifecycle_error(tmp_path, monkeypatch, sta
             context.close()
     lease = edge_cdp._acquire_profile_lease(profile)
     lease.close()
+
+
+def test_cdp_socket_timeout_preserves_timeout_exception_type():
+    class Socket:
+        def send(self, payload):
+            pass
+        def settimeout(self, value):
+            pass
+        def recv(self):
+            raise edge_cdp.websocket.WebSocketTimeoutException("synthetic stalled socket")
+
+    connection = object.__new__(edge_cdp._CdpConnection)
+    connection.closed = False
+    connection._next_id = 1
+    connection._pending = {}
+    connection._socket = Socket()
+
+    with pytest.raises(edge_cdp.EdgeCdpTimeout):
+        connection.call("Runtime.evaluate", timeout_ms=2_000)
+
+
+def test_cdp_unrelated_event_does_not_restart_the_receive_deadline(monkeypatch):
+    clock = {"now": 0.0}
+    limits = []
+    class Socket:
+        count = 0
+        def send(self, payload):
+            pass
+        def settimeout(self, value):
+            limits.append(value)
+        def recv(self):
+            self.count += 1
+            if self.count == 1:
+                clock["now"] += 0.8
+                return '{"method":"Page.loadEventFired","params":{}}'
+            clock["now"] += limits[-1]
+            raise edge_cdp.websocket.WebSocketTimeoutException("synthetic delayed response")
+    monkeypatch.setattr(edge_cdp.time, "monotonic", lambda: clock["now"])
+    connection = object.__new__(edge_cdp._CdpConnection)
+    connection.closed, connection._next_id, connection._pending = False, 1, {}
+    connection._socket = Socket()
+    with pytest.raises(edge_cdp.EdgeCdpTimeout):
+        connection.call("Runtime.evaluate", timeout_ms=1000)
+    assert clock["now"] <= 1.001
+    assert limits[-1] == pytest.approx(0.2)
+
+
+def test_stalled_browser_close_still_closes_connections_and_releases_lease(tmp_path, monkeypatch):
+    cleanup = []
+
+    class Connection:
+        def call(self, *args, **kwargs):
+            raise edge_cdp.EdgeCdpTimeout("synthetic stalled close")
+
+    page = SimpleNamespace(_connection=Connection(), close_connection=lambda: cleanup.append("socket"))
+    process = SimpleNamespace(wait=lambda **kwargs: cleanup.append("process"))
+    context = edge_cdp.EdgeCdpContext(process, "http://127.0.0.1:25687", tmp_path)
+    context._page_by_target["synthetic"] = page
+    context._profile_lease = edge_cdp._acquire_profile_lease(tmp_path)
+    def closed_endpoint(*args, **kwargs):
+        raise edge_cdp.EdgeCdpError("synthetic endpoint closed")
+    monkeypatch.setattr(edge_cdp, "_http_json", closed_endpoint)
+    monkeypatch.setattr(edge_cdp.time, "sleep", lambda _: None)
+
+    context.close()
+
+    assert cleanup == ["socket", "process"]
+    lease = edge_cdp._acquire_profile_lease(tmp_path)
+    lease.close()
+
+
+def test_stalled_failed_launch_close_still_releases_its_owned_process(monkeypatch):
+    cleanup = []
+
+    class Connection:
+        def __init__(self, url):
+            pass
+        def call(self, *args, **kwargs):
+            raise edge_cdp.EdgeCdpTimeout("synthetic stalled close")
+        def close(self):
+            cleanup.append("socket")
+
+    process = SimpleNamespace(poll=lambda: None, terminate=lambda: cleanup.append("terminate"),
+                              wait=lambda **kwargs: cleanup.append("process"))
+    monkeypatch.setattr(edge_cdp, "_CdpConnection", Connection)
+
+    edge_cdp._close_failed_browser(process, {"webSocketDebuggerUrl": "ws://127.0.0.1:25687/devtools/browser/synthetic"})
+
+    assert cleanup == ["socket", "terminate", "process"]
