@@ -196,11 +196,21 @@ Each provider receives its own persistent Edge profile under
 `%USERPROFILE%\.archer-prosess\browser_profiles`. This allows signed-in sessions
 to be reused while keeping browser activity visible and auditable.
 
+If a work PC redirects or restricts that home directory, choose
+**Innstillinger → Tilkoblinger → Edge-profilmappe → Bruk lokal mappe**, then save.
+This explicitly selects `%LOCALAPPDATA%\.archer-prosess\browser_profiles`.
+Login, session checks and searches share the saved base directory, with one
+subdirectory per provider. Existing profiles are left in place; a new directory
+needs sign-in again. Blank retains the original location.
+
 Startup checks managed Edge policy before opening a profile. Disabled remote
 debugging, a mandatory profile-directory override, unreadable policy, or an
 already-owned evidence profile produce an actionable error. No policy or
 certificate settings are changed. See [workstation validation](docs/workstation-improvements.md)
 for the work-PC checks and remaining live-environment validation.
+The [12 October startup fix](docs/edge-startup-job-pc-2026-10-12.md) also preserves
+the concrete startup reason and gives a clean Edge broker handoff its full
+20-second startup window instead of treating it as failure after three seconds.
 
 > [!WARNING]
 > Browser profiles contain authenticated session data. Do not copy, share, or

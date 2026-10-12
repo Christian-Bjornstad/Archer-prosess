@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ class AppSettings:
     browser_delay_seconds: int = 3
     browser_delay_max_seconds: int = 8
     browser_background: bool = True
+    browser_profile_root: str = ""
     mtbp_timeout_minutes: int = 20
     search_included_only: bool = True
     gnomad_dataset: str = "gnomad_r2_1"
@@ -52,6 +54,30 @@ class AppSettings:
     @classmethod
     def config_path(cls) -> Path:
         return Path.home() / ".archer-prosess" / "config.json"
+
+    @property
+    def browser_profile_root_path(self) -> Path:
+        """Selected provider-profile root; blank retains existing sessions."""
+        if self.browser_profile_root.strip():
+            return Path(self.normalize_browser_profile_root(self.browser_profile_root))
+        return Path.home() / ".archer-prosess" / "browser_profiles"
+
+    @staticmethod
+    def normalize_browser_profile_root(value: str) -> str:
+        """Validate a folder choice without creating or migrating profiles."""
+        value = value.strip()
+        if not value:
+            return ""
+        directory = Path(os.path.expandvars(value)).expanduser()
+        if not directory.is_absolute():
+            raise ValueError("Velg en absolutt mappebane for Edge-profiler.")
+        directory = directory.resolve()
+        existing = directory
+        while not existing.exists() and existing.parent != existing:
+            existing = existing.parent
+        if existing.exists() and not existing.is_dir():
+            raise ValueError("Edge-profiler må lagres i en mappe, ikke en fil.")
+        return str(directory)
 
     @classmethod
     def load(cls) -> "AppSettings":
@@ -168,6 +194,7 @@ class AppSettings:
         return settings
 
     def save(self) -> None:
+        self.browser_profile_root = self.normalize_browser_profile_root(self.browser_profile_root)
         self.browser_delay_seconds = max(0, int(self.browser_delay_seconds))
         self.browser_delay_max_seconds = max(
             self.browser_delay_seconds,

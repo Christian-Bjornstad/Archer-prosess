@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import os
 import random
 import threading
 import time
@@ -619,6 +620,7 @@ class DatabaseWorker(QObject):
 
     def _browser_service(self) -> BrowserReviewService:
         return BrowserReviewService(
+            profile_root=self.settings.browser_profile_root_path,
             mtbp_cancer_type=self.settings.mtbp_cancer_type,
             clinvar_api_key=self.settings.clinvar_api_key,
             analysis_timeout_ms=self.settings.mtbp_timeout_minutes * 60_000,
@@ -725,6 +727,7 @@ class BrowserLoginWorker(QObject):
                 f"{self.database}: checking saved credentials/session"
             )
             service = BrowserReviewService(
+                profile_root=self.settings.browser_profile_root_path,
                 mtbp_cancer_type=self.settings.mtbp_cancer_type,
                 clinvar_api_key=self.settings.clinvar_api_key,
                 analysis_timeout_ms=self.settings.mtbp_timeout_minutes * 60_000,
@@ -750,15 +753,17 @@ class BrowserSessionCheckWorker(QObject):
     finished = pyqtSignal(object)
     failed = pyqtSignal(str)
 
-    def __init__(self, database: str | None = None):
+    def __init__(self, database: str | None = None, settings: AppSettings | None = None):
         super().__init__()
         self.database = database
+        self.settings = settings or AppSettings()
 
     def run(self) -> None:
         try:
             from archer_processor.services.browser_sessions import BrowserSessionCheckService
 
             service = BrowserSessionCheckService(BrowserReviewService(
+                profile_root=self.settings.browser_profile_root_path,
                 browser_background=True,
                 stop_requested=QThread.currentThread().isInterruptionRequested,
             ))
@@ -1162,6 +1167,7 @@ class BrowserReviewWorker(QObject):
 
     def _build_service(self) -> BrowserReviewService:
         return BrowserReviewService(
+            profile_root=self.settings.browser_profile_root_path,
             mtbp_cancer_type=self.settings.mtbp_cancer_type,
             clinvar_api_key=self.settings.clinvar_api_key,
             analysis_timeout_ms=self.settings.mtbp_timeout_minutes * 60_000,
@@ -2032,7 +2038,7 @@ class MainWindow(QMainWindow):
         for column, title in enumerate(["Kilde", "Tilgang", "E-post", "Passord"]):
             header = QLabel(title)
             header.setObjectName("SettingsColumnHeader")
-            access_grid.addWidget(header, 0, column)
+            access_grid.addWidget(header, 4, column)
 
         self.cosmic_email_edit = QLineEdit(self.settings.cosmic_email)
         self.cosmic_password_edit = QLineEdit(self.settings.cosmic_password)
@@ -2063,13 +2069,43 @@ class MainWindow(QMainWindow):
             ("Franklin", web_access("Innlogget nettsted"), self.franklin_email_edit, self.franklin_password_edit),
             ("MTBP", web_access("Innlogget nettsted"), self.mtbp_email_edit, self.mtbp_password_edit),
         ]
-        for row, (provider, access, email, password) in enumerate(provider_rows, start=1):
+        for row, (provider, access, email, password) in enumerate(provider_rows, start=5):
             provider_label = QLabel(provider)
             provider_label.setObjectName("FieldLabel")
             access_grid.addWidget(provider_label, row, 0)
             access_grid.addWidget(access, row, 1)
             access_grid.addWidget(email, row, 2)
             access_grid.addWidget(password, row, 3)
+
+        self.browser_profile_root_edit = QLineEdit(self.settings.browser_profile_root)
+        self.browser_profile_root_edit.setAccessibleName("Mappe for appens Edge-profiler")
+        self.browser_profile_root_edit.setPlaceholderText("Tomt felt beholder eksisterende profilmappe")
+        self.browser_profile_browse_btn = QPushButton("Velg mappe")
+        self.browser_profile_browse_btn.clicked.connect(self._browse_browser_profile_root)
+        self.browser_local_profile_btn = QPushButton("Bruk lokal mappe")
+        self.browser_local_profile_btn.clicked.connect(self._use_local_browser_profile_root)
+        profile_actions = QHBoxLayout()
+        profile_actions.addWidget(self.browser_profile_browse_btn)
+        profile_actions.addWidget(self.browser_local_profile_btn)
+        profile_actions.addStretch()
+        self.browser_profile_status = QLabel()
+        self.browser_profile_status.setObjectName("HelperText")
+        self.browser_profile_status.setTextFormat(Qt.TextFormat.PlainText)
+        self.browser_profile_status.setWordWrap(True)
+        profile_help = QLabel(
+            "Appen oppretter egne profiler i valgt mappe når Edge brukes. "
+            "En ny mappe krever vanligvis ny innlogging. Eksisterende profiler "
+            "og cookies flyttes eller slettes ikke."
+        )
+        profile_help.setObjectName("HelperText")
+        profile_help.setWordWrap(True)
+        access_grid.addWidget(QLabel("Edge-profilmappe"), 0, 0)
+        access_grid.addWidget(self.browser_profile_root_edit, 0, 1, 1, 3)
+        access_grid.addLayout(profile_actions, 1, 1, 1, 3)
+        access_grid.addWidget(self.browser_profile_status, 2, 0, 1, 4)
+        access_grid.addWidget(profile_help, 3, 0, 1, 4)
+        self.browser_profile_root_edit.textChanged.connect(self._update_browser_profile_status)
+        self._update_browser_profile_status()
 
 
         safety_group = QGroupBox("Søkevalg")
@@ -2282,6 +2318,40 @@ class MainWindow(QMainWindow):
         path = QFileDialog.getExistingDirectory(self, "Select Default Output Folder", self.output_dir_edit.text())
         if path:
             self.output_dir_edit.setText(path)
+
+    def _browse_browser_profile_root(self) -> None:
+        path = QFileDialog.getExistingDirectory(
+            self, "Velg mappe for appens Edge-profiler",
+            self.browser_profile_root_edit.text() or str(Path.home() / ".archer-prosess" / "browser_profiles"),
+        )
+        if path:
+            self.browser_profile_root_edit.setText(path)
+
+    def _use_local_browser_profile_root(self) -> None:
+        local_root = Path(os.environ.get("LOCALAPPDATA") or Path.home())
+        self.browser_profile_root_edit.setText(str(local_root / ".archer-prosess" / "browser_profiles"))
+
+    def _update_browser_profile_status(self) -> None:
+        try:
+            message = f"Brukes nå: {self.settings.browser_profile_root_path}"
+        except (OSError, ValueError) as exc:
+            message = f"Ugyldig lagret Edge-mappe: {self.settings.browser_profile_root}\n{exc}"
+        if self.browser_profile_root_edit.text().strip() != self.settings.browser_profile_root:
+            message += "\nIkke lagret · lagre innstillinger eller start innlogging for å bruke mappevalget."
+        self.browser_profile_status.setText(message)
+
+    def _browser_profile_saved(self, previous_root: str) -> None:
+        self.browser_profile_root_edit.setText(self.settings.browser_profile_root)
+        self._update_browser_profile_status()
+        if previous_root == self.settings.browser_profile_root:
+            return
+        self._session_results.clear()
+        for label in self.session_status_labels.values():
+            label.setText("Sjekk på nytt")
+            label.setStyleSheet("")
+            label.setToolTip("Edge-profilmappe er endret. Sjekk tilgang i den valgte mappen.")
+        self.session_check_summary.setText("Edge-profilmappe er endret. Sjekk innlogging på nytt.")
+        self._session_controls_changed()
 
     def _browse_who_genes(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -2649,6 +2719,14 @@ class MainWindow(QMainWindow):
 
     def _save_browser_settings(self) -> bool:
         """Persist browser options without accepting unsaved reference paths."""
+        try:
+            profile_root = AppSettings.normalize_browser_profile_root(self.browser_profile_root_edit.text())
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Ugyldig Edge-mappe", str(exc))
+            self._switch_page(2)
+            self.settings_sections.setCurrentIndex(1)
+            self.browser_profile_root_edit.setFocus()
+            return False
         minimum_delay = self.browser_delay_spin.value()
         maximum_delay = max(minimum_delay, self.browser_delay_max_spin.value())
         candidate = replace(
@@ -2664,15 +2742,18 @@ class MainWindow(QMainWindow):
             browser_delay_seconds=minimum_delay,
             browser_delay_max_seconds=maximum_delay,
             browser_background=self.browser_background_check.isChecked(),
+            browser_profile_root=profile_root,
             mtbp_timeout_minutes=self.mtbp_timeout_spin.value(),
             mtbp_cancer_type=self.mtbp_cancer_type_edit.text().strip() or "Blood",
         )
         try:
             candidate.save()
-        except (OSError, CredentialStoreError) as exc:
+        except (OSError, ValueError, CredentialStoreError) as exc:
             QMessageBox.warning(self, "Kunne ikke lagre innlogging", str(exc))
             return False
+        previous_root = self.settings.browser_profile_root
         self.settings = candidate
+        self._browser_profile_saved(previous_root)
         self.browser_delay_max_spin.setValue(maximum_delay)
         return True
 
@@ -2750,7 +2831,7 @@ class MainWindow(QMainWindow):
             label.setText("Sjekker …")
             label.setStyleSheet("")
             label.setToolTip("")
-        worker = BrowserSessionCheckWorker(database)
+        worker = BrowserSessionCheckWorker(database, settings=self.settings)
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -3104,7 +3185,7 @@ class MainWindow(QMainWindow):
         self.settings.last_processed_workbook = str(workbook_path)
         try:
             self.settings.save()
-        except (OSError, CredentialStoreError) as exc:
+        except (OSError, ValueError, CredentialStoreError) as exc:
             self._log(f"Kunne ikke lagre nylig analyse: {exc}")
         self.recent_analysis_panel.hide()
 
@@ -3612,6 +3693,7 @@ class MainWindow(QMainWindow):
         artifact_path = self.artifact_path_edit.text().strip()
         manual_artifacts = self._artifact_rules_from_table()
         invalid_field = self.output_dir_edit
+        invalid_section = 0
         try:
             if not output_dir or not Path(output_dir).expanduser().is_dir():
                 raise ValueError("Velg en eksisterende mappe for rapporter.")
@@ -3624,18 +3706,22 @@ class MainWindow(QMainWindow):
             if artifact_path:
                 artifact_path = str(Path(artifact_path).expanduser().resolve())
             production_rules(load_artifact_rules(artifact_path, fallback=manual_artifacts))
+            invalid_field = self.browser_profile_root_edit
+            invalid_section = 1
+            profile_root = AppSettings.normalize_browser_profile_root(self.browser_profile_root_edit.text())
         except (OSError, ValueError) as exc:
             self._validate_who_path()
             self._validate_artifact_path()
             QMessageBox.warning(self, "Ugyldige filinnstillinger", str(exc))
             self._switch_page(2)
-            self.settings_sections.setCurrentIndex(0)
+            self.settings_sections.setCurrentIndex(invalid_section)
             invalid_field.setFocus()
             return False
         candidate = replace(self.settings)
         candidate.default_output_dir = output_dir
         candidate.who_driver_genes_path = who_path
         candidate.artifact_rules_path = artifact_path
+        candidate.browser_profile_root = profile_root
         self.output_dir_edit.setText(output_dir)
         self.who_genes_edit.setText(who_path)
         self.artifact_path_edit.setText(artifact_path)
@@ -3668,10 +3754,12 @@ class MainWindow(QMainWindow):
         candidate.enabled_databases = [name for name, check in self.db_checks.items() if check.isChecked()]
         try:
             candidate.save()
-        except (OSError, CredentialStoreError) as exc:
+        except (OSError, ValueError, CredentialStoreError) as exc:
             QMessageBox.warning(self, "Kunne ikke lagre innstillinger", str(exc))
             return False
+        previous_root = self.settings.browser_profile_root
         self.settings = candidate
+        self._browser_profile_saved(previous_root)
         self._update_reference_selection_status()
         if not silent:
             self._log('Innstillinger lagret')
