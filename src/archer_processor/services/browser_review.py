@@ -166,6 +166,28 @@ class BrowserReviewService:
         directory.mkdir(parents=True, exist_ok=True)
         return directory
 
+    def _launch_browser_context(self, runtime, database: str, **options):
+        """Keep startup diagnostics at the boundary, before any site is read."""
+        from archer_processor.services.edge_cdp import EdgeCdpError, EdgeCdpTimeout
+
+        self._validate_database(database)
+        profile = self.profile_root / database.lower().replace(" ", "-")
+        try:
+            return runtime.chromium.launch_persistent_context(
+                str(self.profile_directory(database)), channel=self.channel,
+                headless=False, accept_downloads=options.pop("accept_downloads", True),
+                **options,
+            )
+        except Exception as exc:
+            detail = (
+                str(exc) if isinstance(exc, (EdgeCdpError, EdgeCdpTimeout, OSError))
+                else "Unexpected startup failure"
+            )
+            raise BrowserAutomationUnavailable(
+                f"Could not start Microsoft Edge for {database}.\n"
+                f"Profile: {profile}\nActual startup error: {type(exc).__name__}: {detail}"
+            ) from exc
+
     def login_url(self, database: str) -> str:
         self._validate_database(database)
         return LOGIN_URLS[database]
@@ -196,21 +218,12 @@ class BrowserReviewService:
     def open_login(self, database: str, *, maximum_minutes: int = 30) -> str:
         """Open login and release the profile as soon as authentication succeeds."""
         sync_browser, browser_error, _ = self._browser_api()
-        profile = self.profile_directory(database)
         with sync_browser() as runtime:
-            try:
-                context = runtime.chromium.launch_persistent_context(
-                    str(profile),
-                    channel=self.channel,
-                    headless=False,
-                    accept_downloads=True,
-                )
-            except Exception as exc:
-                raise BrowserAutomationUnavailable(
-                    "Could not start Microsoft Edge for browser review. "
-                    "Confirm that managed Edge is installed and its "
-                    "RemoteDebuggingAllowed policy is enabled."
-                ) from exc
+            context = self._launch_browser_context(
+                runtime,
+                database,
+                accept_downloads=True,
+            )
             page = context.pages[0] if context.pages else context.new_page()
             page.goto(
                 self.login_url(database),
@@ -471,19 +484,13 @@ class BrowserReviewService:
         artifact_directory.mkdir(parents=True, exist_ok=True)
         results: dict[str, DatabaseEvidence] = {}
         with sync_browser() as runtime:
-            try:
-                context = runtime.chromium.launch_persistent_context(
-                    str(self.profile_directory(database)),
-                    channel=self.channel,
-                    headless=False,
-                    accept_downloads=True,
-                    viewport={"width": 1440, "height": 1000},
-                    background=self.browser_background,
-                )
-            except Exception as exc:
-                raise BrowserAutomationUnavailable(
-                    "Could not start Microsoft Edge for browser review."
-                ) from exc
+            context = self._launch_browser_context(
+                runtime,
+                database,
+                accept_downloads=True,
+                viewport={"width": 1440, "height": 1000},
+                background=self.browser_background,
+            )
             page = context.pages[0] if context.pages else context.new_page()
             try:
                 if database == "OncoKB" and self.oncokb_email and self.oncokb_password:
@@ -676,19 +683,13 @@ class BrowserReviewService:
         sync_browser, browser_error, _ = self._browser_api()
         artifact_directory.mkdir(parents=True, exist_ok=True)
         with sync_browser() as runtime:
-            try:
-                context = runtime.chromium.launch_persistent_context(
-                    str(self.profile_directory("COSMIC")),
-                    channel=self.channel,
-                    headless=False,
-                    accept_downloads=True,
-                    viewport={"width": 1440, "height": 1000},
-                    background=self.browser_background,
-                )
-            except Exception as exc:
-                raise BrowserAutomationUnavailable(
-                    f"Could not start COSMIC in Edge. Actual startup error: {exc}"
-                ) from exc
+            context = self._launch_browser_context(
+                runtime,
+                "COSMIC",
+                accept_downloads=True,
+                viewport={"width": 1440, "height": 1000},
+                background=self.browser_background,
+            )
             page = context.pages[0] if context.pages else context.new_page()
             try:
                 page.goto(
@@ -999,19 +1000,13 @@ class BrowserReviewService:
         artifact_directory.mkdir(parents=True, exist_ok=True)
         results: dict[str, DatabaseEvidence] = {}
         with sync_browser() as runtime:
-            try:
-                context = runtime.chromium.launch_persistent_context(
-                    str(self.profile_directory("ClinVar")),
-                    channel=self.channel,
-                    headless=False,
-                    accept_downloads=True,
-                    viewport={"width": 1440, "height": 1000},
-                    background=self.browser_background,
-                )
-            except Exception as exc:
-                raise BrowserAutomationUnavailable(
-                    f"Could not start ClinVar in Edge. Actual startup error: {exc}"
-                ) from exc
+            context = self._launch_browser_context(
+                runtime,
+                "ClinVar",
+                accept_downloads=True,
+                viewport={"width": 1440, "height": 1000},
+                background=self.browser_background,
+            )
             page = context.pages[0] if context.pages else context.new_page()
             try:
                 for index, variant in enumerate(variants, start=1):
@@ -1399,19 +1394,13 @@ class BrowserReviewService:
         context = None
         try:
             with sync_browser() as runtime:
-                try:
-                    context = runtime.chromium.launch_persistent_context(
-                        str(self.profile_directory("Franklin")),
-                        channel=self.channel,
-                        headless=False,
-                        accept_downloads=True,
-                        viewport={"width": 1440, "height": 1000},
-                        background=self.browser_background,
-                    )
-                except Exception as exc:
-                    raise BrowserAutomationUnavailable(
-                        f"Could not start Franklin in Edge. Actual startup error: {exc}"
-                    ) from exc
+                context = self._launch_browser_context(
+                    runtime,
+                    "Franklin",
+                    accept_downloads=True,
+                    viewport={"width": 1440, "height": 1000},
+                    background=self.browser_background,
+                )
                 page = context.pages[0] if context.pages else context.new_page()
                 if self.franklin_email and self.franklin_password:
                     page.goto(
@@ -1908,10 +1897,9 @@ class BrowserReviewService:
         report_pages: dict[str, tuple[str, list[dict[str, Any]], str]] = {}
         report_audits: dict[str, list[tuple[Path, DatabaseEvidence]]] = {}
         with sync_browser() as runtime:
-            context = runtime.chromium.launch_persistent_context(
-                str(self.profile_directory("MTBP")),
-                channel=self.channel,
-                headless=False,
+            context = self._launch_browser_context(
+                runtime,
+                "MTBP",
                 accept_downloads=True,
                 viewport={"width": 1440, "height": 1000},
                 background=self.browser_background,
@@ -2158,19 +2146,13 @@ class BrowserReviewService:
         context = None
         try:
             with sync_browser() as runtime:
-                try:
-                    context = runtime.chromium.launch_persistent_context(
-                        str(self.profile_directory("MTBP")),
-                        channel=self.channel,
-                        headless=False,
-                        accept_downloads=True,
-                        viewport={"width": 1440, "height": 1000},
-                        background=self.browser_background,
-                    )
-                except Exception as exc:
-                    raise BrowserAutomationUnavailable(
-                        f"Could not start MTBP in Edge. Actual startup error: {exc}"
-                    ) from exc
+                context = self._launch_browser_context(
+                    runtime,
+                    "MTBP",
+                    accept_downloads=True,
+                    viewport={"width": 1440, "height": 1000},
+                    background=self.browser_background,
+                )
                 page = context.pages[0] if context.pages else context.new_page()
                 if progress:
                     progress(f"MTBP: submitting {len(submitted_queries)} pseudonymous variants")

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from archer_processor.services.browser_review import BROWSER_DATABASES, BrowserReviewService
+from archer_processor.services.browser_review import BROWSER_DATABASES, BrowserAutomationUnavailable, BrowserReviewService
 
 
 SessionState = Literal["authenticated", "public", "login_required", "unknown", "error"]
@@ -82,10 +82,8 @@ class BrowserSessionCheckService:
         try:
             sync_browser, _, _ = review._browser_api()
             with sync_browser() as runtime:
-                context = runtime.chromium.launch_persistent_context(
-                    str(review.profile_directory(database)),
-                    channel=review.channel,
-                    headless=False,
+                context = review._launch_browser_context(
+                    runtime, database,
                     accept_downloads=False,
                     background=review.browser_background,
                 )
@@ -116,7 +114,7 @@ class BrowserSessionCheckService:
     def _error_guidance(exc: Exception) -> str:
         from archer_processor.services.edge_cdp import EdgeCdpError, EdgeCdpTimeout
 
-        if isinstance(exc, (EdgeCdpError, EdgeCdpTimeout)):
+        if isinstance(exc, (EdgeCdpError, EdgeCdpTimeout, BrowserAutomationUnavailable)):
             return str(exc)
         return (
             "Check network access and the dedicated Edge profile. If Edge cannot "
