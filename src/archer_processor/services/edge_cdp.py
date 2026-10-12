@@ -1016,7 +1016,9 @@ def _ensure_profile_idle(profile_directory: Path) -> None:
             "untouched and ask IT to inspect it."
         ) from exc
     try:
-        _http_json(f"http://127.0.0.1:{existing_port}/json/version", timeout=0.5)
+        # Windows may take about two seconds to report a refused loopback
+        # connection. A shorter timeout makes a stale announcement look busy.
+        _http_json(f"http://127.0.0.1:{existing_port}/json/version", timeout=3.0)
     except (EdgeCdpError, EdgeCdpTimeout) as exc:
         if _is_connection_refused(exc):
             return
@@ -1024,7 +1026,8 @@ def _ensure_profile_idle(profile_directory: Path) -> None:
             "Could not confirm the dedicated evidence profile is idle: its "
             "existing DevTools endpoint did not respond reliably. Finish any "
             "search or login using it, or ask IT to inspect the connection. "
-            "Leave other Edge and Citrix windows open."
+            "Leave other Edge and Citrix windows open. "
+            f"Probe: 127.0.0.1:{existing_port}. Actual probe error: {type(exc).__name__}: {exc}"
         ) from exc
     raise EdgeCdpProfileInUse(
         "The dedicated evidence profile is already in use. Finish the evidence "

@@ -234,6 +234,36 @@ def test_only_explicit_connection_refusal_confirms_stale_profile(tmp_path, monke
     assert announcement.exists()
 
 
+def test_closed_loopback_listener_does_not_block_a_stale_profile(tmp_path):
+    import socket
+
+    # Keep the port reserved without listening so no other service can take it.
+    # Windows can take about two seconds to return WinError 10061; a half-second
+    # timeout misclassifies this genuinely closed listener as an occupied profile.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reserved:
+        reserved.bind(('127.0.0.1', 0))
+        port = reserved.getsockname()[1]
+        announcement = tmp_path / 'DevToolsActivePort'
+        original = f'{port}\n/devtools/browser/stale\n'
+        announcement.write_text(original)
+        edge_cdp._ensure_profile_idle(tmp_path)
+        assert announcement.read_text() == original
+
+
+def test_unreliable_profile_probe_reports_actual_reason_and_port(tmp_path, monkeypatch):
+    announcement = tmp_path / 'DevToolsActivePort'
+    original = '25687\n/devtools/browser/existing\n'
+    announcement.write_text(original)
+    def timed_out(*args, **kwargs):
+        raise edge_cdp.EdgeCdpTimeout('Synthetic unresponsive endpoint')
+    monkeypatch.setattr(edge_cdp, '_http_json', timed_out)
+    with pytest.raises(edge_cdp.EdgeCdpProfileInUse) as raised:
+        edge_cdp._ensure_profile_idle(tmp_path)
+    assert 'Synthetic unresponsive endpoint' in str(raised.value)
+    assert '25687' in str(raised.value)
+    assert announcement.read_text() == original
+
+
 def test_os_profile_lease_excludes_another_process_and_releases_on_close(tmp_path):
     import subprocess
     import sys

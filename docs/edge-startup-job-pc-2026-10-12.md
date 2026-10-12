@@ -50,7 +50,23 @@ announcements at 5 and 19 seconds, deadline expiry and a nonzero exit. The
 external PC's exact failure remains unverified until the updated app is tested
 there; this change does not claim that the manual test identified it conclusively.
 
-Final verification: **678 tests passed**, with two existing Pillow deprecation
+## Follow-up: existing DevTools endpoint reported as unreliable
+
+The next work-PC error identified the preflight check of an existing Franklin
+profile, before Edge launch. A real local Windows reproduction found a closed
+loopback port timed out at 0.5 and 2 seconds, but returned explicit WinError
+10061 after approximately 2.08 seconds when allowed 3 seconds. The former
+half-second preflight therefore classified a stale announcement as uncertain
+and blocked reuse of an idle profile.
+
+The idle probe now waits up to 3 seconds. Only explicit connection refusal
+allows reuse; responding, stalled, malformed or otherwise uncertain endpoints
+remain protected. The check preserves the announcement file, and normal launch
+removes stale metadata only after idle state is confirmed. If the probe still
+fails, the message includes its local port and underlying error. No cookies or
+profiles are reset, and other Edge/Citrix instances are not closed.
+
+Final verification: **680 tests passed**, with two existing Pillow deprecation
 warnings. Python compilation and Git whitespace checks passed. Independent
 review covered startup diagnostics and profile ownership; synthetic connection
 settings previews were checked at 920×600, 1024×640 and 1440×900.
