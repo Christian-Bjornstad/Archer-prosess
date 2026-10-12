@@ -261,10 +261,11 @@ class EdgeCdpContext:
             except Exception as exc:
                 last_error = exc
                 # Managed Edge may hand the command to its broker and let the
-                # original process exit before the broker exposes CDP. Keep
-                # probing the announced endpoint briefly before calling that a
-                # failed launch.
-                if process.poll() is not None and time.monotonic() - started_at >= 3:
+                # original process exit cleanly before the broker exposes CDP.
+                # Give that handoff the full startup budget, including slow
+                # VDI sessions. A nonzero exit still fails after a short grace.
+                exit_code = process.poll()
+                if exit_code not in (None, 0) and time.monotonic() - started_at >= 3:
                     _close_failed_browser(process, browser_version)
                     raise EdgeCdpError(
                         f"Microsoft Edge exited (code {process.returncode}) before "
