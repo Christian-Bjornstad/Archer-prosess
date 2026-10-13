@@ -42,6 +42,12 @@ from archer_processor.services.variant_identity import (
 )
 
 
+class _ClinVarRenderingTimeout(TimeoutError):
+    def __init__(self, diagnostics: dict[str, object]) -> None:
+        super().__init__("ClinVar did not finish rendering the website result.")
+        self.diagnostics = {"render_diagnostics": diagnostics}
+
+
 BROWSER_DATABASES = ("COSMIC", "OncoKB", "Franklin", "ClinVar", "MTBP")
 MTBP_REPORTS_URL = "https://mtbp.org/patients/"
 MTBP_ARCHER_REPORT_LIMIT = 1
@@ -423,6 +429,16 @@ class BrowserReviewService:
             failure_stage = str(evidence.raw.get("failure_stage") or "").strip()
             if failure_stage:
                 fields.append(f"stage={_log_field(failure_stage)}")
+            diagnostics = evidence.raw.get("render_diagnostics")
+            if isinstance(diagnostics, dict):
+                attempts = evidence.raw.get("query_attempts", [])
+                fields.append(f"attempts={len(attempts) if isinstance(attempts, list) else 0}")
+                page_type = diagnostics.get("page_type")
+                if page_type in {"record", "search"}:
+                    fields.append(f"page_type={page_type}")
+                for name in ("record_metadata", "hgvs_title", "genomic_location"):
+                    fields.append(f"{name}={'yes' if diagnostics.get(name) else 'no'}")
+                fields.append(f"result_links={int(diagnostics.get('result_links') or 0)}")
             if evidence.summary:
                 fields.append(f"reason={_log_field(evidence.summary, maximum=240)}")
             progress(" | ".join(fields))
@@ -1069,6 +1085,7 @@ class BrowserReviewService:
                     raw={
                         "failure_kind": ProviderFailureKind.TRANSIENT.value,
                         "failure_stage": "result_rendering",
+                        **getattr(exc, "diagnostics", {}),
                         "query_attempts": list(attempts),
                     },
                 )
@@ -1106,6 +1123,7 @@ class BrowserReviewService:
                         raw={
                             "failure_kind": ProviderFailureKind.TRANSIENT.value,
                             "failure_stage": "result_rendering",
+                            **getattr(exc, "diagnostics", {}),
                             "query_attempts": list(attempts),
                         },
                     )
@@ -1153,24 +1171,27 @@ class BrowserReviewService:
             body_text = page.locator("body").inner_text(
                 timeout=self.navigation_timeout_ms
             )
-            if "/clinvar/variation/" in page.url:
-                if (
-                    re.search(r"\b(?:Variation ID|VCV\d+)", body_text, re.I)
-                    and re.search(
-                        r"\b(?:\d{1,2}|X|Y|M|MT):\s*\d+\s*\(GRCh37\)",
-                        body_text, re.I,
-                    )
-                    # Record metadata can render before the gene/HGVS title.
-                    # Any complete identity may be verified, including a mismatch.
-                    and re.search(
-                        r"(?m)^[ \t]*(?:[A-Za-z][\w.-]*[ \t]*"
-                        r"\([A-Za-z][\w.-]*\)[ \t]*:[ \t]*|"
-                        r"(?!(?:HGVS|Name|Gene|Location|Variation|Accession)\b)"
-                        r"[A-Za-z][A-Za-z0-9-]*(?:[ \t]*:[ \t]*|[ \t]+))"
-                        r"[cnpg]\.\S+",
-                        body_text, re.I,
-                    )
-                ):
+            diagnostics: dict[str, object] = {
+                "page_type": "record" if "/clinvar/variation/" in page.url else "search",
+                "record_metadata": bool(re.search(r"\b(?:Variation ID|VCV\d+)", body_text, re.I)),
+                "hgvs_title": False,
+                "genomic_location": bool(_clinvar_locations(body_text)),
+                "result_links": 0,
+            }
+            if diagnostics["page_type"] == "record":
+                # Readiness is separate from acceptance: a complete GRCh38 or
+                # differently sized record must reach the strict identity check.
+                diagnostics["hgvs_title"] = bool(re.search(
+                    r"(?m)^[ \t]*(?:[A-Za-z][\w.-]*[ \t]*"
+                    r"\([A-Za-z][\w.-]*\)[ \t]*:[ \t]*|"
+                    r"(?!(?:HGVS|Name|Gene|Location|Variation|Accession)\b)"
+                    r"[A-Za-z][A-Za-z0-9-]*(?:[ \t]*:[ \t]*|[ \t]+))"
+                    r"[cnpg]\.\S+",
+                    body_text, re.I,
+                ))
+                if all(diagnostics[field] for field in (
+                    "record_metadata", "genomic_location", "hgvs_title"
+                )):
                     return body_text, []
             else:
                 links = page.locator("a[href*='/clinvar/variation/']").evaluate_all(
@@ -1179,6 +1200,7 @@ class BrowserReviewService:
                     "node.parentElement?.innerText || node.innerText).trim(), "
                     "href: node.href}))"
                 )
+                diagnostics["result_links"] = len(links)
                 if any(
                     isinstance(item, dict)
                     and item.get("href")
@@ -1187,13 +1209,13 @@ class BrowserReviewService:
                 ):
                     return body_text, links
                 if re.search(
-                    r"\b(?:no items found|no results found|0 results|"
+                    r"\b(?:no (?:items|results)(?: were)? found|0 results|"
                     r"your search did not find)", body_text, re.I,
                 ):
                     return body_text, []
             if poll < max(1, self.navigation_timeout_ms // 250):
                 self._interruptible_page_wait(page, 250)
-        raise TimeoutError("ClinVar did not finish rendering the website result.")
+        raise _ClinVarRenderingTimeout(diagnostics)
 
     def _capture_clinvar_result(
         self,
@@ -4180,12 +4202,23 @@ def _contains_hgvs_change(text: str, change: str) -> bool:
 
 def _clinvar_queries(variant: VariantRecord) -> list[str]:
     queries: list[str] = []
+    identity = genomic_identity(variant)
+    indel = bool(identity and len(identity.reference) != len(identity.alternate))
+    if indel and identity and all(re.fullmatch(r"[ACGT]+", allele) for allele in (
+        identity.reference, identity.alternate
+    )):
+        # NCBI's exact allele search supports VCF anchors and an explicit assembly.
+        queries.append(
+            f"{identity.chromosome}:{identity.position}:{identity.reference}:"
+            f"{identity.alternate}(GRCh37)"
+        )
     protein_query = _clinvar_protein_query(variant)
     if protein_query:
         queries.append(protein_query)
     if variant.hgvsc:
         queries.append(variant.hgvsc.strip())
-    identity = genomic_identity(variant)
+    if indel and variant.symbol and variant.hgvsc:
+        queries.append(f"{variant.symbol.strip()} {_cdna_change(variant.hgvsc)}")
     if identity and variant.symbol:
         queries.append(
             f"{variant.symbol.strip()}[gene] AND {identity.chromosome}[chr] AND "
@@ -4196,7 +4229,11 @@ def _clinvar_queries(variant: VariantRecord) -> list[str]:
 
 def _clinvar_protein_query(variant: VariantRecord) -> str:
     protein = _protein_change(variant.hgvsp)
-    return f"{variant.symbol.strip()} {protein}" if variant.symbol and protein else ""
+    # Unknown and frameshift protein descriptions are poor exact search keys.
+    return (
+        f"{variant.symbol.strip()} {protein}"
+        if variant.symbol and re.fullmatch(r"[A-Z]\d+[A-Z*]", protein) else ""
+    )
 
 
 def _clinvar_protein_matches(text: str, variant: VariantRecord) -> bool:
@@ -4212,6 +4249,51 @@ def _clinvar_protein_matches(text: str, variant: VariantRecord) -> bool:
     )
 
 
+def _clinvar_locations(body_text: str) -> list[tuple[str, int, int, str]]:
+    """Parse complete assembly-labelled coordinates, including VCF spans."""
+    locations = []
+    for match in re.finditer(
+        r"\b(?:chr)?(\d{1,2}|X|Y|M|MT):\s*(\d+(?:,\d{3})*)"
+        r"(?:\s*[-\u2013\u2014]\s*(\d+(?:,\d{3})*))?\s*\((GRCh3[78])\)",
+        body_text, re.I,
+    ):
+        chromosome, start, end, assembly = match.groups()
+        start_position = int(start.replace(",", ""))
+        end_position = int((end or start).replace(",", ""))
+        if 0 < start_position <= end_position:
+            locations.append((
+                "M" if chromosome.upper() == "MT" else chromosome.upper(),
+                start_position, end_position, assembly.casefold(),
+            ))
+    return locations
+
+
+def _clinvar_location_matches(body_text: str, expected: GenomicIdentity) -> bool:
+    # Require the full reference span or its exact anchor-trimmed counterpart.
+    # Mere overlap is never enough, and repeats are not shifted without proof.
+    reference, alternate = expected.reference, expected.alternate
+    if not all(re.fullmatch(r"[ACGT]+", allele) for allele in (reference, alternate)):
+        return False
+    spans = {(expected.position, expected.position + len(reference) - 1)}
+    position = expected.position
+    while reference and alternate and reference[-1] == alternate[-1]:
+        reference, alternate = reference[:-1], alternate[:-1]
+    while reference and alternate and reference[0] == alternate[0]:
+        reference, alternate = reference[1:], alternate[1:]
+        position += 1
+    if not reference and not alternate:
+        return False
+    if reference:
+        spans.add((position, position + len(reference) - 1))
+    else:
+        spans.add((position - 1, position))  # Insertion flanks, not affected bases.
+    return any(
+        chromosome == expected.chromosome and assembly == expected.assembly.casefold()
+        and (start, end) in spans
+        for chromosome, start, end, assembly in _clinvar_locations(body_text)
+    )
+
+
 def _clinvar_identity(
     body_text: str, variant: VariantRecord, *, allow_protein: bool = False
 ) -> IdentityVerification:
@@ -4219,8 +4301,7 @@ def _clinvar_identity(
     if expected is None:
         return IdentityVerification(False, "none", "GRCh37 input identity is incomplete.")
     compact = re.sub(r"\s+", "", body_text or "").casefold()
-    location = f"{expected.chromosome}:{expected.position}(grch37)".casefold()
-    if location not in compact:
+    if not _clinvar_location_matches(body_text, expected):
         return IdentityVerification(
             False, "grch37_location", "ClinVar page did not show the requested GRCh37 location."
         )
