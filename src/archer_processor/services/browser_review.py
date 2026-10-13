@@ -48,6 +48,12 @@ class _ClinVarRenderingTimeout(TimeoutError):
         self.diagnostics = {"render_diagnostics": diagnostics}
 
 
+class _OncoKBRenderingTimeout(TimeoutError):
+    def __init__(self, diagnostics: dict[str, object]) -> None:
+        super().__init__("OncoKB did not finish rendering the variant result.")
+        self.diagnostics = {"render_diagnostics": diagnostics}
+
+
 BROWSER_DATABASES = ("COSMIC", "OncoKB", "Franklin", "ClinVar", "MTBP")
 MTBP_REPORTS_URL = "https://mtbp.org/patients/"
 MTBP_ARCHER_REPORT_LIMIT = 1
@@ -154,7 +160,7 @@ class BrowserReviewService:
         self.pause_wait = pause_wait or (lambda: None)
         self.browser_background = bool(browser_background)
         self.capture_validator = capture_validator
-        self._cosmic_cache: dict[str, DatabaseEvidence] = {}
+        self._cosmic_cache: dict[tuple[str, ...], DatabaseEvidence] = {}
         self._mtbp_rejected_transcript_queries: set[str] = set()
         self._variant_result_callback: Callable[[VariantRecord, DatabaseEvidence], None] | None = None
 
@@ -434,11 +440,16 @@ class BrowserReviewService:
                 attempts = evidence.raw.get("query_attempts", [])
                 fields.append(f"attempts={len(attempts) if isinstance(attempts, list) else 0}")
                 page_type = diagnostics.get("page_type")
-                if page_type in {"record", "search"}:
+                if page_type in {"record", "search", "variant"}:
                     fields.append(f"page_type={page_type}")
-                for name in ("record_metadata", "hgvs_title", "genomic_location"):
-                    fields.append(f"{name}={'yes' if diagnostics.get(name) else 'no'}")
-                fields.append(f"result_links={int(diagnostics.get('result_links') or 0)}")
+                for name in (
+                    "record_metadata", "hgvs_title", "genomic_location",
+                    "variant_overview", "mutation_effect",
+                ):
+                    if name in diagnostics:
+                        fields.append(f"{name}={'yes' if diagnostics[name] else 'no'}")
+                if "result_links" in diagnostics:
+                    fields.append(f"result_links={int(diagnostics['result_links'] or 0)}")
             if evidence.summary:
                 fields.append(f"reason={_log_field(evidence.summary, maximum=240)}")
             progress(" | ".join(fields))
@@ -602,6 +613,15 @@ class BrowserReviewService:
             )
             if last_result.status == "found":
                 return last_result
+            # A stalled protein-route result may still resolve through the exact
+            # genomic route. Never use alternative queries to bypass a login.
+            if (
+                last_result.status == "error"
+                and failure_kind == ProviderFailureKind.TRANSIENT.value
+                and last_result.raw.get("failure_stage") == "result_rendering"
+                and "/gene/" in query_url
+            ):
+                continue
             if (
                 last_result.status not in {"not_found", "identity_mismatch"}
                 and failure_kind != ProviderFailureKind.IDENTITY_MISMATCH.value
@@ -662,6 +682,7 @@ class BrowserReviewService:
                 raw={
                     "failure_kind": ProviderFailureKind.TRANSIENT.value,
                     "failure_stage": "result_rendering",
+                    **getattr(exc, "diagnostics", {}),
                     "visible_text_preview": visible_text,
                     "diagnostic_screenshot": str(diagnostic_path),
                     "diagnostic_capture_error": capture_error,
@@ -785,10 +806,15 @@ class BrowserReviewService:
         attempts: list[str] = []
         attempt_results: list[dict[str, str]] = []
         last_result: DatabaseEvidence | None = None
+        conflicting_result: DatabaseEvidence | None = None
         for cosmic_id in identifiers:
             attempts.append(cosmic_id)
-            if cosmic_id in self._cosmic_cache:
-                result = deepcopy(self._cosmic_cache[cosmic_id])
+            cache_key = (
+                cosmic_id, variant.symbol, variant.hgvsc, variant.hgvsp,
+                variant.genomic_location, variant.ref_allele, variant.alt_allele,
+            )
+            if cache_key in self._cosmic_cache:
+                result = deepcopy(self._cosmic_cache[cache_key])
                 if progress:
                     progress(f"COSMIC cache hit: {cosmic_id}")
             else:
@@ -801,7 +827,7 @@ class BrowserReviewService:
                     progress=progress,
                 )
                 if result.status == "found":
-                    self._cosmic_cache[cosmic_id] = deepcopy(result)
+                    self._cosmic_cache[cache_key] = deepcopy(result)
             result.raw["query_attempts"] = list(attempts)
             attempt_results.append(
                 {"query": cosmic_id, "status": result.status}
@@ -810,8 +836,21 @@ class BrowserReviewService:
             if result.status == "found":
                 return result
             last_result = result
+            if result.status == "identity_mismatch":
+                conflicting_result = result
             if result.status not in {"not_found", "identity_mismatch"}:
                 return result
+        if conflicting_result is not None:
+            return DatabaseEvidence(
+                "COSMIC", "manual_review",
+                "COSMIC resolved an identifier to a different variant; none of the "
+                "remaining identifiers produced a verified match. Review the source identifiers.",
+                accession=conflicting_result.accession, url=conflicting_result.url,
+                raw={**conflicting_result.raw,
+                    "failure_kind": ProviderFailureKind.IDENTITY_MISMATCH.value,
+                    "query_attempts": list(attempts),
+                    "query_attempt_results": list(attempt_results)},
+            )
         if last_result is not None:
             return last_result
         return DatabaseEvidence(
@@ -862,7 +901,7 @@ class BrowserReviewService:
                         str(exc),
                         accession=_cosmic_identifier(variant.cosmic_id),
                         url=page.url,
-                        raw={"failure_kind": exc.kind.value},
+                        raw={"failure_kind": exc.kind.value, **exc.diagnostics},
                     )
             except Exception as exc:
                 if attempt == 1 or not _transient_browser_failure(exc):
@@ -915,7 +954,11 @@ class BrowserReviewService:
             else:
                 raise ProviderLookupError(
                     ProviderFailureKind.TRANSIENT,
-                    f"COSMIC did not finish rendering a canonical mutation link for {variant.cosmic_id}."
+                    f"COSMIC did not finish rendering a canonical mutation link for {variant.cosmic_id}.",
+                    diagnostics={
+                        "failure_stage": "canonical_link_resolution",
+                        "render_diagnostics": {"page_type": "search", "result_links": 0},
+                    },
                 )
 
         grch37_links = page.locator("a[href*='genome=37'][href*='id=']")
@@ -939,6 +982,10 @@ class BrowserReviewService:
             raise ProviderLookupError(
                 ProviderFailureKind.TRANSIENT,
                 "COSMIC did not finish rendering a GRCh37 mutation link.",
+                diagnostics={
+                    "failure_stage": "assembly_link_resolution",
+                    "render_diagnostics": {"page_type": "record", "result_links": 0},
+                },
             )
         if len(candidates) > 1:
             raise ProviderLookupError(
@@ -4024,9 +4071,14 @@ class BrowserReviewService:
             if self._login_required("OncoKB", page.url):
                 return
             body_text = page.locator("body").inner_text()
-            if "Variant Overview" in body_text and "Mutation Effect" in body_text:
-                return
             lowered = body_text.casefold()
+            diagnostics: dict[str, object] = {
+                "page_type": "variant",
+                "variant_overview": "variant overview" in lowered,
+                "mutation_effect": "mutation effect" in lowered,
+            }
+            if diagnostics["variant_overview"] and diagnostics["mutation_effect"]:
+                return
             if (
                 "page not found" in lowered
                 or "an error has occurred" in lowered
@@ -4035,8 +4087,8 @@ class BrowserReviewService:
                 or re.search(r"\binvalid\s+somatic\b", body_text, re.IGNORECASE)
             ):
                 return
-            page.wait_for_timeout(500)
-        raise TimeoutError("OncoKB did not finish rendering the variant result.")
+            self._interruptible_page_wait(page, 500)
+        raise _OncoKBRenderingTimeout(diagnostics)
 
     def _browser_api(self):
         try:
@@ -4141,7 +4193,9 @@ def _log_field(value: object, *, maximum: int = 160) -> str:
 
 def _oncokb_query_urls(variant: VariantRecord) -> list[str]:
     candidates: list[str] = []
-    alteration = _protein_change(variant.hgvsp) or _cdna_change(variant.hgvsc)
+    protein = _protein_change(variant.hgvsp)
+    usable_protein = protein if protein not in {"", "?", "=", "-", "."} else ""
+    alteration = usable_protein or _cdna_change(variant.hgvsc)
     if variant.symbol and alteration:
         candidates.append(
             "https://www.oncokb.org/gene/"
@@ -4157,6 +4211,8 @@ def _oncokb_query_urls(variant: VariantRecord) -> list[str]:
             "https://www.oncokb.org/hgvsg/"
             f"{quote(genomic_hgvs, safe=':.')}?refGenome=GRCh37"
         )
+    if not usable_protein:
+        candidates.sort(key=lambda url: "/hgvsg/" not in url)
     return list(dict.fromkeys(candidates))
 
 
@@ -4180,7 +4236,11 @@ def _oncokb_page_matches_variant(
             unquote(parsed_url.path).rstrip("/") == f"/hgvsg/{expected_hgvsg}"
             and reference_genomes == ["grch37"]
         )
-    alteration = _protein_change(variant.hgvsp) or _cdna_change(variant.hgvsc)
+    protein = _protein_change(variant.hgvsp)
+    alteration = (
+        protein if protein not in {"", "?", "=", "-", "."}
+        else _cdna_change(variant.hgvsc)
+    )
     return bool(
         variant.symbol and alteration and re.search(
             r"(?<![A-Za-z0-9_])" + re.escape(variant.symbol)
@@ -4522,7 +4582,7 @@ def parse_mtbp_report(
         elif expected_cdna:
             cdna_matches = [
                 row for row in candidates
-                if expected_cdna in re.sub(r"\s+", "", str(row.get("identity_text", ""))).casefold()
+                if _contains_hgvs_change(str(row.get("identity_text", "")), expected_cdna)
             ]
             if cdna_matches:
                 candidates = cdna_matches
@@ -4908,6 +4968,8 @@ def _mtbp_retry_query(
 
 def _mtbp_normalized_protein(value: str) -> str:
     clean = (value or "").replace("p.", "").replace("(", "").replace(")", "").strip()
+    if clean in {"", "?", "=", "-", "."}:
+        return ""
     match = re.fullmatch(r"([A-Z][a-z]{2})(\d+)([A-Z][a-z]{2}|Ter|\*)", clean)
     if match:
         reference, position, alternate = match.groups()
@@ -4933,7 +4995,7 @@ def _mtbp_row_has_variant_identity(row: dict[str, Any]) -> bool:
 
 def _mtbp_proteins(text: str) -> set[str]:
     tokens = re.findall(r"p\.\(?([A-Za-z0-9_*?]+)\)?", text or "")
-    return {_mtbp_normalized_protein(token) for token in tokens}
+    return {protein for token in tokens if (protein := _mtbp_normalized_protein(token))}
 
 
 def _mtbp_screenshot_row_matches(text: str, variant: VariantRecord) -> bool:
