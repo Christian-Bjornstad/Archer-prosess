@@ -133,7 +133,12 @@ Use **Sjekk innlogging** before a run to check all five dedicated Edge profiles.
 Each source reports confirmed sign-in, public access (ClinVar), sign-in required,
 unconfirmed access, or an error. The check does not enter credentials or submit
 variants. Results show the time checked; hover a status for details. Choose the
-source's **Logg inn** action when needed, then **Sjekk** again. These actions also
+source's **Logg inn** action when needed, then **Sjekk** again. These are separate,
+fixed actions: **Logg inn** uses the same visible login worker as **Avansert**,
+including the selected profile and current browser settings. It remains available
+for unknown/error states. **Sjekk** only checks existing access in the saved profile;
+it does not enter credentials. Checks follow the saved background/visible Edge
+setting. These actions also
 work when a selected reference file is unavailable. Checks and changes to
 sources/import paths are disabled while an operation runs.
 

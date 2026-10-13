@@ -764,7 +764,7 @@ class BrowserSessionCheckWorker(QObject):
 
             service = BrowserSessionCheckService(BrowserReviewService(
                 profile_root=self.settings.browser_profile_root_path,
-                browser_background=True,
+                browser_background=self.settings.browser_background,
                 stop_requested=QThread.currentThread().isInterruptionRequested,
             ))
             if self.database is None:
@@ -1343,6 +1343,7 @@ class MainWindow(QMainWindow):
             if getattr(self, thread_name) is finished:
                 setattr(self, thread_name, None)
                 setattr(self, worker_name, None)
+        self._update_source_access_controls()
 
     def closeEvent(self, event) -> None:
         for thread in (
@@ -1736,7 +1737,10 @@ class MainWindow(QMainWindow):
         self.current_workbook_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.check_sessions_btn = QPushButton('Sjekk innlogging')
         self.check_sessions_btn.setObjectName('OutlineButton')
-        self.check_sessions_btn.setToolTip('Kontroller alle kilder i Edge uten å sende varianter.')
+        self.check_sessions_btn.setToolTip(
+            'Sjekker eksisterende tilgang i lagrede Edge-profiler. '
+            'Bruk Logg inn ved kilden for å logge inn. Lagre endret profilmappe først.'
+        )
         self.check_sessions_btn.clicked.connect(self._start_session_check)
         file_row.addWidget(self.current_workbook_label, 1)
         file_row.addWidget(self.check_sessions_btn)
@@ -1751,6 +1755,7 @@ class MainWindow(QMainWindow):
         self.db_checks = {}
         self.session_status_labels = {}
         self.source_access_buttons = {}
+        self.source_login_buttons = {}
         for database in self.databases:
             tile = QFrame()
             tile.setObjectName('SourceTile')
@@ -1773,14 +1778,27 @@ class MainWindow(QMainWindow):
             status.setAccessibleName(f'{database}: tilgangsstatus')
             status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             self.session_status_labels[database] = status
+            tile_layout.addWidget(status)
             access = QToolButton()
             access.setText('Sjekk')
+            access.setMaximumWidth(44)
             access.setAccessibleName(f'Sjekk tilgang til {database}')
             access.setCursor(Qt.CursorShape.PointingHandCursor)
-            access.clicked.connect(lambda checked=False, db=database: self._source_access_action(db))
+            access.setToolTip(f'Sjekker eksisterende tilgang til {database} i den lagrede profilmappen.')
+            access.clicked.connect(lambda checked=False, db=database: self._check_browser_sessions(db))
             self.source_access_buttons[database] = access
-            access_row.addWidget(status, 1)
+            if database != 'ClinVar':
+                login = QToolButton()
+                login.setText('Logg inn')
+                login.setMaximumWidth(64)
+                login.setAccessibleName(f'Logg inn på {database}')
+                login.setToolTip(f'Åpner synlig innlogging på {database}, som under Avansert.')
+                login.setCursor(Qt.CursorShape.PointingHandCursor)
+                login.clicked.connect(lambda checked=False, db=database: self._start_browser_login(db))
+                self.source_login_buttons[database] = login
+                access_row.addWidget(login)
             access_row.addWidget(access)
+            access_row.addStretch()
             tile_layout.addLayout(access_row)
             sources.addWidget(tile, 1)
         layout.addLayout(sources)
@@ -1913,20 +1931,15 @@ class MainWindow(QMainWindow):
         self.advanced_evidence_content.setVisible(expanded)
         self.advanced_evidence_btn.setText('Skjul avansert' if expanded else 'Avansert')
 
-    def _source_access_action(self, database: str) -> None:
-        result = self._session_results.get(database)
-        if result and result.status == 'login_required':
-            self._start_browser_login(database)
-        else:
-            self._check_browser_sessions(database)
-
     def _update_source_access_controls(self) -> None:
-        for database, button in getattr(self, 'source_access_buttons', {}).items():
-            result = self._session_results.get(database)
-            login = result is not None and result.status == 'login_required'
-            button.setText('Logg inn' if login else 'Sjekk')
-            button.setAccessibleName(f"{'Logg inn på' if login else 'Sjekk tilgang til'} {database}")
-            button.setEnabled(not self._operation_active)
+        available = not self._browser_recovery_blocked()
+        for button in (
+            *getattr(self, 'source_access_buttons', {}).values(),
+            *getattr(self, 'source_login_buttons', {}).values(),
+            self.browser_signin_btn,
+            self.check_sessions_btn,
+        ):
+            button.setEnabled(available)
 
     def _update_patient_focus(self, patient_id: str) -> None:
         self.patient_details_btn.setEnabled(bool(patient_id))
@@ -3578,6 +3591,7 @@ class MainWindow(QMainWindow):
         self.workbook_write_thread = thread
         self.workbook_write_worker = worker
         thread.start()
+        self._update_source_access_controls()
 
     def _background_workbook_saved(self, path: Path) -> None:
         self._background_workbook_path = Path(path)
@@ -3596,6 +3610,7 @@ class MainWindow(QMainWindow):
         )
         self.workbook_write_thread = None
         self.workbook_write_worker = None
+        self._update_source_access_controls()
         self._workbook_write_requested = False
         self._workbook_write_started_at = None
         if error is None and saved_path is not None:

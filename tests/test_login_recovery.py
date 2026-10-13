@@ -265,6 +265,94 @@ def test_existing_signin_button_uses_selected_provider_with_qt_checked_argument(
     assert logins == ["Franklin"]
 
 
+@pytest.mark.parametrize('database', ['MTBP', 'Franklin', 'OncoKB', 'COSMIC'])
+@pytest.mark.parametrize('status', [None, 'unknown', 'error', 'login_required', 'authenticated'])
+def test_source_login_matches_advanced_login_for_every_access_state(
+    window, qt_app, monkeypatch, tmp_path, database, status,
+):
+    from archer_processor.services.browser_review import BrowserReviewService
+
+    chosen_root = tmp_path / 'selected-profiles'
+    window.browser_profile_root_edit.setText(str(chosen_root))
+    window.franklin_email_edit.setText('synthetic@example.invalid')
+    observed = []
+    def login(service, provider):
+        observed.append((provider, service.profile_root, service.franklin_email))
+        return 'Synthetic sign-in completed'
+    monkeypatch.setattr(BrowserReviewService, 'open_login', login)
+    monkeypatch.setattr(window, '_check_browser_sessions', lambda *args: pytest.fail('Logg inn must use the login workflow'))
+    if status is not None:
+        window._session_checked(BrowserSessionStatus(database, status, 'Synthetic access state'))
+    window.browser_database_combo.setCurrentText('ClinVar')
+    window.source_login_buttons[database].click()
+    wait_for_recovery(window, qt_app)
+    window.browser_database_combo.setCurrentText(database)
+    window.browser_signin_btn.click()
+    wait_for_recovery(window, qt_app)
+    expected = (database, chosen_root, 'synthetic@example.invalid')
+    assert observed == [expected, expected]
+    assert window.settings.browser_profile_root == str(chosen_root)
+    assert not chosen_root.exists()
+
+
+def test_source_check_never_changes_into_a_login_action(window, monkeypatch):
+    calls = []
+    monkeypatch.setattr(window, '_check_browser_sessions', lambda database: calls.append(database))
+    monkeypatch.setattr(window, '_start_browser_login', lambda *args: pytest.fail('Sjekk must remain a check'))
+    window._session_checked(BrowserSessionStatus('Franklin', 'login_required', 'Synthetic login needed'))
+    button = window.source_access_buttons['Franklin']
+    assert button.text() == 'Sjekk'
+    button.click()
+    assert calls == ['Franklin']
+
+
+def test_source_login_controls_follow_operation_ownership(window):
+    assert 'ClinVar' not in window.source_login_buttons
+    window._set_busy('Searching')
+    assert all(not button.isEnabled() for button in window.source_login_buttons.values())
+    assert all(not button.isEnabled() for button in window.source_access_buttons.values())
+    window._set_ready()
+    assert all(button.isEnabled() for button in window.source_login_buttons.values())
+
+
+@pytest.mark.parametrize('background', [False, True])
+def test_session_worker_honors_saved_browser_visibility(qt_app, monkeypatch, background):
+    from archer_processor.services.browser_sessions import BrowserSessionCheckService
+    observed = []
+    def check(checker, database):
+        observed.append(checker.review_service.browser_background)
+        return BrowserSessionStatus(database, 'public', 'Synthetic access')
+    monkeypatch.setattr(BrowserSessionCheckService, 'check', check)
+    app.BrowserSessionCheckWorker('ClinVar', AppSettings(browser_background=background)).run()
+    assert observed == [background]
+
+
+def test_all_login_controls_unlock_when_the_owning_worker_exits(window, monkeypatch):
+    thread = SimpleNamespace(isRunning=lambda: True)
+    window.browser_thread = thread
+    window._set_ready()
+    assert not window.browser_signin_btn.isEnabled()
+    assert not window.check_sessions_btn.isEnabled()
+    assert all(not b.isEnabled() for b in window.source_login_buttons.values())
+    monkeypatch.setattr(window, 'sender', lambda: thread)
+    window._worker_thread_finished()
+    assert window.browser_thread is None
+    assert window.browser_signin_btn.isEnabled()
+    assert window.check_sessions_btn.isEnabled()
+    assert all(b.isEnabled() for b in window.source_login_buttons.values())
+
+
+def test_all_login_controls_unlock_after_a_background_workbook_save(window):
+    window.workbook_write_thread = SimpleNamespace(isRunning=lambda: True)
+    window._set_ready()
+    assert not window.browser_signin_btn.isEnabled()
+    assert all(not b.isEnabled() for b in window.source_login_buttons.values())
+    window._background_workbook_thread_finished()
+    assert window.workbook_write_thread is None
+    assert window.browser_signin_btn.isEnabled()
+    assert all(b.isEnabled() for b in window.source_login_buttons.values())
+
+
 @pytest.mark.parametrize("method", ["_start_browser_login", "_check_browser_sessions"])
 def test_invalid_gui_provider_is_rejected_before_settings_or_browser_side_effects(window, monkeypatch, method):
     monkeypatch.setattr(AppSettings, "save", lambda self: pytest.fail("Unknown provider must not save settings"))
