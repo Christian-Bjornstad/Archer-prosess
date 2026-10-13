@@ -12,6 +12,26 @@ from archer_processor.services.edge_cdp import (
 )
 
 
+@pytest.mark.parametrize('mode', ['saved', 'manual', 'closed'])
+def test_login_reports_confirmation_only_after_authenticated_page(tmp_path, monkeypatch, mode):
+    service = BrowserReviewService(profile_root=tmp_path)
+    context = SimpleNamespace(pages=[], close=lambda: None)
+    page = SimpleNamespace(
+        goto=lambda *a, **kw: None, bring_to_front=lambda: None,
+        wait_for_timeout=lambda ms: context.pages.clear(),
+    )
+    context.pages = [page]
+    @contextmanager
+    def runtime():
+        yield object()
+    monkeypatch.setattr(service, '_browser_api', lambda: (runtime, EdgeCdpError, EdgeCdpTimeout))
+    monkeypatch.setattr(service, '_launch_browser_context', lambda *a, **kw: context)
+    monkeypatch.setattr(service, '_try_saved_login', lambda *a: mode == 'saved')
+    monkeypatch.setattr(service, '_session_authenticated', lambda *a: mode == 'manual')
+    service.open_login('Franklin', maximum_minutes=1)
+    assert service.login_confirmed is (mode != 'closed')
+
+
 def failing_runtime(monkeypatch, service, error):
     def launch(*args, **kwargs):
         raise error

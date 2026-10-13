@@ -31,6 +31,42 @@ def wait_for_recovery(window, qt_app):
     assert window.session_check_thread is None
 
 
+@pytest.mark.parametrize("database", ["COSMIC", "OncoKB", "Franklin", "MTBP"])
+def test_confirmed_login_is_shown_as_green_without_an_extra_check(window, qt_app, monkeypatch, database):
+    class Login(QObject):
+        finished = pyqtSignal(str)
+        failed = pyqtSignal(str)
+        status = pyqtSignal(str)
+
+        def __init__(self, database, settings):
+            super().__init__()
+            self.login_confirmed = True
+
+        def run(self):
+            self.finished.emit("Synthetic authentication confirmed")
+
+    monkeypatch.setattr(app, "BrowserLoginWorker", Login)
+    window._start_browser_login(database)
+    window.browser_database_combo.setCurrentText("ClinVar")
+    wait_for_recovery(window, qt_app)
+    assert window._session_results[database].status == "authenticated"
+    label = window.session_status_labels[database]
+    assert label.text() == "Innlogget"
+    assert app.Palette.pale_green in label.styleSheet()
+    assert app.Palette.green in label.styleSheet()
+    assert "bekreftet" in window.session_check_summary.text()
+
+
+def test_login_worker_preserves_structured_confirmation(qt_app, monkeypatch):
+    def login(service, database):
+        service.login_confirmed = True
+        return "Synthetic success"
+    monkeypatch.setattr(app.BrowserReviewService, "open_login", login)
+    worker = app.BrowserLoginWorker("Franklin", AppSettings())
+    worker.run()
+    assert worker.login_confirmed
+
+
 def test_login_saves_browser_options_despite_disconnected_and_unsaved_reference_paths(window, qt_app, monkeypatch, tmp_path):
     saved, logins, warnings = [], [], []
     monkeypatch.setattr(AppSettings, "save", lambda self: saved.append(deepcopy(self)))

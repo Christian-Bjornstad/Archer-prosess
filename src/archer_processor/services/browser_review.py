@@ -160,6 +160,7 @@ class BrowserReviewService:
         self.pause_wait = pause_wait or (lambda: None)
         self.browser_background = bool(browser_background)
         self.capture_validator = capture_validator
+        self.login_confirmed = False
         self._cosmic_cache: dict[tuple[str, ...], DatabaseEvidence] = {}
         self._mtbp_rejected_transcript_queries: set[str] = set()
         self._variant_result_callback: Callable[[VariantRecord, DatabaseEvidence], None] | None = None
@@ -229,6 +230,7 @@ class BrowserReviewService:
 
     def open_login(self, database: str, *, maximum_minutes: int = 30) -> str:
         """Open login and release the profile as soon as authentication succeeds."""
+        self.login_confirmed = False
         sync_browser, browser_error, _ = self._browser_api()
         with sync_browser() as runtime:
             context = self._launch_browser_context(
@@ -245,12 +247,14 @@ class BrowserReviewService:
             page.bring_to_front()
             if self._try_saved_login(database, page):
                 context.close()
+                self.login_confirmed = True
                 return f"{database} signed in using Windows Credential Manager."
             deadline = datetime.now(timezone.utc).timestamp() + maximum_minutes * 60
             try:
                 while context.pages and datetime.now(timezone.utc).timestamp() < deadline:
                     active_page = context.pages[0]
                     if self._session_authenticated(database, active_page):
+                        self.login_confirmed = True
                         return f"{database} sign-in confirmed; browser profile released."
                     active_page.wait_for_timeout(500)
             except browser_error:

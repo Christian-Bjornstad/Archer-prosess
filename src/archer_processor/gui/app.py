@@ -720,6 +720,7 @@ class BrowserLoginWorker(QObject):
         super().__init__()
         self.database = database
         self.settings = settings
+        self.login_confirmed = False
 
     def run(self) -> None:
         try:
@@ -743,7 +744,9 @@ class BrowserLoginWorker(QObject):
                 mtbp_password=self.settings.mtbp_password,
                 browser_background=self.settings.browser_background,
             )
-            self.finished.emit(service.open_login(self.database))
+            message = service.open_login(self.database)
+            self.login_confirmed = service.login_confirmed
+            self.finished.emit(message)
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -2782,6 +2785,10 @@ class MainWindow(QMainWindow):
         if not self._save_browser_settings():
             return
         self._browser_login_database = database
+        self._session_results.pop(database, None)
+        self.session_status_labels[database].setText("Logger inn …")
+        self.session_status_labels[database].setStyleSheet(f"color: {Palette.blue};")
+        self.session_status_labels[database].setToolTip("Venter på bekreftet innlogging i Edge.")
         self._set_busy(f"{database} sign-in")
         worker = BrowserLoginWorker(database, self.settings)
         thread = QThread(self)
@@ -2803,6 +2810,15 @@ class MainWindow(QMainWindow):
     def _browser_login_finished(self, message: str) -> None:
         self._log(message)
         database = getattr(self, "_browser_login_database", self.browser_database_combo.currentText())
+        if getattr(self.browser_worker, "login_confirmed", False):
+            from archer_processor.services.browser_sessions import BrowserSessionStatus
+            self._session_checked(BrowserSessionStatus(database, "authenticated", message))
+            self.session_check_summary.setText(
+                f"{database}: innlogging bekreftet · {datetime.now():%H:%M}. Klar til søk."
+            )
+            self._session_controls_changed()
+            self._session_release_if_stopped(self.browser_thread)
+            return
         self._session_results.pop(database, None)
         self.session_status_labels[database].setText("Sjekk på nytt")
         self.session_status_labels[database].setStyleSheet("")
@@ -2876,14 +2892,24 @@ class MainWindow(QMainWindow):
         self._session_results[result.database] = result
         text, color = {
             "authenticated": ("Innlogget", Palette.green),
-            "public": ("Offentlig tilgang", Palette.blue),
+            "public": ("Offentlig tilgang", Palette.navy),
             "login_required": ("Krever innlogging", Palette.yellow),
             "unknown": ("Ikke bekreftet", Palette.yellow),
             "error": ("Kunne ikke sjekke", Palette.red),
         }.get(result.status, ("Ikke bekreftet", Palette.yellow))
         label = self.session_status_labels[result.database]
         label.setText(text)
-        label.setStyleSheet(f"color: {color};")
+        background = {
+            "authenticated": Palette.pale_green,
+            "public": Palette.pale_blue,
+            "login_required": Palette.pale_yellow,
+            "unknown": Palette.pale_yellow,
+            "error": Palette.pale_red,
+        }.get(result.status, Palette.pale_yellow)
+        label.setStyleSheet(
+            f"color: {color}; background: {background}; border: 1px solid {color}; "
+            "border-radius: 6px; padding: 3px 6px; font-weight: 600;"
+        )
         label.setToolTip(f"Sjekket {datetime.now():%H:%M:%S}\n{result.message}")
         self._log(f"{result.database}: {text} — {result.message}")
         self._session_controls_changed()

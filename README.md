@@ -133,7 +133,10 @@ Use **Sjekk innlogging** before a run to check all five dedicated Edge profiles.
 Each source reports confirmed sign-in, public access (ClinVar), sign-in required,
 unconfirmed access, or an error. The check does not enter credentials or submit
 variants. Results show the time checked; hover a status for details. Choose the
-source's **Logg inn** action when needed, then **Sjekk** again. These are separate,
+source's **Logg inn** action when needed. Confirmed login immediately shows a
+green **Innlogget** badge; closing an unconfirmed login window still asks for a
+new check. ClinVar public access has a blue badge. Text accompanies every color.
+These are separate,
 fixed actions: **Logg inn** uses the same visible login worker as **Avansert**,
 including the selected profile and current browser settings. It remains available
 for unknown/error states. **Sjekk** only checks existing access in the saved profile;
