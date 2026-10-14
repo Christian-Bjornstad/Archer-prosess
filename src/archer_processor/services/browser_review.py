@@ -19,6 +19,7 @@ from archer_processor.core.highlights import is_automatic_database_skip
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
 from archer_processor.core.variant_key_guard import validate_variant_keys
 from archer_processor.services.genomic_notation import format_mtbp_grch37
+from archer_processor.services.mtbp_report_dom import MTBP_TABLE_ROWS_JS
 from archer_processor.services.capture_layout import expanded_capture_layout
 from archer_processor.services.provider_failures import (
     ProviderFailureKind,
@@ -29,7 +30,7 @@ from archer_processor.services.evidence_audit import (
     persist_evidence_result,
     write_evidence_audit,
 )
-from archer_processor.services.browser_popups import dismiss_known_overlays
+from archer_processor.services.browser_popups import dismiss_known_overlays, dismiss_franklin_onboarding
 from archer_processor.services.capture_validation import (
     CaptureValidation,
     IncompleteCaptureError,
@@ -456,6 +457,15 @@ class BrowserReviewService:
                     fields.append(f"result_links={int(diagnostics['result_links'] or 0)}")
             if evidence.summary:
                 fields.append(f"reason={_log_field(evidence.summary, maximum=240)}")
+            if database == "MTBP" and evidence.status != "found":
+                for field, label_name in (
+                    ("report_row_count", "report_rows"),
+                    ("gene_candidate_count", "gene_rows"),
+                    ("candidate_count", "matching_rows"),
+                    ("match_basis", "match_basis"),
+                ):
+                    if field in evidence.raw:
+                        fields.append(f"{label_name}={_log_field(str(evidence.raw[field]))}")
             progress(" | ".join(fields))
 
         count_fields = [
@@ -660,6 +670,11 @@ class BrowserReviewService:
         )
         try:
             self._wait_for_oncokb_result(page)
+        except ProviderLookupError as exc:
+            return DatabaseEvidence(
+                "OncoKB", exc.kind.value, str(exc), accession=_review_query(variant),
+                url=page.url, raw={"failure_kind": exc.kind.value, **exc.diagnostics},
+            )
         except TimeoutError as exc:
             artifact_directory.mkdir(parents=True, exist_ok=True)
             base_path = self._screenshot_path(artifact_directory, "OncoKB", variant)
@@ -899,13 +914,29 @@ class BrowserReviewService:
                 )
             except ProviderLookupError as exc:
                 if exc.kind != ProviderFailureKind.TRANSIENT or attempt == 1:
+                    diagnostic = {}
+                    if exc.kind == ProviderFailureKind.TRANSIENT:
+                        # Keep failure evidence local, outside successful capture
+                        # records, so a next export can diagnose the actual page.
+                        try:
+                            diagnostic["visible_text_preview"] = page.locator("body").inner_text()[:12_000]
+                        except Exception:
+                            pass
+                        try:
+                            artifact_directory.mkdir(parents=True, exist_ok=True)
+                            base = self._screenshot_path(artifact_directory, "COSMIC", variant)
+                            path = base.with_name(f"{base.stem}-lookup-timeout.png")
+                            page.screenshot(path=str(path), full_page=False)
+                            diagnostic["diagnostic_screenshot"] = str(path)
+                        except Exception:
+                            diagnostic["diagnostic_capture_error"] = "COSMIC diagnostic screenshot was unavailable."
                     return DatabaseEvidence(
                         "COSMIC",
                         exc.kind.value,
                         str(exc),
                         accession=_cosmic_identifier(variant.cosmic_id),
                         url=page.url,
-                        raw={"failure_kind": exc.kind.value, **exc.diagnostics},
+                        raw={"failure_kind": exc.kind.value, **exc.diagnostics, **diagnostic},
                     )
             except Exception as exc:
                 if attempt == 1 or not _transient_browser_failure(exc):
@@ -1115,6 +1146,7 @@ class BrowserReviewService:
     ) -> DatabaseEvidence:
         attempts: list[str] = []
         rejected_records: set[str] = set()
+        ambiguous_url = ""
         for query in _clinvar_queries(variant):
             protein_fallback = query == _clinvar_protein_query(variant)
             attempts.append(query)
@@ -1149,15 +1181,10 @@ class BrowserReviewService:
                     if urlsplit(candidate).path.rstrip("/") not in rejected_records
                 ]
                 if len(candidates) > 1:
-                    return DatabaseEvidence(
-                        "ClinVar",
-                        "manual_review",
-                        "ClinVar returned multiple exact-looking website rows; "
-                        "manual selection is required.",
-                        accession=_review_query(variant),
-                        url=page.url,
-                        raw={"query_attempts": attempts},
-                    )
+                    # Protein searches can legitimately match multiple nucleotide
+                    # variants. Exhaust more precise queries before asking the user.
+                    ambiguous_url = page.url
+                    continue
                 if not candidates:
                     continue
                 page.goto(
@@ -1204,6 +1231,14 @@ class BrowserReviewService:
             )
             captured.raw["query_attempts"] = list(attempts)
             return captured
+        if ambiguous_url:
+            return DatabaseEvidence(
+                "ClinVar", "manual_review",
+                "ClinVar returned multiple exact-looking rows and the precise "
+                "website fallbacks did not resolve the ambiguity; manual selection is required.",
+                accession=_review_query(variant), url=ambiguous_url,
+                raw={"query_attempts": list(attempts)},
+            )
         return DatabaseEvidence(
             "ClinVar",
             "not_found",
@@ -1261,7 +1296,7 @@ class BrowserReviewService:
                     return body_text, links
                 if re.search(
                     r"\b(?:no (?:items|results)(?: were)? found|0 results|"
-                    r"your search did not find)", body_text, re.I,
+                    r"your search did not find|search results:\s*0\s+variants?\b)", body_text, re.I,
                 ):
                     return body_text, []
             if poll < max(1, self.navigation_timeout_ms // 250):
@@ -1633,6 +1668,7 @@ class BrowserReviewService:
             )
             dismiss_known_overlays(page)
             stage = "waiting for the Franklin search input"
+            dismiss_franklin_onboarding(page)
             search = page.locator(
                 "input[placeholder='Enter variant, gene or select an example above']"
             )
@@ -1642,11 +1678,15 @@ class BrowserReviewService:
             stage = "submitting the Franklin query"
             search.fill(query)
             search.press("Enter")
+            dismissed = dismiss_franklin_onboarding(page)
+            if dismissed and progress:
+                progress("Franklin: skipped optional first-use material dialog")
             stage = "resolving the Franklin variant route"
             self._open_franklin_resolved_variant(page, variant)
             stage = "waiting for the Franklin classification"
             for _ in range(60):
                 self._check_cancelled()
+                dismiss_franklin_onboarding(page)
                 last_text = page.locator("body").inner_text()
                 if (
                     self._franklin_result_ready(page, last_text)
@@ -1663,7 +1703,7 @@ class BrowserReviewService:
                 if evidence.status != "found":
                     return evidence
                 try:
-                    assessment = self._capture_franklin_assessment(
+                    assessment = self._capture_franklin_assessment_with_retry(
                         page, variant, artifact_directory
                     )
                     evidence.raw.setdefault("screenshots", []).extend(assessment)
@@ -1673,6 +1713,7 @@ class BrowserReviewService:
                         f"{exc}"
                     )
                     evidence.status = "partial_capture"
+                    evidence.raw["failure_stage"] = "assessment_capture"
                     evidence.summary = (
                         f"{evidence.summary} Franklin screenshots require retry."
                     ).strip()
@@ -1731,6 +1772,8 @@ class BrowserReviewService:
 
     def _open_franklin_resolved_variant(self, page: Any, variant: VariantRecord) -> None:
         for _ in range(40):
+            self._check_cancelled()
+            dismiss_franklin_onboarding(page)
             if re.search(r"/clinical-db/variant/snp(?:Tumor)?/", page.url):
                 return
             options = page.locator(".option")
@@ -2914,37 +2957,8 @@ class BrowserReviewService:
 
     @staticmethod
     def _extract_expanded_mtbp_rows(page: Any) -> list[dict[str, Any]]:
-        """Read only the visible alteration-centric report tables."""
-        return page.locator("table").evaluate_all(
-            """
-            tables => tables
-              .filter(table => !!(table.offsetWidth || table.offsetHeight || table.getClientRects().length))
-              .flatMap(table => {
-                const rows = [...table.rows];
-                if (!rows.length) return [];
-                const headers = [...rows[0].cells].map(cell => cell.innerText.trim());
-                if (headers[0] !== 'Gene' || headers[2] !== 'Alteration' ||
-                    !headers[4]?.startsWith('Reported biomarker')) return [];
-                const accordion = table.closest('.accordion-item');
-                const section = accordion?.firstElementChild?.innerText?.trim() || '';
-                return rows.slice(1).map(row => {
-                  const cells = [...row.cells];
-                  const geneText = cells[0]?.innerText.trim() || '';
-                  return {
-                    section,
-                    gene: (geneText.match(/[A-Za-z0-9-]+/) || [''])[0],
-                    gene_text: geneText,
-                    gene_info: cells[1]?.innerText.trim() || '',
-                    alteration: cells[2]?.innerText.trim() || '',
-                    identity_text: (cells[2]?.innerText || '') + '\\n' + (cells[2]?.textContent || ''),
-                    functional_evidence: cells[3]?.innerText.trim() || '',
-                    biomarkers: cells[4]?.innerText.trim() || '',
-                    source_links: [...row.querySelectorAll('a[href]')].map(a => a.href)
-                  };
-                });
-              })
-            """
-        )
+        """Read visible alteration tables and their exact linked identity details."""
+        return page.locator("table").evaluate_all(MTBP_TABLE_ROWS_JS)
 
     def _capture_result(
         self,
@@ -3533,6 +3547,21 @@ class BrowserReviewService:
             encoding="utf-8",
         )
 
+    def _capture_franklin_assessment_with_retry(
+        self, page: Any, variant: VariantRecord, artifact_directory: Path,
+    ) -> list[dict[str, str]]:
+        """Reload only the resolved assessment view once after a transient failure."""
+        for attempt in range(2):
+            self._check_cancelled()
+            try:
+                dismiss_franklin_onboarding(page)
+                return self._capture_franklin_assessment(page, variant, artifact_directory)
+            except Exception as exc:
+                if attempt or not _transient_browser_failure(exc):
+                    raise
+                self._interruptible_page_wait(page, 750)
+        raise RuntimeError("Franklin assessment retry ended unexpectedly.")
+
     def _capture_franklin_assessment(
         self,
         page: Any,
@@ -3706,6 +3735,20 @@ class BrowserReviewService:
         last_error: Exception | None = None
         for attempt in range(2):
             try:
+                shared = [
+                    entry for entry in self._extract_mtbp_rows(page)
+                    if entry.get("capture_geometry", {}).get("shared_gene_context")
+                    and _mtbp_screenshot_row_matches(
+                        str(entry.get("gene", "")) + " " + str(entry.get("identity_text", "")), variant,
+                    )
+                ]
+                if len(shared) == 1:
+                    # A physical tr may omit its inherited gene label. Freeze the
+                    # full visible context and mark the crop as gene context.
+                    context_path = self._capture_mtbp_full_report(
+                        page, artifact_directory, screenshot_path.stem + "-shared-gene",
+                    )
+                    return self._crop_mtbp_variant_from_report(page, variant, artifact_directory, context_path)
                 row, target = self._locate_mtbp_screenshot_target(page, variant)
                 target.scroll_into_view_if_needed()
                 page.wait_for_timeout(250)
@@ -3744,8 +3787,8 @@ class BrowserReviewService:
                          if variant.symbol and _mtbp_gene_symbol(entry["gene"]).casefold() == variant.symbol.casefold()]
             matches = [entry for entry in gene_rows
                        if _mtbp_screenshot_row_matches(entry["gene"] + " " + entry["identity"], variant)]
-            gene_context = len(matches) != 1
-            selected = gene_rows if gene_context else matches
+            selected = matches if len(matches) == 1 else gene_rows
+            gene_context = len(matches) != 1 or any(entry.get("shared_gene_context") for entry in selected)
             if not selected:
                 raise ValueError("MTBP capture has no rows for this gene")
             metadata = PngImagePlugin.PngInfo()
@@ -3799,20 +3842,8 @@ class BrowserReviewService:
             # Freeze geometry with the capture, so later scrolling/accordion
             # changes cannot assign another variant's pixels to this variant.
             geometry = page.evaluate("""() => {
-                const rect = node => {const r=node.getBoundingClientRect();
-                    return {x:r.x+scrollX,y:r.y+scrollY,width:r.width,height:r.height};};
-                const rows = [...document.querySelectorAll('table')].flatMap(table => {
-                    const header=table.rows[0];
-                    if (!header || header.cells[0]?.innerText.trim() !== 'Gene'
-                        || header.cells[2]?.innerText.trim() !== 'Alteration') return [];
-                    const section = table.closest('.accordion-item')?.firstElementChild;
-                    return [...table.rows].slice(1).filter(row => row.getBoundingClientRect().height > 0)
-                        .map(row => ({gene:row.cells[0]?.innerText || '',
-                        identity:(row.cells[2]?.innerText || '') + '\\n' + (row.cells[2]?.textContent || ''),
-                            section:section && !section.contains(table) && section.getBoundingClientRect().height > 0
-                                ? rect(section) : null,
-                            header:rect(header), row:rect(row)}));
-                });
+                const rows = (TABLE_ROWS)([...document.querySelectorAll('table')])
+                    .map(entry => entry.capture_geometry);
                 const genomics = [...document.querySelectorAll('h1,h2,h3,h4,h5,h6')]
                     .find(node => node.innerText.trim() === 'Genomics'
                         && node.getBoundingClientRect().height > 0);
@@ -3822,9 +3853,9 @@ class BrowserReviewService:
                     : 0;
                 return {width:document.documentElement.scrollWidth,
                     height:document.documentElement.scrollHeight,
-                    content_top: genomics ? rect(genomics).y : fallbackTop,
+                    content_top: genomics ? genomics.getBoundingClientRect().y + scrollY : fallbackTop,
                     rows};
-            }""")
+            }""".replace("TABLE_ROWS", MTBP_TABLE_ROWS_JS))
             page.screenshot(path=str(screenshot_path), full_page=True)
             screenshot_path.with_suffix(".geometry.json").write_text(
                 json.dumps(geometry), encoding="utf-8"
@@ -3838,17 +3869,12 @@ class BrowserReviewService:
         self, page: Any, variant: VariantRecord
     ) -> tuple[Any, Any]:
         rows = page.locator("table tr")
-        row_texts = rows.all_inner_texts()
-        alteration_texts: list[str] = []
-        for index, text in enumerate(row_texts):
-            cells = rows.nth(index).locator("td")
-            alteration_texts.append(
-                cells.nth(0).inner_text() + " " + cells.nth(2).inner_text() if cells.count() > 2 else text
-            )
+        report_rows = self._extract_mtbp_rows(page)
         matches = [
-            index
-            for index, text in enumerate(alteration_texts)
-            if _mtbp_screenshot_row_matches(text, variant)
+            entry["row_index"] for entry in report_rows
+            if _mtbp_screenshot_row_matches(
+                str(entry.get("gene", "")) + " " + str(entry.get("identity_text", "")), variant
+            )
         ]
         visible_matches = [
             index for index in matches if rows.nth(index).is_visible()
@@ -4076,6 +4102,15 @@ class BrowserReviewService:
                 return
             body_text = page.locator("body").inner_text()
             lowered = body_text.casefold()
+            if re.search(
+                r"\b(?:please|must|need to)\s+(?:log in|login|sign in)\s+"
+                r"(?:to\s+)?(?:view|access|continue)", lowered,
+            ):
+                raise ProviderLookupError(
+                    ProviderFailureKind.LOGIN_REQUIRED,
+                    "OncoKB requires sign-in to view this result; refresh the session before retrying.",
+                    diagnostics={"failure_stage": "session_required"},
+                )
             diagnostics: dict[str, object] = {
                 "page_type": "variant",
                 "variant_overview": "variant overview" in lowered,
@@ -4087,6 +4122,7 @@ class BrowserReviewService:
                 "page not found" in lowered
                 or "an error has occurred" in lowered
                 or "we do not have any information for this gene" in lowered
+                or "we do not have any information for this variant" in lowered
                 or "reference amino acid at position" in lowered
                 or re.search(r"\binvalid\s+somatic\b", body_text, re.IGNORECASE)
             ):
@@ -4281,7 +4317,7 @@ def _clinvar_queries(variant: VariantRecord) -> list[str]:
         queries.append(protein_query)
     if variant.hgvsc:
         queries.append(variant.hgvsc.strip())
-    if indel and variant.symbol and variant.hgvsc:
+    if (indel or not protein_query) and variant.symbol and variant.hgvsc:
         queries.append(f"{variant.symbol.strip()} {_cdna_change(variant.hgvsc)}")
     if identity and variant.symbol:
         queries.append(
@@ -4472,6 +4508,12 @@ def parse_oncokb_page(
             url=url,
             raw={"failure_kind": ProviderFailureKind.NOT_FOUND.value},
         )
+    if "we do not have any information for this variant" in body_text.casefold():
+        return DatabaseEvidence(
+            "OncoKB", "not_found", "OncoKB explicitly reported no information for this variant.",
+            accession=page_identity, url=url,
+            raw={"failure_kind": ProviderFailureKind.NOT_FOUND.value},
+        )
     if not oncogenicity and "Variant Overview" not in body_text:
         return DatabaseEvidence(
             "OncoKB", "not_found", f"No OncoKB web result for {page_identity}.",
@@ -4562,7 +4604,23 @@ def parse_mtbp_report(
     the report contains one row for that gene and MTBP displays no variant
     identity for it; ambiguous rows and identity mismatches fail closed.
     """
-    metadata = _mtbp_report_metadata(body_text, cancer_type)
+    metadata = {**_mtbp_report_metadata(body_text, cancer_type), "report_row_count": len(report_rows)}
+    if not report_rows and re.search(
+        r"(?:Putative functionally (?:relevant|neutral) variants|"
+        r"Variants of unknown/contradictory functional significance):\s*[1-9]\d*",
+        body_text, re.I,
+    ):
+        return {
+            BrowserReviewService.variant_key(variant): DatabaseEvidence(
+                "MTBP", "layout_changed",
+                "MTBP reported variants but no alteration table rows could be read; "
+                "this is a report extraction error, not confirmed absence.",
+                accession=_mtbp_variant_query(variant), url=url,
+                raw={**metadata, "failure_stage": "report_row_extraction",
+                    "failure_kind": ProviderFailureKind.LAYOUT_CHANGED.value},
+            )
+            for variant in variants
+        }
     results: dict[str, DatabaseEvidence] = {}
     for variant in variants:
         key = BrowserReviewService.variant_key(variant)
@@ -4571,7 +4629,10 @@ def parse_mtbp_report(
             if _mtbp_gene_symbol(str(row.get("gene", ""))).casefold()
             == variant.symbol.casefold()
         ]
-        candidates = list(gene_candidates)
+        candidates = [
+            row for row in gene_candidates
+            if _mtbp_row_genomic_state(str(row.get("identity_text", "")), variant) is not False
+        ]
         match_basis = "gene"
         expected_protein = _mtbp_normalized_protein(_protein_change(variant.hgvsp))
         expected_cdna = _cdna_change(variant.hgvsc).casefold()
@@ -4584,13 +4645,22 @@ def parse_mtbp_report(
             candidates = protein_matches
             match_basis = "protein"
         elif expected_cdna:
+            match_basis = "cdna"
             cdna_matches = [
                 row for row in candidates
-                if _contains_hgvs_change(str(row.get("identity_text", "")), expected_cdna)
+                if _mtbp_row_cdna_matches(str(row.get("identity_text", "")), variant)
             ]
             if cdna_matches:
                 candidates = cdna_matches
                 match_basis = "cdna"
+            elif genomic_matches := [
+                row for row in gene_candidates if _mtbp_row_genomic_matches(
+                    " ".join(str(row.get(field, "")) for field in ("identity_text", "alteration")),
+                    variant,
+                )
+            ]:
+                candidates = genomic_matches
+                match_basis = "genomic_grch37"
             elif len(gene_candidates) == 1 and not _mtbp_row_has_variant_identity(
                 gene_candidates[0]
             ):
@@ -4974,12 +5044,13 @@ def _mtbp_normalized_protein(value: str) -> str:
     clean = (value or "").replace("p.", "").replace("(", "").replace(")", "").strip()
     if clean in {"", "?", "=", "-", "."}:
         return ""
-    match = re.fullmatch(r"([A-Z][a-z]{2})(\d+)([A-Z][a-z]{2}|Ter|\*)", clean)
-    if match:
-        reference, position, alternate = match.groups()
-        reference = _AMINO_ACID_3_TO_1.get(reference, reference)
-        alternate = "*" if alternate in {"Ter", "*"} else _AMINO_ACID_3_TO_1.get(alternate, alternate)
-        clean = f"{reference}{position}{alternate}"
+    # Normalize all amino-acid tokens, including ranges and frameshifts, not
+    # only simple substitutions. Keep positions and stop distances intact.
+    clean = re.sub(
+        r"(?:" + "|".join(_AMINO_ACID_3_TO_1) + r"|Ter)",
+        lambda match: "*" if match.group(0) == "Ter" else _AMINO_ACID_3_TO_1[match.group(0)],
+        clean,
+    )
     return clean.casefold()
 
 
@@ -4998,13 +5069,62 @@ def _mtbp_row_has_variant_identity(row: dict[str, Any]) -> bool:
 
 
 def _mtbp_proteins(text: str) -> set[str]:
-    tokens = re.findall(r"p\.\(?([A-Za-z0-9_*?]+)\)?", text or "")
+    tokens = re.findall(r"p\.\(?([A-Za-z0-9_*?=]+)\)?", text or "")
     return {protein for token in tokens if (protein := _mtbp_normalized_protein(token))}
 
 
+def _mtbp_row_genomic_matches(text: str, variant: VariantRecord) -> bool:
+    return _mtbp_row_genomic_state(text, variant) is True
+
+
+def _mtbp_row_genomic_state(text: str, variant: VariantRecord) -> bool | None:
+    """True for exact GRCh37, False for explicit conflict, None if unreported."""
+    reported = [
+        (f"chr{'M' if chromosome.upper() == 'MT' else chromosome.upper()}:{change}".casefold(), assembly.casefold())
+        for chromosome, change, assembly in re.findall(
+            r"(?<![A-Za-z0-9_])(?:chr)?(\d{1,2}|X|Y|MT|M):\s*"
+            r"(g\.[^\s();,]+)\s*\((GRCh3[78])\)", text or "", re.I,
+        )
+    ]
+    if not reported:
+        return None
+    expected = _mtbp_genomic_query(variant)
+    if not expected:
+        return False
+    grch37 = [change for change, assembly in reported if assembly == "grch37"]
+    return bool(grch37) and all(change == expected.casefold() for change in grch37)
+
+
+def _mtbp_row_cdna_matches(text: str, variant: VariantRecord) -> bool:
+    expected = _cdna_change(variant.hgvsc)
+    if not _contains_hgvs_change(text, expected):
+        return False
+    transcript_pattern = r"(?:(?:NM|NR|XM|XR)_\d+|ENST\d+)(?:\.\d+)?"
+    qualified_input = re.match(r"(" + transcript_pattern + r")\s*:", variant.hgvsc, re.I)
+    accession = qualified_input.group(1) if qualified_input else variant.transcript
+    transcript = (accession or "").split(".", 1)[0].casefold()
+    qualified = re.findall(
+        r"\b(" + transcript_pattern + r")(?:\s*\([^)]+\))?\s*:\s*"
+        r"([cn]\.[^\s();,]+)", text or "", re.I,
+    )
+    if qualified:
+        if not re.fullmatch(transcript_pattern, accession or "", re.I):
+            return False
+        return any(
+            accession.split(".", 1)[0].casefold() == transcript
+            and _contains_hgvs_change(change, expected)
+            for accession, change in qualified
+        )
+    return True
+
+
 def _mtbp_screenshot_row_matches(text: str, variant: VariantRecord) -> bool:
-    compact = re.sub(r"\s+", "", text or "").casefold()
-    if not variant.symbol or variant.symbol.casefold() not in compact:
+    if not variant.symbol or not re.search(
+        r"(?<![A-Za-z0-9_-])" + re.escape(variant.symbol) + r"(?![A-Za-z0-9_-])",
+        text or "", re.I,
+    ):
+        return False
+    if _mtbp_row_genomic_state(text, variant) is False:
         return False
     # MTBP may describe cDNA against another transcript. Prefer the displayed
     # protein identity, consistently with parse_mtbp_report, before cDNA fallback.
@@ -5012,10 +5132,12 @@ def _mtbp_screenshot_row_matches(text: str, variant: VariantRecord) -> bool:
     reported_proteins = _mtbp_proteins(text)
     if expected_protein and reported_proteins:
         return expected_protein in reported_proteins
+    if not expected_protein and _mtbp_row_genomic_matches(text, variant):
+        return True
     expected_cdna = _cdna_change(variant.hgvsc).casefold()
     cdna_tokens = re.findall(r"c\.[-+*0-9a-z_>]+", (text or "").casefold())
     if cdna_tokens and expected_cdna:
-        return expected_cdna in cdna_tokens
+        return expected_cdna in cdna_tokens and _mtbp_row_cdna_matches(text, variant)
     return False
 
 

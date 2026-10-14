@@ -2755,9 +2755,12 @@ def test_mtbp_screenshot_row_matching_requires_exact_variant_identity():
     )
 
 
-def test_mtbp_screenshot_rediscovers_target_after_hidden_incident(tmp_path):
+def test_mtbp_screenshot_rediscovers_target_after_hidden_incident(tmp_path, monkeypatch):
     variant = ArcherTsvReader().read(FIXTURE)[3]
     service = BrowserReviewService(profile_root=tmp_path)
+    monkeypatch.setattr(service, "_extract_mtbp_rows", lambda page: [{
+        "row_index": 0, "gene": "TP53", "identity_text": "p.Arg175His"
+    }])
     attempts = 0
 
     class Cells:
