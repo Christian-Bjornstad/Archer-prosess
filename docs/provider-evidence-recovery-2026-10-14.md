@@ -142,3 +142,31 @@ Final validation: **788 tests passed** (two pre-existing Pillow deprecation
 warnings), including 34 new provider recovery cases. Independent review found
 no remaining actionable issues after the corrections. Compile and diff checks
 passed, and the offline pure-Python Edge DOM checks passed.
+
+## Actual failed-case replay, 14 October
+
+At the user's request, all 36 failed ClinVar audits were mapped to the 34 unique
+variant identities in the v7 TSV and replayed against the live public website.
+The production lookup/capture code used an isolated Edge profile; sample names
+were replaced locally and were not included in provider queries.
+
+- All 34 completed: **1 verified found, 33 not_found, 0 errors/timeouts**.
+  Median lookup time was 4.46 seconds. The found case passed exact transcript
+  and GRCh37 verification, and its capture passed image validation.
+- A separate exact-GRCh37-allele diagnostic lookup for each of the 33 remaining
+  cases found no additional verified match and had no errors/timeouts. Of these,
+  32 displayed an explicit zero-variants result and one returned a record that
+  failed the requested change identity check. This is not a guarantee that no
+  alternative variant representation exists in ClinVar.
+- All 33 no-match cases have blank ClinVar annotations in the supplied v7 input;
+  the recovered case has a source annotation. This is supporting evidence only.
+- Offline replay of both actual OncoKB error snapshots completed immediately as
+  explicit missing-variant results, with no polling timeout.
+- MTBP replay against the archived frozen row identities recovered **2 of 66**
+  old failures and preserved all **76** prior found results. The other **64**
+  cannot validate the new hidden-detail extraction: their linked popup DOM was
+  not stored in the archive. A new authenticated MTBP run is still required.
+
+Detailed replay files remain in the user's local output folder and are not
+committed. No provider session settings or source files were changed. A further
+89 focused regression tests passed on the source commit under test, `5baa00a`.
