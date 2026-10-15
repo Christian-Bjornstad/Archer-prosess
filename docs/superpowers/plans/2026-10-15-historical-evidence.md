@@ -79,9 +79,11 @@ workbook and patient report writers; `tests/test_historical_presentation.py`.
 - [x] Independently review exact identity, timestamp provenance, privacy,
   immutable assets, retry/resume gates and report semantics.
 - [x] Run full pytest, compile and diff checks; record actual results.
-- [ ] Commit and push `feat/historical-evidence-backup`; open and attach a PR
+- [x] Commit and push `feat/historical-evidence-backup`; open and attach a PR
   based on the existing reliability branch so the feature diff stays focused.
 
 ## Verification outcome
 
 Final source validation: **971 tests passed**, with two existing Pillow deprecation warnings. Compile and diff checks passed. Native PyQt previews at 920/1440 pixels and synthetic PDF pages were visually inspected. Independent review covered identity, provenance, privacy, report protection and final SQLite lock ordering without remaining actionable findings.
+
+Delivered in [PR #10](https://github.com/Christian-Bjornstad/Archer-prosess/pull/10), based on the reliability branch from PR #9.
