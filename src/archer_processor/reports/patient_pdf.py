@@ -25,6 +25,7 @@ from reportlab.platypus import (
 )
 
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
+from archer_processor.core.evidence_display import evidence_display_text, evidence_status_label, is_historical
 
 
 SCREENSHOT_DATABASE_ORDER = ("MTBP", "Franklin", "ClinVar", "OncoKB", "COSMIC")
@@ -51,6 +52,7 @@ class PatientPdfReportWriter:
         "error",
         "identity_mismatch",
         "invalid_query",
+        "historical",
         "login_required",
         "manual",
         "quota_exhausted",
@@ -389,7 +391,7 @@ class PatientPdfReportWriter:
             data.append(
                 [
                     self._p(item.database, "small"),
-                    self._p(item.status.replace("_", " ").title(), "small"),
+                    self._p(evidence_status_label(item), "small"),
                     self._p(self._significance(item), "small"),
                     self._p(self._evidence_summary(item), "small"),
                     Paragraph("<br/>".join(links) or "-", self.styles["small"]),
@@ -434,6 +436,7 @@ class PatientPdfReportWriter:
             item.clinical_significance.strip().casefold()
             for item in evidence_items
             if item.database in {"ClinVar", "Franklin", "HSMD"}
+            and not is_historical(item)
             and item.clinical_significance.strip()
         }
         if pending:
@@ -608,7 +611,7 @@ class PatientPdfReportWriter:
             caption = self._p(
                 f"Figure {image_index}. {item.database} - {label}", "label"
             )
-            metadata_parts = [f"Status: {item.status.replace('_', ' ').title()}"]
+            metadata_parts = [f"Status: {evidence_status_label(item)}"]
             captured_at = str(item.raw.get("captured_at") or "")
             if captured_at:
                 metadata_parts.append(f"Captured: {captured_at}")
@@ -734,8 +737,8 @@ class PatientPdfReportWriter:
     def _significance(self, item: DatabaseEvidence) -> str:
         significance = item.clinical_significance or "Not stated"
         if item.accession:
-            return f"{significance}; accession {item.accession}"
-        return significance
+            significance = f"{significance}; accession {item.accession}"
+        return evidence_display_text(item, significance)
 
     def _evidence_summary(self, item: DatabaseEvidence) -> str:
         parts = [item.summary or "No summary returned"]
@@ -748,7 +751,7 @@ class PatientPdfReportWriter:
         cancer_type = str(item.raw.get("cancer_type") or "")
         if cancer_type:
             parts.append(f"Submitted cancer type {cancer_type}")
-        return ". ".join(part.rstrip(".") for part in parts) + "."
+        return evidence_display_text(item, ". ".join(part.rstrip(".") for part in parts) + ".")
 
     def _af_values(self, variant: VariantRecord) -> str:
         return f"{self._percentage(variant.af)} / {self._percentage(variant.gnomad_af)}"

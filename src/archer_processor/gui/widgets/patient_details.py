@@ -23,7 +23,8 @@ class PatientDetailsDialog(QDialog):
         self.details.setReadOnly(True)
         layout.addWidget(self.details, 1)
         note = QLabel(
-            "Ingen treff beskriver søkeresultatet. Lagrede oppslag beholdes når du prøver uferdige oppslag igjen."
+            "Tidligere resultat viser et lagret treff med opprinnelig dato og klokkeslett. "
+            "Vurder alderen og prøv oppslaget igjen ved behov. Lagrede oppslag beholdes når du prøver uferdige oppslag igjen."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
