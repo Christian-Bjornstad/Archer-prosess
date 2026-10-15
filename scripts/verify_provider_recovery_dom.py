@@ -4,6 +4,7 @@ Uses the app's pure-Python CDP adapter. No credentials, clinical files or provid
 submissions are used; all test pages are data URLs containing synthetic HTML.
 """
 from pathlib import Path
+from dataclasses import replace
 import sys
 import tempfile
 from urllib.parse import quote
@@ -78,6 +79,13 @@ def main():
         assert "splice region" in selected.inner_text()
         assert "5 prime UTR" not in selected.inner_text()
         print("PASS: MTBP hidden row details matched without opening or altering the popup")
+        with_protein = replace(requested, hgvsp="p.Arg34SerfsTer5")
+        recovered = parse_mtbp_report("", rows, [with_protein], "synthetic", cancer_type="Blood")
+        evidence = recovered[BrowserReviewService.variant_key(with_protein)]
+        assert evidence.status == "found" and evidence.raw["match_basis"] == "cdna"
+        selected, _ = BrowserReviewService(profile_root=profile)._locate_mtbp_screenshot_target(page, with_protein)
+        assert "splice region" in selected.inner_text() and "5 prime UTR" not in selected.inner_text()
+        print("PASS: MTBP omitted protein recovered by exact hidden DNA in parsing and capture")
         context.close()
 
 

@@ -17,6 +17,7 @@ from archer_processor.services.variant_identity import genomic_identity
 
 
 AUDIT_SCHEMA_VERSION = 3
+MTBP_MATCHING_REVISION = 2
 RETRYABLE_EVIDENCE_STATUSES = frozenset(
     {
         "error",
@@ -25,6 +26,8 @@ RETRYABLE_EVIDENCE_STATUSES = frozenset(
         "timeout",
         "unauthorized",
         "identity_mismatch",
+        "ambiguous",
+        "ambiguous_result",
         "partial_capture",
         "verification_required",
         "quota_exhausted",
@@ -147,6 +150,40 @@ def migrate_loaded_evidence(
     evidence: DatabaseEvidence,
     artifact_root: Path,
 ) -> DatabaseEvidence:
+    matching_version = evidence.raw.get("identity_matching_version")
+    current_matching = (
+        isinstance(matching_version, int)
+        and matching_version >= MTBP_MATCHING_REVISION
+    )
+    gene_count = evidence.raw.get("gene_candidate_count")
+    if (
+        evidence.database == "MTBP"
+        and evidence.status == "not_found"
+        and isinstance(gene_count, int)
+        and gene_count > 0
+        and not current_matching
+    ):
+        evidence.status = "verification_required"
+        evidence.summary = (
+            "Legacy MTBP result contained gene rows without a verified variant match; "
+            "recheck with the updated report reader."
+        )
+    submitted_count = evidence.raw.get("submitted_gene_variant_count")
+    if (
+        evidence.database == "MTBP"
+        and evidence.status == "found"
+        and evidence.raw.get("match_basis") == "unique_gene_without_reported_identity"
+        and not (
+            current_matching
+            and type(submitted_count) is int
+            and submitted_count == 1
+        )
+    ):
+        evidence.status = "verification_required"
+        evidence.summary = (
+            "Legacy MTBP gene-only result lacks confirmed single-variant submission "
+            "context; recheck before accepting the match."
+        )
     if (
         evidence.database == "ClinVar"
         and evidence.status == "found"

@@ -26,6 +26,7 @@ from archer_processor.services.provider_failures import (
     ProviderLookupError,
 )
 from archer_processor.services.evidence_audit import (
+    MTBP_MATCHING_REVISION,
     is_completed_evidence,
     persist_evidence_result,
     write_evidence_audit,
@@ -1402,15 +1403,20 @@ class BrowserReviewService:
         cosmic_id = _cosmic_identifier(variant.cosmic_id)
         cdna = _cdna_change(variant.hgvsc)
         protein = _protein_change(variant.hgvsp)
+        identifier_matches = cosmic_id in _cosmic_identifiers(body_text)
         variant_identity_matches = bool(
             variant.symbol
-            and variant.symbol.casefold() in body_text.casefold()
+            and re.search(
+                r"(?<![A-Za-z0-9_-])" + re.escape(variant.symbol)
+                + r"(?![A-Za-z0-9_-])", body_text, re.I,
+            )
             and any(
-                value and value.casefold() in body_text.casefold()
+                value not in {"", "?", "=", "-", "."}
+                and _contains_hgvs_change(body_text, value)
                 for value in (cdna, protein)
             )
         )
-        if cosmic_id and cosmic_id not in body_text and not variant_identity_matches:
+        if cosmic_id and not identifier_matches and not variant_identity_matches:
             return DatabaseEvidence(
                 "COSMIC",
                 "identity_mismatch",
@@ -2011,7 +2017,7 @@ class BrowserReviewService:
         recovered: dict[str, DatabaseEvidence] = {}
         report_captures: dict[str, Path | None] = {}
         report_pages: dict[str, tuple[str, list[dict[str, Any]], str]] = {}
-        report_audits: dict[str, list[tuple[Path, DatabaseEvidence]]] = {}
+        report_audits: dict[str, list[tuple[Path, VariantRecord, DatabaseEvidence]]] = {}
         with sync_browser() as runtime:
             context = self._launch_browser_context(
                 runtime,
@@ -2035,6 +2041,7 @@ class BrowserReviewService:
                                and item.status != "found" for _, item in pending):
                             report_audits.setdefault(analysis_id, []).append((
                                 self._screenshot_path(artifact_directory, "MTBP", variant).with_suffix(".audit.json"),
+                                variant,
                                 timed_out,
                             ))
                             recovered[self.variant_key(variant)] = timed_out
@@ -2049,6 +2056,10 @@ class BrowserReviewService:
                         )
                         report_count = report_link.count()
                     if timed_out.status == "found":
+                        audit_path = self._screenshot_path(
+                            artifact_directory, "MTBP", variant
+                        ).with_suffix(".audit.json")
+                        self._persist_mtbp_report_audit(audit_path, variant, timed_out)
                         if report_count == 0:
                             cleanup = {
                                 "status": "already_absent",
@@ -2068,12 +2079,7 @@ class BrowserReviewService:
                                 ),
                             }
                         timed_out.raw["remote_report_cleanup"] = cleanup
-                        self._write_audit(
-                            timed_out,
-                            self._screenshot_path(
-                                artifact_directory, "MTBP", variant
-                            ).with_suffix(".audit.json"),
-                        )
+                        self._persist_mtbp_report_audit(audit_path, variant, timed_out)
                         recovered[self.variant_key(variant)] = timed_out
                         continue
                     if report_count != 1:
@@ -2131,6 +2137,7 @@ class BrowserReviewService:
                         [variant],
                         report_url,
                         cancer_type=self.mtbp_cancer_type,
+                        complete_submission=False,
                     )[self.variant_key(variant)]
                     evidence.accession = timed_out.accession
                     screenshot_path = None
@@ -2185,6 +2192,7 @@ class BrowserReviewService:
                     )
                     report_audits.setdefault(analysis_id, []).append((
                         self._screenshot_path(artifact_directory, "MTBP", variant).with_suffix(".audit.json"),
+                        variant,
                         evidence,
                     ))
                     recovered[self.variant_key(variant)] = evidence
@@ -2460,7 +2468,7 @@ class BrowserReviewService:
                         f"{accepted_fallbacks}/{len(fallback_keys)} variant(s)"
                     )
                 captured_at = datetime.now(timezone.utc).isoformat()
-                audit_records: list[tuple[Path, DatabaseEvidence]] = []
+                audit_records: list[tuple[Path, VariantRecord, DatabaseEvidence]] = []
                 for variant, query in active_pairs:
                     key = self.variant_key(variant)
                     evidence = parsed[key]
@@ -2513,7 +2521,7 @@ class BrowserReviewService:
                     audit_path = self._screenshot_path(
                         artifact_directory, "MTBP", variant
                     ).with_suffix(".audit.json")
-                    audit_records.append((audit_path, evidence))
+                    audit_records.append((audit_path, variant, evidence))
                     results[key] = evidence
                 remote_cleanup = self._finalize_mtbp_report(
                     page,
@@ -2726,16 +2734,27 @@ class BrowserReviewService:
         self,
         page: Any,
         analysis_id: str,
-        audit_records: list[tuple[Path, DatabaseEvidence]],
+        audit_records: list[tuple[Path, VariantRecord, DatabaseEvidence]],
     ) -> dict[str, str]:
         """Persist local audit state before removing one exact ARCHER report."""
-        for audit_path, evidence in audit_records:
-            self._write_audit(evidence, audit_path)
+        for audit_path, variant, evidence in audit_records:
+            self._persist_mtbp_report_audit(audit_path, variant, evidence)
         outcome = self._delete_mtbp_report(page, analysis_id)
-        for audit_path, evidence in audit_records:
+        for audit_path, variant, evidence in audit_records:
             evidence.raw["remote_report_cleanup"] = outcome
-            self._write_audit(evidence, audit_path)
+            self._persist_mtbp_report_audit(audit_path, variant, evidence)
         return outcome
+
+    def _persist_mtbp_report_audit(
+        self, audit_path: Path, variant: VariantRecord, evidence: DatabaseEvidence,
+    ) -> None:
+        """Checkpoint the identity-qualified audit used by resume before cleanup."""
+        query_attempts = evidence.raw.get("query_attempts", [])
+        write_evidence_audit(
+            audit_path.parent, "MTBP", variant, evidence,
+            query_attempts=query_attempts if isinstance(query_attempts, list) else [],
+        )
+        self._write_audit(evidence, audit_path)
 
     def _delete_mtbp_report(self, page: Any, analysis_id: str) -> dict[str, str]:
         """Delete one exact app-generated report and never touch manual report IDs."""
@@ -3739,7 +3758,7 @@ class BrowserReviewService:
                     entry for entry in self._extract_mtbp_rows(page)
                     if entry.get("capture_geometry", {}).get("shared_gene_context")
                     and _mtbp_screenshot_row_matches(
-                        str(entry.get("gene", "")) + " " + str(entry.get("identity_text", "")), variant,
+                        str(entry.get("gene", "")) + " " + _mtbp_row_identity_text(entry), variant,
                     )
                 ]
                 if len(shared) == 1:
@@ -3873,7 +3892,7 @@ class BrowserReviewService:
         matches = [
             entry["row_index"] for entry in report_rows
             if _mtbp_screenshot_row_matches(
-                str(entry.get("gene", "")) + " " + str(entry.get("identity_text", "")), variant
+                str(entry.get("gene", "")) + " " + _mtbp_row_identity_text(entry), variant
             )
         ]
         visible_matches = [
@@ -4597,14 +4616,27 @@ def parse_mtbp_report(
     url: str,
     *,
     cancer_type: str,
+    complete_submission: bool = True,
 ) -> dict[str, DatabaseEvidence]:
     """Map the MTBP alteration-centric table to submitted variants.
 
     Matching is deliberately strict. A gene-only match is accepted only when
-    the report contains one row for that gene and MTBP displays no variant
-    identity for it; ambiguous rows and identity mismatches fail closed.
+    the complete submission contains one distinct variant for that gene and
+    MTBP displays one row without variant identity. Retained reports may have
+    incomplete submission context and cannot use this fallback.
     """
-    metadata = {**_mtbp_report_metadata(body_text, cancer_type), "report_row_count": len(report_rows)}
+    variants = list(variants)
+    submitted_by_gene: dict[str, set[tuple[str, ...]]] = {}
+    for variant in variants:
+        submitted_by_gene.setdefault(variant.symbol.casefold(), set()).add((
+            variant.sample, variant.hgvsc, variant.hgvsp, variant.transcript,
+            variant.genomic_location, variant.ref_allele, variant.alt_allele,
+        ))
+    metadata = {
+        **_mtbp_report_metadata(body_text, cancer_type),
+        "report_row_count": len(report_rows),
+        "identity_matching_version": MTBP_MATCHING_REVISION,
+    }
     if not report_rows and re.search(
         r"(?:Putative functionally (?:relevant|neutral) variants|"
         r"Variants of unknown/contradictory functional significance):\s*[1-9]\d*",
@@ -4629,49 +4661,40 @@ def parse_mtbp_report(
             if _mtbp_gene_symbol(str(row.get("gene", ""))).casefold()
             == variant.symbol.casefold()
         ]
-        candidates = [
-            row for row in gene_candidates
-            if _mtbp_row_genomic_state(str(row.get("identity_text", "")), variant) is not False
-        ]
-        match_basis = "gene"
         expected_protein = _mtbp_normalized_protein(_protein_change(variant.hgvsp))
         expected_cdna = _cdna_change(variant.hgvsc).casefold()
-        if expected_protein:
-            protein_matches = [
-                row for row in candidates
-                if expected_protein in _mtbp_proteins(str(row.get("identity_text", "")))
-                or expected_protein in _mtbp_proteins(str(row.get("alteration", "")))
-            ]
-            candidates = protein_matches
-            match_basis = "protein"
-        elif expected_cdna:
-            match_basis = "cdna"
-            cdna_matches = [
-                row for row in candidates
-                if _mtbp_row_cdna_matches(str(row.get("identity_text", "")), variant)
-            ]
-            if cdna_matches:
-                candidates = cdna_matches
-                match_basis = "cdna"
-            elif genomic_matches := [
-                row for row in gene_candidates if _mtbp_row_genomic_matches(
-                    " ".join(str(row.get(field, "")) for field in ("identity_text", "alteration")),
-                    variant,
-                )
-            ]:
-                candidates = genomic_matches
-                match_basis = "genomic_grch37"
-            elif len(gene_candidates) == 1 and not _mtbp_row_has_variant_identity(
-                gene_candidates[0]
-            ):
-                candidates = gene_candidates
-                match_basis = "unique_gene_without_reported_identity"
-            else:
-                candidates = []
+        submitted_count = len(submitted_by_gene[variant.symbol.casefold()])
+        if not (expected_protein or expected_cdna or _mtbp_genomic_query(variant)):
+            results[key] = DatabaseEvidence(
+                "MTBP", "invalid_query", "No submitted variant identity is available for MTBP matching.",
+                url=url, raw={**metadata, "submitted_gene_variant_count": submitted_count},
+            )
+            continue
+        matching_rows = [
+            (row, basis) for row in gene_candidates
+            if (basis := _mtbp_identity_match_basis(_mtbp_row_identity_text(row), variant))
+        ]
+        candidates = [row for row, _ in matching_rows]
+        match_basis = (
+            matching_rows[0][1] if matching_rows else
+            "protein" if expected_protein else "cdna" if expected_cdna else "genomic_grch37"
+        )
+        unidentified_rows = [row for row in gene_candidates if not _mtbp_row_has_variant_identity(row)]
+        if (
+            not candidates and not expected_protein and expected_cdna
+            and len(gene_candidates) == 1 and unidentified_rows
+            and complete_submission and submitted_count == 1
+        ):
+            candidates = unidentified_rows
+            match_basis = "unique_gene_without_reported_identity"
 
         if len(candidates) != 1:
-            status = "not_found" if not candidates else "ambiguous_result"
-            detail = "no matching row" if not candidates else f"{len(candidates)} possible rows"
+            unresolved = bool(candidates or unidentified_rows)
+            status = "manual_review" if unresolved else "not_found"
+            detail = (
+                f"{len(candidates)} possible rows" if candidates else
+                "gene rows without enough variant identity" if unidentified_rows else "no matching row"
+            )
             results[key] = DatabaseEvidence(
                 "MTBP",
                 status,
@@ -4682,6 +4705,8 @@ def parse_mtbp_report(
                     **metadata,
                     "candidate_count": len(candidates),
                     "gene_candidate_count": len(gene_candidates),
+                    "submitted_gene_variant_count": submitted_count,
+                    "complete_submission": complete_submission,
                     "match_basis": match_basis,
                 },
             )
@@ -4738,6 +4763,7 @@ def parse_mtbp_report(
                 "actionability_tiers": actionability_tiers,
                 "biomarkers": biomarkers,
                 "source_links": list(dict.fromkeys(row.get("source_links", []))),
+                "submitted_gene_variant_count": submitted_count,
                 "match_basis": match_basis,
             },
         )
@@ -5060,12 +5086,14 @@ def _mtbp_gene_symbol(value: str) -> str:
 
 
 def _mtbp_row_has_variant_identity(row: dict[str, Any]) -> bool:
-    text = " ".join(
-        str(row.get(field, "")) for field in ("identity_text", "alteration")
-    )
+    text = _mtbp_row_identity_text(row)
     if _mtbp_proteins(text):
         return True
     return bool(re.search(r"\b[cnrmg]\.\s*[-+*0-9]", text, flags=re.IGNORECASE))
+
+
+def _mtbp_row_identity_text(row: dict[str, Any]) -> str:
+    return " ".join(str(row.get(field, "")) for field in ("identity_text", "alteration"))
 
 
 def _mtbp_proteins(text: str) -> set[str]:
@@ -5095,7 +5123,9 @@ def _mtbp_row_genomic_state(text: str, variant: VariantRecord) -> bool | None:
     return bool(grch37) and all(change == expected.casefold() for change in grch37)
 
 
-def _mtbp_row_cdna_matches(text: str, variant: VariantRecord) -> bool:
+def _mtbp_row_cdna_matches(
+    text: str, variant: VariantRecord, *, require_transcript: bool = False,
+) -> bool:
     expected = _cdna_change(variant.hgvsc)
     if not _contains_hgvs_change(text, expected):
         return False
@@ -5115,7 +5145,7 @@ def _mtbp_row_cdna_matches(text: str, variant: VariantRecord) -> bool:
             and _contains_hgvs_change(change, expected)
             for accession, change in qualified
         )
-    return True
+    return not require_transcript
 
 
 def _mtbp_screenshot_row_matches(text: str, variant: VariantRecord) -> bool:
@@ -5124,21 +5154,23 @@ def _mtbp_screenshot_row_matches(text: str, variant: VariantRecord) -> bool:
         text or "", re.I,
     ):
         return False
-    if _mtbp_row_genomic_state(text, variant) is False:
-        return False
-    # MTBP may describe cDNA against another transcript. Prefer the displayed
-    # protein identity, consistently with parse_mtbp_report, before cDNA fallback.
+    return bool(_mtbp_identity_match_basis(text, variant))
+
+
+def _mtbp_identity_match_basis(text: str, variant: VariantRecord) -> str:
+    """Use the same conservative identity rules for evidence and its capture."""
+    genomic_state = _mtbp_row_genomic_state(text, variant)
+    if genomic_state is False:
+        return ""
+    # A reported protein conflict must not be overridden by DNA fallback. When
+    # the report omits protein, qualified cDNA or exact GRCh37 remains usable.
     expected_protein = _mtbp_normalized_protein(_protein_change(variant.hgvsp))
     reported_proteins = _mtbp_proteins(text)
     if expected_protein and reported_proteins:
-        return expected_protein in reported_proteins
-    if not expected_protein and _mtbp_row_genomic_matches(text, variant):
-        return True
-    expected_cdna = _cdna_change(variant.hgvsc).casefold()
-    cdna_tokens = re.findall(r"c\.[-+*0-9a-z_>]+", (text or "").casefold())
-    if cdna_tokens and expected_cdna:
-        return expected_cdna in cdna_tokens and _mtbp_row_cdna_matches(text, variant)
-    return False
+        return "protein" if expected_protein in reported_proteins else ""
+    if _mtbp_row_cdna_matches(text, variant, require_transcript=bool(expected_protein)):
+        return "cdna"
+    return "genomic_grch37" if genomic_state is True else ""
 
 
 def _review_query(variant: VariantRecord) -> str:
