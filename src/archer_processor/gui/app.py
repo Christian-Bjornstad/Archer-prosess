@@ -1085,13 +1085,19 @@ class BrowserReviewWorker(QObject):
             pass_evidence=accumulated_evidence,
         )
         _merge_evidence_results(accumulated_evidence, patient_evidence)
-        failed = _failed_search_variants(
-            patient_variants, patient_evidence, active_databases
+        retry_pairs = self._automatic_retry_pairs(
+            patient_evidence, active_databases
         )
-        if not failed:
+        if not retry_pairs:
             return patient_evidence
+        failed_keys = {key for key, _ in retry_pairs}
+        failed = [
+            variant for variant in patient_variants
+            if BrowserReviewService.variant_key(variant) in failed_keys
+        ]
+        self._check_cancelled()
         self.status.emit(
-            f"{prefix}: {len(failed)} lookup(s) failed; retrying once"
+            f"{prefix}: {len(retry_pairs)} lookup(s) failed; retrying once"
         )
         retry_evidence = self._run_search_pass(
             service,
@@ -1101,18 +1107,33 @@ class BrowserReviewWorker(QObject):
             f"{prefix} (retry)",
             databases=active_databases,
             pass_evidence=accumulated_evidence,
+            source_pairs=retry_pairs,
         )
         _merge_evidence_results(patient_evidence, retry_evidence)
         _merge_evidence_results(accumulated_evidence, retry_evidence)
-        still_failed = _failed_search_variants(
-            failed, patient_evidence, active_databases
-        )
+        still_failed = self._automatic_retry_pairs(
+            patient_evidence, active_databases
+        ) & retry_pairs
         if still_failed:
             self.status.emit(
                 f"{prefix}: {len(still_failed)} lookup(s) still failing after "
                 "retry; start evidence search again later to retry them"
             )
         return patient_evidence
+
+    @staticmethod
+    def _automatic_retry_pairs(
+        evidence: dict[str, list[DatabaseEvidence]], databases: list[str],
+    ) -> set[tuple[str, str]]:
+        return {
+            (key, item.database)
+            for key, items in evidence.items()
+            for item in items
+            if item.database in databases
+            and item.status.strip().casefold() in AUTOMATIC_RETRYABLE_EVIDENCE_STATUSES
+            and str(item.raw.get("failure_kind") or "").strip().casefold()
+            in {"", "transient"}
+        }
 
     def _run_search_pass(
         self,
@@ -1124,6 +1145,7 @@ class BrowserReviewWorker(QObject):
         *,
         databases: list[str] | None = None,
         pass_evidence: dict[str, list[DatabaseEvidence]] | None = None,
+        source_pairs: set[tuple[str, str]] | None = None,
     ) -> dict[str, list[DatabaseEvidence]]:
         active_databases = list(
             self.databases if databases is None else databases
@@ -1134,6 +1156,15 @@ class BrowserReviewWorker(QObject):
         completed_sources = self.completed_sources | _completed_evidence_sources(
             accumulated_evidence
         )
+        if source_pairs is not None:
+            # Retrying one source must not replay another source's login,
+            # ambiguity, or identity failure for the same variant.
+            completed_sources.update(
+                (BrowserReviewService.variant_key(variant), database)
+                for variant in variants for database in active_databases
+                if (BrowserReviewService.variant_key(variant), database)
+                not in source_pairs
+            )
         prior_evidence = {
             key: list(items) for key, items in self.existing_evidence.items()
         }

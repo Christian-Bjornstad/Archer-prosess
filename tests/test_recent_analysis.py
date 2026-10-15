@@ -1,5 +1,10 @@
 import json
+from pathlib import Path
 
+import pytest
+
+from archer_processor.core.models import DatabaseEvidence, VariantRecord
+from archer_processor.services.evidence_audit import write_evidence_audit
 from archer_processor.services.recent_analysis import inspect_recent_analysis
 
 
@@ -18,6 +23,25 @@ def test_recent_analysis_detects_local_retryable_schema_v2_evidence(tmp_path):
     assert recent.valid
     assert recent.evidence_present
     assert recent.resume_available
+
+
+@pytest.mark.parametrize("status,expected_resume", [("timeout", True), ("not_found", False)])
+def test_recent_analysis_recognizes_audits_written_by_current_app(
+    tmp_path, status, expected_resume
+):
+    workbook = tmp_path / "review.xlsx"
+    workbook.write_bytes(b"synthetic")
+    write_evidence_audit(
+        tmp_path / "review_browser_evidence" / "clinvar",
+        "ClinVar",
+        VariantRecord(Path("synthetic.tsv"), 1, "SYNTHETIC", "TESTGENE", "c.100A>T"),
+        DatabaseEvidence("ClinVar", status),
+    )
+
+    recent = inspect_recent_analysis(workbook)
+
+    assert recent.valid
+    assert recent.resume_available is expected_resume
 
 
 def test_recent_analysis_ignores_malformed_audit_without_invalidating_workbook(
