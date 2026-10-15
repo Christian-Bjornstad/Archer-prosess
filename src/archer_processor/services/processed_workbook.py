@@ -11,6 +11,7 @@ from typing import Any
 import openpyxl
 
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
+from archer_processor.core.variant_key_guard import validate_variant_keys
 from archer_processor.core.run_date import sequencing_date_from_path
 from archer_processor.core.rules import FilterEngine
 from archer_processor.io import ArcherTsvReader
@@ -150,6 +151,7 @@ class ProcessedWorkbookLoader:
 
         if not variants:
             raise ValueError("The processed workbook does not contain any variants.")
+        validate_variant_keys(variants)
         self.filter_engine.apply(variants)
         evidence = self._restore_evidence(
             workbook_path, variants, cell_evidence,
@@ -224,7 +226,7 @@ class ProcessedWorkbookLoader:
         database: str,
         variant: VariantRecord,
     ) -> DatabaseEvidence | None:
-        selected = audit_index.best(database, variant)
+        selected = audit_index.best(database, variant, patient_index=patient_index)
         if selected is None:
             return None
         _, payload = selected

@@ -6,6 +6,8 @@ from datetime import datetime
 from itertools import islice
 from pathlib import Path
 
+from archer_processor.services.evidence_audit import AUDIT_SCHEMA_VERSION
+
 
 MAX_AUDITS_TO_INSPECT = 2_000
 
@@ -52,7 +54,12 @@ def inspect_recent_analysis(path: Path | str) -> RecentAnalysis:
                 if not isinstance(payload, dict):
                     malformed += 1
                     continue
-                if payload.get("schema_version") == 2 and payload.get("retryable") is True:
+                schema_version = payload.get("schema_version")
+                if (
+                    type(schema_version) is int
+                    and 2 <= schema_version <= AUDIT_SCHEMA_VERSION
+                    and payload.get("retryable") is True
+                ):
                     resume_available = True
         except OSError:
             malformed += 1

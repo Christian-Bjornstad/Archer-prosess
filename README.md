@@ -59,14 +59,17 @@ flowchart LR
 1. Import an Archer variant TSV and create the review workbook.
 2. Review **With Artifacts** and mark `X` in **Skip Database Search (X)** where appropriate.
 3. Load the reviewed workbook back into the application.
-4. Select the evidence sources. To handle urgent cases first, select one or more
-   rows in **Patient progress** and click **Kjør valgte pasienter**. Their
+4. Select the evidence sources. To handle urgent cases first, check one or more
+   patients in **Kilder og søk** and use the main search button. Its label shows
+   the checked scope. Their
    unfinished lookups run first and their reports are generated after the
    evidence workbook has been saved.
-5. Verify and answer the prioritized reports, then click **Kjør resterende**.
+5. Verify and answer the prioritized reports, then clear the patient checkboxes
+   and use the main search button to continue remaining work.
    Only patients with unfinished source lookups enter the second queue.
-6. For a manual report run, select one or more patient rows, or leave the table
-   unselected for all patients, and click **Generer VEDLEGG_APP**. Reports are
+6. For a manual report run, check one or more patients, or leave all checkboxes
+   clear for all patients. The **Vedlegg for …** button states its scope. Row
+   focus only selects the patient shown in **Detaljer**. Reports are
    written to `VEDLEGG_APP` beside the review workbook as
    `<DIT>_VPM_Tolkning_APP.xlsx`.
 
@@ -89,33 +92,80 @@ cDNA change. ASXL1 `NM_015338:c.1934dup` remains an artifact through **5.5% AF**
 with the existing lighter marking above 5% through 5.5%. The supplied workbooks
 are reference inputs; patient and sample data from them are not bundled with the app.
 
-Use **Pause Search** to pause at the next safe browser checkpoint and **Resume
-Search** to continue the same queue without repeating completed work. **Stop
-Search** ends the run, retains every completed provider result, and updates the
-review workbook whenever it is writable. **Resume Incomplete Search** skips fully
+Use **Pause** in the progress strip to pause at the next safe browser checkpoint
+and **Fortsett** to continue the same queue without repeating completed work.
+**Stopp** ends the run, retains every completed provider result, and updates the
+review workbook whenever it is writable. The main search action skips fully
 completed patients and sources, while retrying errors, timeouts, and unfinished
 work. Log lines include clock timestamps and completed/stopped runs include total
 elapsed time.
 
 Automated Edge windows run minimized by default so the workstation remains usable.
-Manual **Sign In** windows still open visibly. Variant-to-variant pacing remains
+Manual **Logg inn** windows still open visibly. Variant-to-variant pacing remains
 randomized according to Settings; switching between providers uses a fixed 3-second
 transition.
 
-The desktop interface is organised around three pages: **Import**, **Evidence**,
-and **Settings**. The review workbook opens in the computer's spreadsheet app;
-the desktop interface does not duplicate its variant grid. A persistent progress strip
-distinguishes Ready, Running, Paused, Interrupted, Complete, Retry available, and
-Report save pending. The entire Evidence workspace scrolls, including **Run queue**,
-source selection, **Patient progress**, browser sessions and report controls.
+The compact native workstation has persistent left navigation for **Importer**,
+**Kilder og søk**, and **Innstillinger**. The review workbook opens in the
+computer's spreadsheet app. One progress strip contains Pause/Stop and the
+patient count. The patient table takes the available space; report actions stay
+visible below the scroll area. Additional retry and browser controls are under
+**Avansert**. **Detaljer** updates when new evidence arrives.
 Settings accepts an optional local `.xlsx`, `.csv`, or `.txt` WHO driver-gene list;
 an empty path uses the bundled list, while an invalid path blocks saving with a clear error.
 There is no duplicate activity panel or evidence matrix; the copyable, timestamped
-log lives in **Import**. Resume incomplete work from the main queue controls.
+log lives in **Importer**. Resume incomplete work from the main search action.
 Startup can offer
 the most recent local workbook, but it never loads data or contacts a provider
-until **Restore analysis** is selected. **Retry Pending Saves** retries only
+until **Gjenåpne** is selected under **Fortsett analyse · Excel**.
+**Prøv ventende lagring igjen** retries only
 locked report files and never repeats database searches.
+
+The Import page also accepts a single local TSV or processed `.xlsx` dropped
+onto **Slipp filen her**. Dropping a TSV prepares the input/output paths without
+starting processing; dropping a workbook restores the existing analysis. After
+creating the review file, use **Åpne i Excel**, review and save the X selections,
+then **Til kilder og søk** and **Hent X-valg fra Excel**. The import action
+advances after file creation instead of recreating the same workbook.
+The current review filename remains visible on the search page.
+
+Use **Sjekk innlogging** before a run to check all five dedicated Edge profiles.
+Each source reports confirmed sign-in, public access (ClinVar), sign-in required,
+unconfirmed access, or an error. The check does not enter credentials or submit
+variants. Results show the time checked; hover a status for details. Choose the
+source's **Logg inn** action when needed. Confirmed login immediately shows a
+green **Innlogget** badge; closing an unconfirmed login window still asks for a
+new check. ClinVar public access has a blue badge. Text accompanies every color.
+These are separate,
+fixed actions: **Logg inn** uses the same visible login worker as **Avansert**,
+including the selected profile and current browser settings. It remains available
+for unknown/error states. **Sjekk** only checks existing access in the saved profile;
+it does not enter credentials. Checks follow the saved background/visible Edge
+setting. These actions also
+work when a selected reference file is unavailable. Checks and changes to
+sources/import paths are disabled while an operation runs.
+
+Evidence cells now update as each variant result is persisted, rather than
+waiting for all variants at a provider. The table keeps selection, current cell
+and scroll position; unselected sources without evidence show **Ikke valgt**.
+Search startup brings patient progress into view. Small workstation windows
+use horizontal table scrolling to keep patient identifiers and status text
+readable. Workbook checkpoints remain grouped per patient.
+
+## Editable reference lists
+
+The supplied [Excel reference lists](reference_lists/README.md) contain the
+current **51 artifact rules** and **54 WHO driver genes**, unchanged. Select
+the files in **Innstillinger → Referanselister**, then **Lagre innstillinger**. Edit and
+save those files in Excel to update the app without changing code. File-choice
+edits are marked **Ikke lagret** until configuration saving succeeds.
+
+A selected artifact workbook replaces the complete catalog at the next TSV
+processing or analysis restore. Manual rules remain stored as the fallback
+when no file is selected; the hardcoded defaults remain available. The WHO list
+is read again whenever a review workbook or patient attachment is written.
+Explicitly selected files with invalid rows, formulas, duplicate artifact keys
+or unreadable content stop the operation with an actionable error.
 
 ## Evidence sources
 
@@ -126,7 +176,7 @@ the provider exposes that choice.
 | --- | --- | --- |
 | **MTBP** | One combined report per patient; full image in the MTBP sheet and local variant crops with section headings and A/B/C evidence | Gene + protein matching takes priority for crops, then cDNA when protein identity is unavailable. Unclear matches include all rows of that gene without an added image banner; the match scope remains in PNG metadata. Only rejected input variants use GRCh37 genomic fallback. |
 | **Franklin** | Classification-only ACMG/Oncology overviews, each named evidence card, Predictions, and Population Frequencies | Explicit **hg19** + **Somatic** search; each ACMG/Oncology subtab gets a fixed one-second render buffer before capture; only the active panel is expanded, preserving the classification scale/score area without mixing pixels from the preceding tab; ACMG stops after De Novo Data; Somatic Clinical Evidence and Add More Evidence are excluded; blank or truncated captures are rejected and retried on resume |
-| **ClinVar** | Variant title and focused germline/somatic classification summary | Searches gene with HGVSp first, then HGVSc, then gene with GRCh37 chromosome and position. The opened result must show the gene, GRCh37 position, and matching cDNA or protein change; older unverified results are queued for verification. |
+| **ClinVar** | Variant title and focused germline/somatic classification summary | Indels first use an exact chromosome/position/reference/alternate search with GRCh37, followed by transcript HGVS, gene/cDNA and genomic-position fallbacks. Simple protein substitutions retain their protein-first search. Completed records support single positions and coordinate ranges, but acceptance still requires the gene, matching change and exact GRCh37 reference or anchor-trimmed span. Render timeouts report missing fields in the activity log; older unverified results are queued for verification. |
 | **OncoKB** | Variant Overview and Mutation Effect | Rejects the cookie overlay before taking the screenshot |
 | **COSMIC** | Overview, Tissue distribution, and Samples filtered to `lymphoid` | Explicitly selects **GRCh37** in COSMIC's global Genome Version menu before searching and requires its active menu marker before capture. Canonical result redirects may omit the genome parameter, but any explicit genome value other than `37` is rejected. Tries every distinct COSM/COSV identifier from the Archer `COSMICID` column in source order; multiple candidates or an identity mismatch fail closed |
 
@@ -153,6 +203,22 @@ This design requires no:
 Each provider receives its own persistent Edge profile under
 `%USERPROFILE%\.archer-prosess\browser_profiles`. This allows signed-in sessions
 to be reused while keeping browser activity visible and auditable.
+
+If a work PC redirects or restricts that home directory, choose
+**Innstillinger → Tilkoblinger → Edge-profilmappe → Bruk lokal mappe**, then save.
+This explicitly selects `%LOCALAPPDATA%\.archer-prosess\browser_profiles`.
+Login, session checks and searches share the saved base directory, with one
+subdirectory per provider. Existing profiles are left in place; a new directory
+needs sign-in again. Blank retains the original location.
+
+Startup checks managed Edge policy before opening a profile. Disabled remote
+debugging, a mandatory profile-directory override, unreadable policy, or an
+already-owned evidence profile produce an actionable error. No policy or
+certificate settings are changed. See [workstation validation](docs/workstation-improvements.md)
+for the work-PC checks and remaining live-environment validation.
+The [12 October startup fix](docs/edge-startup-job-pc-2026-10-12.md) also preserves
+the concrete startup reason and gives a clean Edge broker handoff its full
+20-second startup window instead of treating it as failure after three seconds.
 
 > [!WARNING]
 > Browser profiles contain authenticated session data. Do not copy, share, or
@@ -234,7 +300,7 @@ the application. The loader restores:
 
 New searches merge with restored evidence instead of discarding earlier results.
 Errors, timeouts, identity mismatches, unverified ClinVar records, and partial
-captures remain pending when **Resume Incomplete Search** is used.
+captures remain pending when the main search action resumes unfinished work.
 
 ## Priority colours
 
@@ -283,7 +349,7 @@ python -m archer_processor
 
 ## Configuration
 
-Use the in-app **Settings** page to configure:
+Use the in-app **Innstillinger** page to configure:
 
 - default output directory;
 - provider sign-in details;

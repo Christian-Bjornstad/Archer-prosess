@@ -3,6 +3,7 @@ import json
 from archer_processor.core import default_artifact_rules
 from archer_processor.core.rules import legacy_artifact_rules, v7_artifact_additions
 from archer_processor.services import AppSettings
+from archer_processor.services.credentials import CredentialStoreError
 from archer_processor.reports.who_genes import WHO_DRIVER_GENES, load_who_driver_genes
 from openpyxl import Workbook
 import pytest
@@ -121,6 +122,46 @@ def test_login_passwords_use_credential_store_not_json(tmp_path, monkeypatch):
     assert loaded.cosmic_password == "cosmic-secret"
     assert loaded.franklin_password == "franklin-secret"
     assert loaded.mtbp_password == "mtbp-secret"
+
+
+@pytest.mark.parametrize("failed_provider", ["OncoKB", "COSMIC", "Franklin", "MTBP"])
+def test_credential_failure_keeps_existing_configuration_unchanged(
+    tmp_path, monkeypatch, failed_provider
+):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(AppSettings, "config_path", classmethod(lambda cls: config_path))
+    monkeypatch.setattr(
+        "archer_processor.services.settings.credentials.save_password", lambda *args: None,
+    )
+    AppSettings(
+        default_output_dir="C:/saved-output",
+        who_driver_genes_path="C:/saved-who.xlsx",
+        artifact_rules_path="C:/saved-artifacts.xlsx",
+    ).save()
+    saved_configuration = config_path.read_bytes()
+
+    def fail_credentials(provider, username, password):
+        if provider == failed_provider:
+            raise CredentialStoreError("Synthetic credential-store failure")
+
+    monkeypatch.setattr(
+        "archer_processor.services.settings.credentials.save_password", fail_credentials,
+    )
+    candidate = AppSettings(
+        default_output_dir="C:/unsaved-output",
+        who_driver_genes_path="C:/unsaved-who.xlsx",
+        artifact_rules_path="C:/unsaved-artifacts.xlsx",
+        cosmic_email="synthetic@example.invalid", cosmic_password="synthetic-password",
+        oncokb_email="synthetic@example.invalid", oncokb_password="synthetic-password",
+        franklin_email="synthetic@example.invalid", franklin_password="synthetic-password",
+        mtbp_email="synthetic@example.invalid", mtbp_password="synthetic-password",
+    )
+
+    with pytest.raises(CredentialStoreError, match="Synthetic credential-store failure"):
+        candidate.save()
+
+    assert config_path.read_bytes() == saved_configuration
+    assert b"synthetic-password" not in config_path.read_bytes()
 
 
 def test_franklin_password_is_ignored_if_present_in_old_config(tmp_path, monkeypatch):

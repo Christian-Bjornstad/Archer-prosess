@@ -15,9 +15,9 @@ class NavigationRail(QFrame):
     def __init__(self, app_icon_path: Path) -> None:
         super().__init__()
         self.setObjectName("NavigationRail")
-        self.setFixedWidth(184)
+        self.setFixedWidth(172)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 22, 16, 18)
+        layout.setContentsMargins(12, 16, 12, 12)
         layout.setSpacing(8)
 
         brand_mark = QLabel()
@@ -39,16 +39,16 @@ class NavigationRail(QFrame):
         title.setWordWrap(True)
         title.setObjectName("BrandTitle")
         layout.addWidget(title)
-        layout.addSpacing(20)
+        layout.addSpacing(12)
 
         self.group = QButtonGroup(self)
         self.group.setExclusive(True)
         self.buttons: list[QPushButton] = []
         for index, (label, icon_name) in enumerate(
             (
-                ("Import", "document"),
-                ("Evidence", "search"),
-                ("Settings", "settings"),
+                ("Importer", "document"),
+                ("Kilder og søk", "search"),
+                ("Innstillinger", "settings"),
             )
         ):
             button = QPushButton(label)

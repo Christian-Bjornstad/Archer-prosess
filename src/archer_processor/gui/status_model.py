@@ -50,6 +50,7 @@ class CellState(str, Enum):
     REPORT_SAVED = "report_saved"
     SAVE_PENDING = "save_pending"
     NOT_READY = "not_ready"
+    NOT_SELECTED = "not_selected"
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +104,7 @@ STATE_LABELS = {
     CellState.REPORT_SAVED: "Report saved",
     CellState.SAVE_PENDING: "Save pending",
     CellState.NOT_READY: "Not ready",
+    CellState.NOT_SELECTED: "Not selected",
 }
 
 STATE_PRIORITY = {
@@ -113,6 +115,7 @@ STATE_PRIORITY = {
     CellState.MANUAL_REVIEW: 4,
     CellState.COMPLETE: 2,
     CellState.SKIPPED: 1,
+    CellState.NOT_SELECTED: 1,
 }
 
 
@@ -137,6 +140,7 @@ def build_patient_status_rows(
     report_outcomes: dict[str, str],
     active: tuple[str, str] | set[tuple[str, str]] | None = None,
     active_keys: set[tuple[str, str]] | None = None,
+    selected_sources: set[str] | None = None,
 ) -> list[PatientStatusRow]:
     grouped: dict[str, list[VariantRecord]] = {}
     for variant in variants:
@@ -162,11 +166,14 @@ def build_patient_status_rows(
                         ),
                         None,
                     )
-                    state = (
-                        CellState.QUEUED
-                        if item is None
-                        else cell_state_for_evidence(item)
-                    )
+                    if item is None:
+                        state = (
+                            CellState.NOT_SELECTED
+                            if selected_sources is not None and database not in selected_sources
+                            else CellState.QUEUED
+                        )
+                    else:
+                        state = cell_state_for_evidence(item)
                     if (
                         (patient_id, database) in active_sources
                         and (active_keys is None or (key, database) in active_keys)
@@ -176,6 +183,8 @@ def build_patient_status_rows(
                     states.append(state)
                     if item is not None and item.summary:
                         details.append(f"{variant.display_name}: {item.summary}")
+                    elif state is CellState.NOT_SELECTED:
+                        details.append("This source is not selected for the current search.")
             state = max(states, key=STATE_PRIORITY.get)
             counts = Counter(states)
             label = STATE_LABELS[state]
