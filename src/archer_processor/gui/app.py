@@ -87,6 +87,8 @@ from archer_processor.gui.widgets.patient_details import PatientDetailsDialog
 from archer_processor.gui.widgets.file_drop import AnalysisFileDrop
 from archer_processor import __version__
 from archer_processor.services.run_journal import RunJournal
+from archer_processor.services.evidence_history import EvidenceHistoryStore, default_history_directory
+from archer_processor.services.evidence_history_flow import apply_history_fallback
 
 
 AUTOMATIC_RETRYABLE_EVIDENCE_STATUSES = frozenset(
@@ -132,14 +134,16 @@ class ProcessedWorkbookWorker(QObject):
     failed = pyqtSignal(str)
     progress = pyqtSignal(int, int, str)
 
-    def __init__(self, workbook_path: Path, settings: AppSettings):
+    def __init__(self, workbook_path: Path, settings: AppSettings, *, history_store=None):
         super().__init__()
         self.workbook_path = workbook_path
         self.settings = settings
+        self.history_store = history_store
 
     def run(self) -> None:
         try:
             state = ProcessedWorkbookLoader(
+                history_store=self.history_store,
                 filter_engine=FilterEngine(
                     production_rules(load_artifact_rules(
                         self.settings.artifact_rules_path, fallback=self.settings.artifact_rules,
@@ -417,6 +421,7 @@ class DatabaseWorker(QObject):
         result: ProcessingResult | None = None,
         existing_evidence: dict[str, list[DatabaseEvidence]] | None = None,
         report_variants=None,
+        *, history_store: EvidenceHistoryStore | None = None,
     ):
         super().__init__()
         self.variants = variants
@@ -425,6 +430,7 @@ class DatabaseWorker(QObject):
         self.databases = [*api_databases, *browser_databases]
         self.artifact_root = artifact_root
         self.settings = settings
+        self.history_store = history_store
         self.completed_sources = set(completed_sources or set())
         self.patient_indexes = dict(patient_indexes or {})
         self.pause_control = SearchPauseControl()
@@ -567,7 +573,12 @@ class DatabaseWorker(QObject):
                 prefix,
             )
             _merge_evidence_results(patient_evidence, result)
-            return patient_evidence
+            return apply_history_fallback(
+                self.history_store, patient_variants, patient_evidence,
+                self.artifact_root / f"patient-{original_patient_index:03d}",
+                mtbp_context=self.settings.mtbp_cancer_type,
+                progress=self.status.emit, checkpoint=self.evidence_updated.emit,
+            )
 
         with ThreadPoolExecutor(
             max_workers=len(lanes), thread_name_prefix="database-browser"
@@ -587,7 +598,12 @@ class DatabaseWorker(QObject):
             ]
             for future in as_completed(futures):
                 _merge_evidence_results(patient_evidence, future.result())
-        return patient_evidence
+        return apply_history_fallback(
+            self.history_store, patient_variants, patient_evidence,
+            self.artifact_root / f"patient-{original_patient_index:03d}",
+            mtbp_context=self.settings.mtbp_cancer_type,
+            progress=self.status.emit, checkpoint=self.evidence_updated.emit,
+        )
 
     def _run_browser_lane(
         self,
@@ -620,6 +636,7 @@ class DatabaseWorker(QObject):
 
     def _browser_service(self) -> BrowserReviewService:
         return BrowserReviewService(
+            history_store=self.history_store,
             profile_root=self.settings.browser_profile_root_path,
             mtbp_cancer_type=self.settings.mtbp_cancer_type,
             clinvar_api_key=self.settings.clinvar_api_key,
@@ -805,12 +822,14 @@ class BrowserReviewWorker(QObject):
         result: ProcessingResult | None = None,
         existing_evidence: dict[str, list[DatabaseEvidence]] | None = None,
         report_variants=None,
+        *, history_store: EvidenceHistoryStore | None = None,
     ):
         super().__init__()
         self.variants = variants
         self.databases = databases
         self.artifact_root = artifact_root
         self.settings = settings
+        self.history_store = history_store
         self.completed_sources = set(completed_sources or set())
         self.patient_indexes = dict(patient_indexes or {})
         self.pause_control = SearchPauseControl()
@@ -932,7 +951,12 @@ class BrowserReviewWorker(QObject):
                     "retryable=yes | stage=provider_circuit_breaker"
                 )
         if not lanes:
-            return deferred_evidence
+            return apply_history_fallback(
+                self.history_store, patient_variants, deferred_evidence,
+                self.artifact_root / f"patient-{original_patient_index:03d}",
+                mtbp_context=self.settings.mtbp_cancer_type,
+                progress=self.status.emit, checkpoint=self.evidence_updated.emit,
+            )
 
         lane_states = {lane_name: {} for lane_name, _ in lanes}
         active_services = services or {
@@ -976,7 +1000,12 @@ class BrowserReviewWorker(QObject):
 
         for lane_evidence in lane_states.values():
             _merge_evidence_results(self._pass_evidence, lane_evidence)
-        return patient_evidence
+        return apply_history_fallback(
+            self.history_store, patient_variants, patient_evidence,
+            self.artifact_root / f"patient-{original_patient_index:03d}",
+            mtbp_context=self.settings.mtbp_cancer_type,
+            progress=self.status.emit, checkpoint=self.evidence_updated.emit,
+        )
 
     def _run_patient_lane(
         self,
@@ -1201,6 +1230,7 @@ class BrowserReviewWorker(QObject):
 
     def _build_service(self) -> BrowserReviewService:
         return BrowserReviewService(
+            history_store=self.history_store,
             profile_root=self.settings.browser_profile_root_path,
             mtbp_cancer_type=self.settings.mtbp_cancer_type,
             clinvar_api_key=self.settings.clinvar_api_key,
@@ -1303,6 +1333,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.settings = AppSettings.load()
+        self.history_store = EvidenceHistoryStore(default_history_directory())
         self.result: ProcessingResult | None = None
         self.evidence = {}
         self.database_skip_keys: set[str] = set()
@@ -2703,6 +2734,7 @@ class MainWindow(QMainWindow):
             self.result,
             self.evidence,
             eligible_variants,
+            history_store=self.history_store,
         )
         thread = QThread(self)
         worker.moveToThread(thread)
@@ -3024,6 +3056,7 @@ class MainWindow(QMainWindow):
             self.result,
             self.evidence,
             self._variants_for_search(),
+            history_store=self.history_store,
         )
         thread = QThread(self)
         worker.moveToThread(thread)
@@ -3177,7 +3210,7 @@ class MainWindow(QMainWindow):
         self._set_busy("Loading workbook")
         self.run_progress.show()
         self.run_progress.title.setText("Loading processed workbook")
-        worker = ProcessedWorkbookWorker(workbook_path, self.settings)
+        worker = ProcessedWorkbookWorker(workbook_path, self.settings, history_store=self.history_store)
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -3243,6 +3276,8 @@ class MainWindow(QMainWindow):
             "padding: 5px 12px; font-weight: 700;"
         )
         self._log(f"Processed workbook restored: {workbook_path}")
+        for warning in self.result.warnings:
+            self._log(warning)
         self._switch_page(1)
         QMessageBox.information(
             self,
@@ -3970,6 +4005,7 @@ class MainWindow(QMainWindow):
         if self.result is None or not self._active_sources:
             return
         failures = {}
+        protected_reports = _protected_remote_evidence_sources(self.evidence)
         for variant in self.result.variants:
             key = BrowserReviewService.variant_key(variant)
             by_database = {item.database: item for item in self.evidence.get(key, [])}
@@ -3987,12 +4023,32 @@ class MainWindow(QMainWindow):
                     deepcopy(previous) if previous
                     else DatabaseEvidence(database, "error")
                 )
-                item.status = (
+                if (key, database) in protected_reports:
+                    # Preserve the resumable state, including a historical
+                    # result's current-attempt metadata, until report recovery.
+                    item.raw["interrupted_search"] = {"message": message}
+                    failures.setdefault(key, []).append(item)
+                    continue
+                failure_status = (
                     "timeout"
                     if "timed out" in message.casefold() or "timeout" in message.casefold()
                     else "error"
                 )
-                item.summary = f"Browser lookup interrupted: {message}"
+                failure_summary = f"Browser lookup interrupted: {message}"
+                if item.status == "historical":
+                    history = item.raw.get("historical_result")
+                    if not isinstance(history, dict):
+                        history = {}
+                    history["current_attempt"] = {
+                        "database": database,
+                        "status": failure_status,
+                        "summary": failure_summary,
+                        "raw": {"failure_stage": "worker_failure"},
+                    }
+                    item.raw["historical_result"] = history
+                else:
+                    item.status = failure_status
+                    item.summary = failure_summary
                 failures.setdefault(key, []).append(item)
         if failures:
             _merge_evidence_results(self.evidence, failures)
