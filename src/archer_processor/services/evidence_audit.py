@@ -30,6 +30,7 @@ RETRYABLE_EVIDENCE_STATUSES = frozenset(
         "ambiguous_result",
         "partial_capture",
         "verification_required",
+        "historical",
         "quota_exhausted",
         "session_lost",
         "token_required",

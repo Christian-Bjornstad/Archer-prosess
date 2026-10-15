@@ -42,6 +42,9 @@ from archer_processor.services.variant_identity import (
     IdentityVerification,
     genomic_identity,
 )
+from archer_processor.services.evidence_history import (
+    EvidenceHistoryStore, EvidenceHistoryError, current_attempt,
+)
 
 
 class _ClinVarRenderingTimeout(TimeoutError):
@@ -134,6 +137,7 @@ class BrowserReviewService:
         pause_wait: Callable[[], None] | None = None,
         browser_background: bool = True,
         capture_validator: Callable[[Path], CaptureValidation] = validate_capture,
+        history_store: EvidenceHistoryStore | None = None,
     ) -> None:
         self.profile_root = profile_root or Path.home() / ".archer-prosess" / "browser_profiles"
         self.channel = channel
@@ -162,6 +166,7 @@ class BrowserReviewService:
         self.pause_wait = pause_wait or (lambda: None)
         self.browser_background = bool(browser_background)
         self.capture_validator = capture_validator
+        self.history_store = history_store
         self.login_confirmed = False
         self._cosmic_cache: dict[tuple[str, ...], DatabaseEvidence] = {}
         self._mtbp_rejected_transcript_queries: set[str] = set()
@@ -330,6 +335,16 @@ class BrowserReviewService:
             published: dict[str, DatabaseEvidence] = {}
 
             def persist_result(variant: VariantRecord, evidence: DatabaseEvidence) -> None:
+                if self.history_store is not None and evidence.status == "found":
+                    evidence.raw.setdefault("captured_at", datetime.now(timezone.utc).isoformat())
+                    try:
+                        self.history_store.record(
+                            variant, evidence,
+                            context=self.mtbp_cancer_type if database == "MTBP" else "",
+                        )
+                    except EvidenceHistoryError as exc:
+                        if progress:
+                            progress(f"Historical evidence backup unavailable: {exc}")
                 query_attempts = evidence.raw.get("query_attempts", [])
                 try:
                     write_evidence_audit(
@@ -366,6 +381,36 @@ class BrowserReviewService:
                     progress=provider_progress,
                     prior_evidence=prior_evidence,
                 )
+            except Exception as exc:
+                # Keep completed captures and retained report ownership if Edge
+                # cannot start or a provider fails outside its per-variant loop.
+                database_results = dict(published)
+                for variant in pending_variants:
+                    key = self.variant_key(variant)
+                    if key in database_results:
+                        continue
+                    prior = next((
+                        current_attempt(item)
+                        for item in (prior_evidence or {}).get(key, [])
+                        if item.database == database
+                    ), None)
+                    if (
+                        database == "MTBP" and prior is not None
+                        and str(prior.raw.get("analysis_id") or "").startswith("ARCHER-")
+                        and not is_completed_evidence(prior)
+                    ):
+                        prior = deepcopy(prior)
+                        prior.raw["recovery_error"] = str(exc)
+                        database_results[key] = prior
+                    else:
+                        startup = isinstance(exc, BrowserAutomationUnavailable)
+                        database_results[key] = DatabaseEvidence(
+                            database, "error", f"{database} lookup could not complete: {exc}",
+                            raw={
+                                "failure_kind": "layout_changed" if startup else "transient",
+                                "failure_stage": "browser_startup" if startup else "provider_lookup",
+                            },
+                        )
             finally:
                 self._variant_result_callback = previous_callback
             provider_duration = time.monotonic() - provider_started_at
@@ -1894,6 +1939,7 @@ class BrowserReviewService:
             )
             if prior is None:
                 continue
+            prior = current_attempt(prior)
             cleanup = prior.raw.get("remote_report_cleanup")
             cleanup_status = cleanup.get("status") if isinstance(cleanup, dict) else ""
             analysis_id = str(prior.raw.get("analysis_id") or "")
@@ -4560,7 +4606,13 @@ def parse_oncokb_page(
         accession=page_identity,
         clinical_significance=oncogenicity,
         url=url,
-        raw={"oncogenicity": oncogenicity, "biological_effect": biological_effect},
+        raw={
+            "oncogenicity": oncogenicity, "biological_effect": biological_effect,
+            "identity_verification": {
+                "accepted": True, "basis": "oncokb_page_identity",
+                "requested": asdict(genomic_identity(variant)) if genomic_identity(variant) else None,
+            },
+        },
     )
 
 

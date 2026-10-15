@@ -461,9 +461,12 @@ def test_source_failure_keeps_mtbp_resume_id_and_completed_evidence(qt_app, tmp_
     window._source_state_changed(variant.patient_id, "MTBP", True)
     window._record_active_search_failure("Runtime.evaluate timed out")
     by_database = {item.database: item for item in window.evidence[key]}
-    assert by_database["MTBP"].status == "timeout"
+    assert by_database["MTBP"].status == "partial_capture"
+    assert by_database["MTBP"].summary == "pending"
     assert by_database["MTBP"].raw["analysis_id"] == "ARCHER-retained"
+    assert by_database["MTBP"].raw["interrupted_search"]["message"] == "Runtime.evaluate timed out"
     assert by_database["ClinVar"].status == "found"
+    assert by_database["ClinVar"].summary == "ok"
 
 
 def test_retry_selected_enables_only_for_attempted_failures(qt_app, tmp_path, monkeypatch):

@@ -14,6 +14,7 @@ _STATE_COLORS = {
     CellState.REPORT_SAVED: ("#E9F6EF", "#18794E"),
     CellState.RUNNING: ("#E7F4F7", "#087EA4"),
     CellState.RETRY: ("#FFF5D6", "#714600"),
+    CellState.HISTORICAL: ("#FFF5D6", "#714600"),
     CellState.MANUAL_REVIEW: ("#FFF0E6", "#9A3412"),
     CellState.SAVE_PENDING: ("#FFF5D6", "#714600"),
     CellState.NOT_FOUND: ("#F1F5F7", "#516875"),
@@ -32,13 +33,14 @@ _DISPLAY_LABELS = {
     "Manual review": "Manuell vurdering", "Stopped": "Stoppet",
     "Report saved": "Vedlegg lagret", "Save pending": "Lagring venter",
     "Not ready": "Ikke klar",
+    "Historical result": "Tidligere resultat",
 }
 
 
 def display_status_label(label: str) -> str:
     """Translate display text while preserving counts and clinical state values."""
     for source, translated in _DISPLAY_LABELS.items():
-        if label == source or label.startswith(source + " "):
+        if label == source or label.startswith((source + " ", source + "\n")):
             return translated + label[len(source):]
     return label
 
@@ -211,8 +213,11 @@ class StatusMatrix(QTableWidget):
             self.setColumnWidth(0, max(136, min(320, patient_width), self.columnWidth(0)))
             for column, database in enumerate([*self.databases, "Report"], start=2):
                 minimum_width = 132 if database == "Report" else 110
-                width = max((metrics.horizontalAdvance(display_status_label(row.cells[database].label)) + 24 for row in rows), default=minimum_width)
+                width = max((metrics.horizontalAdvance(line) + 24 for row in rows for line in display_status_label(row.cells[database].label).splitlines()), default=minimum_width)
                 self.setColumnWidth(column, max(minimum_width, width, self.columnWidth(column)))
+            for row, row_data in enumerate(rows):
+                lines = max(len(cell.label.splitlines()) for cell in row_data.cells.values())
+                self.setRowHeight(row, max(self.verticalHeader().defaultSectionSize(), lines * metrics.height() + 12))
             self.verticalScrollBar().setValue(vertical_position)
             self.horizontalScrollBar().setValue(horizontal_position)
         finally:

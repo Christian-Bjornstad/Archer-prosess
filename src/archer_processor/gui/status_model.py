@@ -7,6 +7,13 @@ from enum import Enum
 from typing import Sequence
 
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
+from archer_processor.core.evidence_display import (
+    evidence_display_text,
+    historical_attempt_detail,
+    historical_captured_at,
+    historical_timestamp,
+    is_historical,
+)
 from archer_processor.services.evidence_audit import is_completed_evidence
 
 
@@ -42,6 +49,7 @@ class CellState(str, Enum):
     QUEUED = "queued"
     RUNNING = "running"
     COMPLETE = "complete"
+    HISTORICAL = "historical"
     NOT_FOUND = "not_found"
     MANUAL_REVIEW = "manual_review"
     RETRY = "retry"
@@ -96,6 +104,7 @@ STATE_LABELS = {
     CellState.QUEUED: "Queued",
     CellState.RUNNING: "Running",
     CellState.COMPLETE: "Complete",
+    CellState.HISTORICAL: "Historical result",
     CellState.NOT_FOUND: "Not found",
     CellState.MANUAL_REVIEW: "Manual review",
     CellState.RETRY: "Retry",
@@ -108,8 +117,9 @@ STATE_LABELS = {
 }
 
 STATE_PRIORITY = {
-    CellState.RUNNING: 6,
-    CellState.RETRY: 5,
+    CellState.RUNNING: 7,
+    CellState.RETRY: 6,
+    CellState.HISTORICAL: 5,
     CellState.QUEUED: 4,
     CellState.NOT_FOUND: 3,
     CellState.MANUAL_REVIEW: 4,
@@ -120,6 +130,8 @@ STATE_PRIORITY = {
 
 
 def cell_state_for_evidence(evidence: DatabaseEvidence) -> CellState:
+    if is_historical(evidence):
+        return CellState.HISTORICAL
     if evidence.status.strip().casefold() in {"skipped", "not_applicable"}:
         return CellState.SKIPPED
     if evidence.status.strip().casefold() in {"manual_review", "manual"}:
@@ -153,6 +165,7 @@ def build_patient_status_rows(
         for database in databases:
             states: list[CellState] = []
             details: list[str] = []
+            history: list[DatabaseEvidence] = []
             for variant in patient_variants:
                 key = f"{variant.sample}|{variant.hgvsc}"
                 if key in skipped_keys:
@@ -177,11 +190,18 @@ def build_patient_status_rows(
                     if (
                         (patient_id, database) in active_sources
                         and (active_keys is None or (key, database) in active_keys)
-                        and state in {CellState.QUEUED, CellState.RETRY}
+                        and state in {CellState.QUEUED, CellState.RETRY, CellState.HISTORICAL}
                     ):
                         state = CellState.RUNNING
                     states.append(state)
-                    if item is not None and item.summary:
+                    if item is not None and is_historical(item):
+                        history.append(item)
+                        detail = evidence_display_text(item, item.summary)
+                        latest_attempt = historical_attempt_detail(item)
+                        details.append(f"{variant.display_name}: {detail}")
+                        if latest_attempt:
+                            details.append(latest_attempt)
+                    elif item is not None and item.summary:
                         details.append(f"{variant.display_name}: {item.summary}")
                     elif state is CellState.NOT_SELECTED:
                         details.append("This source is not selected for the current search.")
@@ -190,6 +210,14 @@ def build_patient_status_rows(
             label = STATE_LABELS[state]
             if len(counts) > 1:
                 label += f" ({counts[state]}/{len(states)})"
+            if history:
+                dated_history = [item for item in history if historical_captured_at(item) is not None]
+                undated_history = [item for item in history if historical_captured_at(item) is None]
+                oldest = undated_history[0] if undated_history else min(dated_history, key=historical_captured_at)
+                prefix = "Eldste: " if len(history) > 1 else ""
+                if state is not CellState.HISTORICAL:
+                    prefix = "Tidligere: " + prefix.lower()
+                label += "\n" + prefix + historical_timestamp(oldest)
             summary = " · ".join(
                 f"{STATE_LABELS[item_state]}: {count}"
                 for item_state, count in counts.items()
