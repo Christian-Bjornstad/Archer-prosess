@@ -29,6 +29,9 @@
 
 ## What it does
 
+**Norsk brukerguide:** Se [den illustrerte brukerguiden](docs/brukerguide/README.md)
+for 41 sider med trinnvise forklaringer og 22 skjermbilder med røde, nummererte markeringer.
+
 VPM Tolkning turns an Archer Analysis TSV export into a controlled review and
 evidence workflow. It keeps variant selection, browser research, screenshots,
 audit data, and patient workbooks connected without sending patient or sample
