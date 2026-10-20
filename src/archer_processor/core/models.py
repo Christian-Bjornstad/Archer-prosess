@@ -85,6 +85,7 @@ class ProcessingResult:
     errors: list[str] = field(default_factory=list)
     started_at: datetime = field(default_factory=datetime.now)
     finished_at: datetime | None = None
+    archer_version: str = "unknown"
 
     @property
     def included(self) -> list[VariantRecord]:

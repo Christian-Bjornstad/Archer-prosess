@@ -107,7 +107,8 @@ def test_mtbp_crops_only_exact_row_from_saved_patient_capture(tmp_path, ambiguou
         colours = set(cropped.convert("RGB").getdata())
         assert {(255, 255, 0), (255, 0, 0), (0, 128, 0)} <= colours
         assert cropped.info["match_scope"] == "gene_context"
-        assert "ikke entydig" in cropped.info["caption"]
+        assert "caption" not in cropped.info
+        assert cropped.size == (400, 320)
     geometry["rows"] = [{**entry, "gene": "OTHER"}]
     metadata.write_text(json.dumps(geometry))
     with pytest.raises(IncompleteCaptureError):

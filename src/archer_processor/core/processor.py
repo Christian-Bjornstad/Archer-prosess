@@ -7,7 +7,9 @@ from typing import TYPE_CHECKING
 from archer_processor.knowledge.history import VariantHistoryRepository
 
 from .models import ProcessingResult
+from .run_date import sequencing_date_from_path
 from .rules import FilterEngine
+from .variant_key_guard import validate_variant_keys
 
 if TYPE_CHECKING:
     from archer_processor.io.tsv_reader import ArcherTsvReader
@@ -28,7 +30,14 @@ class VariantProcessor:
 
     def process(self, input_path: Path, run_date: str, output_path: Path | None = None) -> ProcessingResult:
         started = datetime.now()
+        run_date = (
+            sequencing_date_from_path(input_path)
+            or (sequencing_date_from_path(output_path) if output_path else None)
+            or run_date
+        )
         variants = self.reader.read(input_path)
+        validate_variant_keys(variants)
+        archer_version = self.reader.version(input_path)
         self.filter_engine.apply(variants)
         if self.history:
             self.history.annotate(variants)
@@ -40,4 +49,9 @@ class VariantProcessor:
             rules_applied=[rule.rule_id for rule in self.filter_engine.rules],
             started_at=started,
             finished_at=datetime.now(),
+            archer_version=archer_version,
+            warnings=(
+                ["Archer version could not be identified from the TSV headers."]
+                if archer_version == "unknown" else []
+            ),
         )

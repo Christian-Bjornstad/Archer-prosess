@@ -1,11 +1,55 @@
 import json
 
 from archer_processor.core import default_artifact_rules
+from archer_processor.core.rules import legacy_artifact_rules, v7_artifact_additions
 from archer_processor.services import AppSettings
+from archer_processor.services.credentials import CredentialStoreError
+from archer_processor.reports.who_genes import WHO_DRIVER_GENES, load_who_driver_genes
+from openpyxl import Workbook
+import pytest
 
 
 def test_automated_edge_runs_minimized_by_default():
     assert AppSettings().browser_background is True
+
+
+def test_who_driver_gene_file_accepts_excel_and_rejects_missing_file(tmp_path):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "WHO"
+    sheet.append(["Gen", "Merknad"])
+    sheet.append(["TP53", "driver"])
+    sheet.append(["RUNX1", "driver"])
+    path = tmp_path / "who.xlsx"
+    workbook.save(path)
+
+    assert load_who_driver_genes() == WHO_DRIVER_GENES
+    assert load_who_driver_genes(path) == frozenset({"TP53", "RUNX1"})
+    with pytest.raises(ValueError, match="finnes ikke"):
+        load_who_driver_genes(tmp_path / "mangler.xlsx")
+
+
+def test_who_driver_gene_path_persists(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(AppSettings, "config_path", classmethod(lambda cls: config_path))
+    monkeypatch.setattr(
+        "archer_processor.services.settings.credentials.save_password", lambda *args: None,
+    )
+    AppSettings(who_driver_genes_path="C:/data/who.xlsx").save()
+    assert AppSettings.load().who_driver_genes_path == "C:/data/who.xlsx"
+
+
+def test_who_driver_genes_accepts_semicolon_csv(tmp_path):
+    path = tmp_path / "who.csv"
+    path.write_text("Gen;Kilde\nTP53;WHO\nRUNX1;WHO\n", encoding="utf-8")
+    assert load_who_driver_genes(path) == frozenset({"TP53", "RUNX1"})
+
+
+def test_default_browser_delay_range_is_three_to_eight_seconds():
+    settings = AppSettings()
+
+    assert settings.browser_delay_seconds == 3
+    assert settings.browser_delay_max_seconds == 8
 
 
 def test_external_history_workbook_is_not_persisted(tmp_path, monkeypatch):
@@ -80,6 +124,46 @@ def test_login_passwords_use_credential_store_not_json(tmp_path, monkeypatch):
     assert loaded.mtbp_password == "mtbp-secret"
 
 
+@pytest.mark.parametrize("failed_provider", ["OncoKB", "COSMIC", "Franklin", "MTBP"])
+def test_credential_failure_keeps_existing_configuration_unchanged(
+    tmp_path, monkeypatch, failed_provider
+):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(AppSettings, "config_path", classmethod(lambda cls: config_path))
+    monkeypatch.setattr(
+        "archer_processor.services.settings.credentials.save_password", lambda *args: None,
+    )
+    AppSettings(
+        default_output_dir="C:/saved-output",
+        who_driver_genes_path="C:/saved-who.xlsx",
+        artifact_rules_path="C:/saved-artifacts.xlsx",
+    ).save()
+    saved_configuration = config_path.read_bytes()
+
+    def fail_credentials(provider, username, password):
+        if provider == failed_provider:
+            raise CredentialStoreError("Synthetic credential-store failure")
+
+    monkeypatch.setattr(
+        "archer_processor.services.settings.credentials.save_password", fail_credentials,
+    )
+    candidate = AppSettings(
+        default_output_dir="C:/unsaved-output",
+        who_driver_genes_path="C:/unsaved-who.xlsx",
+        artifact_rules_path="C:/unsaved-artifacts.xlsx",
+        cosmic_email="synthetic@example.invalid", cosmic_password="synthetic-password",
+        oncokb_email="synthetic@example.invalid", oncokb_password="synthetic-password",
+        franklin_email="synthetic@example.invalid", franklin_password="synthetic-password",
+        mtbp_email="synthetic@example.invalid", mtbp_password="synthetic-password",
+    )
+
+    with pytest.raises(CredentialStoreError, match="Synthetic credential-store failure"):
+        candidate.save()
+
+    assert config_path.read_bytes() == saved_configuration
+    assert b"synthetic-password" not in config_path.read_bytes()
+
+
 def test_franklin_password_is_ignored_if_present_in_old_config(tmp_path, monkeypatch):
     config_path = tmp_path / "config.json"
     monkeypatch.setattr(AppSettings, "config_path", classmethod(lambda cls: config_path))
@@ -135,8 +219,8 @@ def test_legacy_fixed_browser_delay_migrates_to_new_range(tmp_path, monkeypatch)
 
     loaded = AppSettings.load()
 
-    assert loaded.browser_delay_seconds == 10
-    assert loaded.browser_delay_max_seconds == 20
+    assert loaded.browser_delay_seconds == 3
+    assert loaded.browser_delay_max_seconds == 8
 
 
 def test_former_default_browser_delay_range_migrates(tmp_path, monkeypatch):
@@ -158,8 +242,8 @@ def test_former_default_browser_delay_range_migrates(tmp_path, monkeypatch):
 
     loaded = AppSettings.load()
 
-    assert loaded.browser_delay_seconds == 10
-    assert loaded.browser_delay_max_seconds == 20
+    assert loaded.browser_delay_seconds == 3
+    assert loaded.browser_delay_max_seconds == 8
 
 
 def test_recent_default_browser_delay_range_migrates(tmp_path, monkeypatch):
@@ -181,8 +265,31 @@ def test_recent_default_browser_delay_range_migrates(tmp_path, monkeypatch):
 
     loaded = AppSettings.load()
 
-    assert loaded.browser_delay_seconds == 10
-    assert loaded.browser_delay_max_seconds == 20
+    assert loaded.browser_delay_seconds == 3
+    assert loaded.browser_delay_max_seconds == 8
+
+
+def test_previous_default_browser_delay_range_migrates(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(AppSettings, "config_path", classmethod(lambda cls: config_path))
+    monkeypatch.setattr(
+        "archer_processor.services.settings.credentials.get_saved_password",
+        lambda provider, username: "",
+    )
+    config_path.write_text(
+        json.dumps(
+            {
+                "browser_delay_seconds": 10,
+                "browser_delay_max_seconds": 20,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = AppSettings.load()
+
+    assert loaded.browser_delay_seconds == 3
+    assert loaded.browser_delay_max_seconds == 8
 
 
 def test_legacy_four_artifact_defaults_migrate_to_fragmentation_v2_catalog(
@@ -210,7 +317,7 @@ def test_legacy_four_artifact_defaults_migrate_to_fragmentation_v2_catalog(
 
     loaded = AppSettings.load()
 
-    assert loaded.artifact_catalog_version == 3
+    assert loaded.artifact_catalog_version == 4
     assert loaded.artifact_rules == default_artifact_rules()
 
 
@@ -228,8 +335,8 @@ def test_custom_artifacts_are_preserved_during_catalog_version_migration(
 
     loaded = AppSettings.load()
 
-    assert loaded.artifact_rules == custom
-    assert loaded.artifact_catalog_version == 3
+    assert loaded.artifact_rules == custom + v7_artifact_additions()
+    assert loaded.artifact_catalog_version == 4
 
 
 def test_fragmentation_v2_defaults_migrate_to_v3_catalog(tmp_path, monkeypatch):
@@ -246,7 +353,7 @@ def test_fragmentation_v2_defaults_migrate_to_v3_catalog(tmp_path, monkeypatch):
     }
     former_v2 = [
         entry
-        for entry in default_artifact_rules()
+        for entry in legacy_artifact_rules()
         if entry["hgvsc"] not in v1_additions
     ]
     config_path.write_text(
@@ -261,5 +368,5 @@ def test_fragmentation_v2_defaults_migrate_to_v3_catalog(tmp_path, monkeypatch):
 
     loaded = AppSettings.load()
 
-    assert loaded.artifact_catalog_version == 3
+    assert loaded.artifact_catalog_version == 4
     assert loaded.artifact_rules == default_artifact_rules()

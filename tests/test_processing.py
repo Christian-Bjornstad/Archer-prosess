@@ -2,6 +2,8 @@ from dataclasses import replace
 from pathlib import Path
 
 import openpyxl
+import pytest
+from openpyxl import Workbook
 
 from archer_processor.core import (
     FilterEngine,
@@ -10,12 +12,73 @@ from archer_processor.core import (
     production_rules,
 )
 from archer_processor.core.models import DatabaseEvidence
+from archer_processor.core.highlights import is_automatic_database_skip
 from archer_processor.io import ArcherTsvReader
 from archer_processor.reports import ExcelReportWriter
-from archer_processor.services import DatabaseSearchService, load_database_skip_keys
+from archer_processor.services import DatabaseSearchService, ProcessedWorkbookLoader, load_database_skip_keys
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+
+
+def test_run_date_comes_from_vpm_folder_and_reaches_review_workbook(tmp_path):
+    input_dir = tmp_path / "2026_09_18_VPM" / "analysis"
+    input_dir.mkdir(parents=True)
+    input_path = input_dir / FIXTURE.name
+    input_path.write_bytes(FIXTURE.read_bytes())
+    output = tmp_path / "review.xlsx"
+
+    result = VariantProcessor().process(input_path, "2026-01-01", output)
+    ExcelReportWriter().write(result, output)
+
+    workbook = openpyxl.load_workbook(output)
+    try:
+        assert result.run_date == "2026-09-18"
+        sheet = workbook["With Artifacts"]
+        headers = [cell.value for cell in sheet[1]]
+        assert sheet.cell(2, headers.index("Run_dato") + 1).value == "2026_09_18"
+    finally:
+        workbook.close()
+
+
+def test_run_date_comes_from_vpm_file_name(tmp_path):
+    input_path = tmp_path / "2026_09_18_VPM.tsv"
+    input_path.write_bytes(FIXTURE.read_bytes())
+    output = tmp_path / "review.xlsx"
+    result = VariantProcessor().process(input_path, "2026-01-01", output)
+    ExcelReportWriter().write(result, output)
+    assert result.run_date == "2026-09-18"
+    workbook = openpyxl.load_workbook(output)
+    try:
+        sheet = workbook["With Artifacts"]
+        headers = [cell.value for cell in sheet[1]]
+        assert sheet.cell(2, headers.index("Run_dato") + 1).value == "2026_09_18"
+    finally:
+        workbook.close()
+
+
+def test_run_date_uses_dated_output_when_input_has_no_run_name(tmp_path):
+    output = tmp_path / "2026_09_18_VPM_review.xlsx"
+    result = VariantProcessor().process(FIXTURE, "2026-01-01", output)
+    assert result.run_date == "2026-09-18"
+
+
+def test_review_workbook_failed_save_preserves_last_good_file(tmp_path, monkeypatch):
+    result = VariantProcessor().process(FIXTURE, "2026-09-15", tmp_path / "review.xlsx")
+    output = tmp_path / "review.xlsx"
+    output.write_bytes(b"last-good-workbook")
+
+    def interrupted_save(self, candidate):
+        Path(candidate).write_bytes(b"partial-workbook")
+        raise OSError("network write interrupted")
+
+    monkeypatch.setattr(Workbook, "save", interrupted_save)
+
+    with pytest.raises(OSError, match="network write interrupted"):
+        ExcelReportWriter().write(result, output)
+
+    assert output.read_bytes() == b"last-good-workbook"
+    assert list(tmp_path.glob("*.tmp.xlsx")) == []
 
 
 def test_reader_parses_archer_tsv_columns():
@@ -26,6 +89,8 @@ def test_reader_parses_archer_tsv_columns():
     assert variants[0].patient_id == "26OUM00001"
     assert variants[0].transcript == "NM_004119.2"
     assert variants[3].af == 0.5333
+    assert variants[3].gnomad_af == 0.00001
+    assert variants[3].raw["gnomAD AF"] == "0.00001"
 
 
 def test_production_rules_and_boundaries():
@@ -41,11 +106,22 @@ def test_production_rules_and_boundaries():
     assert by_sample["26OUM00005"].warnings
 
 
+def test_green_germline_variants_are_automatic_database_skips():
+    base = ArcherTsvReader().read(FIXTURE)[3]
+    strong = replace(base, raw={**base.raw, "Germ": 11}, af=0.35)
+    weak = replace(base, raw={**base.raw, "Germ": 11}, af=0.10)
+    missing_af = replace(base, raw={**base.raw, "Germ": 11}, af=None)
+
+    assert is_automatic_database_skip(strong)
+    assert is_automatic_database_skip(weak)
+    assert not is_automatic_database_skip(missing_af)
+
+
 def test_default_artifact_catalog_includes_fragmentation_v1_and_v2_hgvsc_columns():
     rules = default_artifact_rules()
 
-    assert len(rules) == 39
-    assert len({entry["hgvsc"] for entry in rules}) == 39
+    assert len(rules) == 51
+    assert len({entry["hgvsc"] for entry in rules}) == 51
     assert {
         "NM_004364.4:c.288C>G",
         "NM_004364.4:c.280G>C",
@@ -137,7 +213,7 @@ def test_excel_export_preserves_raw_columns_and_adds_database_columns(tmp_path):
     ExcelReportWriter().write(result, output, evidence=evidence)
 
     workbook = openpyxl.load_workbook(output)
-    assert workbook.sheetnames == ["With Artifacts", "Artifacts Removed"]
+    assert workbook.sheetnames == ["With Artifacts", "Artifacts Removed", "_Evidence"]
     ws = workbook["With Artifacts"]
     headers = [cell.value for cell in ws[1]]
     raw_headers = list(result.variants[0].raw)
@@ -149,16 +225,10 @@ def test_excel_export_preserves_raw_columns_and_adds_database_columns(tmp_path):
 
     assert headers[0] == "Skip Database Search (X)"
     assert headers[1 : len(raw_headers) + 1] == raw_headers
-    assert headers[len(raw_headers) + 1 :] == [
-        f"{database} Evidence"
-        for database in [
-            "ClinVar",
-            "MTBP",
-            "Franklin",
-            "OncoKB",
-            "COSMIC",
-        ]
-    ]
+    assert headers[len(raw_headers) + 1 :] == ["Run_dato"]
+    assert not any(header.endswith(" Evidence") for header in headers)
+    assert row[headers.index("Run_dato")] == "2026_07_26"
+    assert workbook.sheetnames[-1] == "_Evidence"
     assert row[headers.index("HGVSc")] == variant.raw["HGVSc"]
     assert "CIViC Evidence" not in headers
 
@@ -206,8 +276,23 @@ def test_review_workbook_sorts_each_patient_by_descending_numeric_percent_af(tmp
                 0.10,
                 None,
             ]
-            assert sheet.cell(2, af_col).number_format == "0.00%"
-            assert sheet.cell(3, af_col).number_format == "0.00%"
+            assert sheet.cell(2, af_col).number_format == "0%"
+            assert sheet.cell(3, af_col).number_format == "0%"
+            assert sheet.cell(2, af_col).font.bold
+    finally:
+        workbook.close()
+
+
+def test_review_workbook_omits_who_genes(tmp_path):
+    output = tmp_path / "review.xlsx"
+    result = VariantProcessor().process(FIXTURE, "2026-09-28", output)
+    ExcelReportWriter(frozenset({"RUNX1"})).write(result, output)
+    workbook = openpyxl.load_workbook(output)
+    try:
+        sheet = workbook["With Artifacts"]
+        headers = [cell.value for cell in sheet[1]]
+        assert "WHO drivergen" not in headers
+        assert headers[-1] == "Run_dato"
     finally:
         workbook.close()
 
@@ -269,8 +354,9 @@ def test_excel_export_writes_artifact_removed_sheet(tmp_path):
 
     assert "26OUM00001_VPM_S1_R1_001" in with_samples
     assert "26OUM00001_VPM_S1_R1_001" not in removed_samples
-    assert row[headers.index("ClinVar Evidence")] == "[found] ClinVar summary"
-    assert row[headers.index("Franklin Evidence")] == "[unauthorized] Franklin login was rejected"
+    assert not any(header.endswith(" Evidence") for header in headers)
+    restored = ProcessedWorkbookLoader().load(output).evidence[DatabaseSearchService().variant_key(variant)]
+    assert {item.database: item.status for item in restored}["ClinVar"] == "verification_required"
 
 
 def test_excel_export_keeps_row_coloring_on_raw_sheets(tmp_path):
@@ -358,12 +444,10 @@ def test_excel_review_layout_hides_reference_columns_and_keeps_evidence_compact(
     workbook = openpyxl.load_workbook(output)
     ws = workbook["With Artifacts"]
     headers = [cell.value for cell in ws[1]]
-    evidence_column = headers.index("OncoKB Evidence") + 1
-    evidence_cell = ws.cell(5, evidence_column)
     report_column = headers.index("Report") + 1
     assert ws.freeze_panes == "G2"
     assert ws.column_dimensions[openpyxl.utils.get_column_letter(report_column)].hidden
     assert all(not ws.row_dimensions[row].hidden for row in range(2, ws.max_row + 1))
-    assert not evidence_cell.alignment.wrap_text
+    assert "OncoKB Evidence" not in headers
     assert ws.row_dimensions[5].height == 18
     workbook.close()

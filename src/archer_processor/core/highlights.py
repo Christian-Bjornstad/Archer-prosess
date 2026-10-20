@@ -3,13 +3,14 @@ from __future__ import annotations
 from typing import Any
 
 from archer_processor.core.models import VariantRecord
+from archer_processor.core.rules import normalize_artifact_hgvsc
 
 
 def variant_highlight(variant: VariantRecord) -> str:
     if _is_artifact(variant):
         if (
             variant.symbol.upper() == "ASXL1"
-            and variant.hgvsc == "NM_015338.5:c.1934dup"
+            and normalize_artifact_hgvsc(variant.hgvsc) == "NM_015338:c.1934dup"
             and variant.af is not None
             and 0.05 < variant.af <= 0.055
         ):
@@ -26,6 +27,16 @@ def priority_warning(variant: VariantRecord) -> str:
     return ""
 
 
+def is_automatic_database_skip(variant: VariantRecord) -> bool:
+    """Return whether a coloured priority row must not enter provider searches."""
+    return variant_highlight(variant) in {
+        "artifact",
+        "artifact_light",
+        "germline",
+        "germline_low_af",
+    }
+
+
 def _is_artifact(variant: VariantRecord) -> bool:
     # Only consider artifacts from user-configured rules (matched_rules)
     return any("artifact" in rule.lower() for rule in variant.matched_rules)
@@ -36,6 +47,14 @@ def is_report_artifact(variant: VariantRecord) -> bool:
     sheets (Oversikt, Vedlegg, per-variant pages).  Artifacts stay in the
     hidden Data sheet for traceability."""
     return _is_artifact(variant) and variant.decision == "excluded"
+
+
+def is_report_omitted(variant: VariantRecord) -> bool:
+    """Return whether a variant belongs only in the traceability Data sheet."""
+    return is_report_artifact(variant) or variant_highlight(variant) in {
+        "germline",
+        "germline_low_af",
+    }
 
 
 def _variant_sum(variant: VariantRecord, *columns: str) -> float:

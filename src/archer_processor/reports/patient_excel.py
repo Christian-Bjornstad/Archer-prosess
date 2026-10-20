@@ -8,6 +8,7 @@ import textwrap
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from openpyxl import Workbook
 from openpyxl.drawing.image import Image as ExcelImage
@@ -15,10 +16,10 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from PIL import Image as PillowImage
 
-from archer_processor.core.highlights import is_report_artifact, variant_highlight
+from archer_processor.core.highlights import is_report_omitted, variant_highlight
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
 from archer_processor.core.sorting import variant_sort_key
-from archer_processor.reports.excel_report import ExcelReportWriter
+from archer_processor.reports.who_genes import WHO_DRIVER_GENES
 from archer_processor.reports.manual_fields import (
     ManualVariantFields,
     read_manual_fields,
@@ -104,6 +105,11 @@ class PatientExcelReportWriter:
         "white": "FFFFFF",
     }
 
+    def __init__(self, who_driver_genes: frozenset[str] | None = None) -> None:
+        self.who_driver_genes = (
+            WHO_DRIVER_GENES if who_driver_genes is None else who_driver_genes
+        )
+
     def write_all(
         self,
         result: ProcessingResult,
@@ -135,12 +141,9 @@ class PatientExcelReportWriter:
         variants = sorted(variants, key=variant_sort_key)
         manual_fields = read_manual_fields(output_path, patient_id)
         patient_comment = read_patient_comment(output_path)
-        # Artifacts remain in the hidden Data sheet for traceability but are
-        # kept out of every interpretation sheet (Oversikt, Vedlegg, the
-        # per-variant sheets).  Callers that hand us the full result list
-        # still get them preserved below via result.variants.
+        # Artifacts and germline-marked variants stay out of patient reports.
         variants = [
-            variant for variant in variants if not is_report_artifact(variant)
+            variant for variant in variants if not is_report_omitted(variant)
         ]
         workbook = Workbook()
         placeholder = workbook.active
@@ -155,13 +158,8 @@ class PatientExcelReportWriter:
         )
         workbook.remove(placeholder)
         self._attachment_sheet(workbook, patient_id, variants, evidence)
-        patient_data = [
-            variant for variant in result.variants
-            if variant.patient_id == patient_id
-        ]
-        self._data_sheet(workbook, patient_data, evidence)
         gene_counts = Counter((variant.symbol or "Variant").casefold() for variant in variants)
-        used_names = {"Oversikt", "Vedlegg", "Data"}
+        used_names = {"Oversikt", "MTBP"}
         for index, variant in enumerate(variants, start=1):
             title = self._variant_sheet_name(
                 variant,
@@ -290,33 +288,31 @@ class PatientExcelReportWriter:
         manual_fields: dict[str, ManualVariantFields],
         patient_comment: str = "",
     ) -> None:
-        # Artifacts stay in the hidden Data sheet for traceability, but never
-        # appear in the interpretation overview the patient report shows.
+        # Artifacts and germline-marked variants never appear in the overview.
         variants = [
-            variant for variant in variants if not is_report_artifact(variant)
+            variant for variant in variants if not is_report_omitted(variant)
         ]
 
         ws = workbook.create_sheet("Oversikt")
         self._base_sheet(ws)
         ws.sheet_properties.tabColor = self.colors["navy"]
-        ws.merge_cells("A1:J2")
+        ws.merge_cells("A1:L2")
         ws["A1"] = f"VPM-tolkning – {patient_id}"
         self._title_style(ws["A1"])
-        self._info_row(ws, 5, "DIT/pasientnummer", patient_id, end_column=4)
-        self._info_row(ws, 6, "Rapportdato", result.run_date, end_column=4)
-        self._info_row(ws, 7, "Antall varianter", len(variants), end_column=4)
-        ws.merge_cells("E4:J7")
-        ws["E4"] = patient_comment
-        ws["E4"].alignment = Alignment(vertical="top", wrap_text=True)
-        for row in ws.iter_rows(min_row=4, max_row=7, min_col=5, max_col=10):
+        self._info_row(ws, 3, "DIT/pasientnummer", patient_id, end_column=3)
+        self._info_row(ws, 4, "Sekvenseringsdato", result.run_date, end_column=3)
+        ws.merge_cells("D3:L4")
+        ws["D3"] = patient_comment
+        ws["D3"].alignment = Alignment(vertical="top", wrap_text=True)
+        for row in ws.iter_rows(min_row=3, max_row=4, min_col=4, max_col=12):
             for cell in row:
                 cell.fill = PatternFill("solid", fgColor=self.colors["pale_orange"])
-        for row in range(4, 8):
+        for row in range(3, 5):
             ws.row_dimensions[row].height = 24
 
-        ws.merge_cells("A9:J9")
-        ws["A9"] = "Varianter og signifikant evidens"
-        self._section_style(ws["A9"])
+        ws.merge_cells("A6:L6")
+        ws["A6"] = "Varianter og signifikant evidens"
+        self._section_style(ws["A6"])
         headers = [
             "Gen",
             "HGVSc",
@@ -324,11 +320,13 @@ class PatientExcelReportWriter:
             "Kort evidens",
             "Kommentar",
             *REPORT_DATABASES,
+            "gnomAD AF",
+            "WHO drivergen",
         ]
         for column, header in enumerate(headers, start=1):
-            cell = ws.cell(10, column, header)
+            cell = ws.cell(7, column, header)
             self._header_style(cell)
-        for row, variant in enumerate(variants, start=11):
+        for row, variant in enumerate(variants, start=8):
             by_database = self._by_database(evidence.get(self._key(variant), []))
             manual = manual_fields.get(
                 variant_manual_key(patient_id, variant), ManualVariantFields()
@@ -348,9 +346,13 @@ class PatientExcelReportWriter:
                 ),
                 manual.comment,
                 *[
-                    self._compact_evidence(by_database.get(database, []))
+                    self._cosmic_id_label(variant)
+                    if database == "COSMIC"
+                    else self._compact_evidence(by_database.get(database, []))
                     for database in REPORT_DATABASES
                 ],
+                variant.raw.get("gnomAD AF", ""),
+                "X" if (variant.symbol or "").upper() in self.who_driver_genes else "",
             ]
             for column, value in enumerate(values, start=1):
                 cell = ws.cell(row, column, value)
@@ -358,8 +360,16 @@ class PatientExcelReportWriter:
                 cell.alignment = Alignment(vertical="top", wrap_text=True)
             for offset, database in enumerate(REPORT_DATABASES, start=6):
                 items = by_database.get(database, [])
-                if items and items[0].url and database != "MTBP":
-                    ws.cell(row, offset).hyperlink = items[0].url
+                if database == "COSMIC" and self._cosmic_id_label(variant) == "Ikke ID i Archer":
+                    continue
+                url = items[0].url if items else ""
+                if database == "COSMIC" and not url:
+                    url = (
+                        "https://cancer.sanger.ac.uk/cosmic/search?q="
+                        + quote(self._cosmic_id_label(variant), safe="")
+                    )
+                if url and database != "MTBP":
+                    ws.cell(row, offset).hyperlink = url
                     ws.cell(row, offset).style = "Hyperlink"
                     ws.cell(row, offset).alignment = Alignment(
                         vertical="top", wrap_text=True
@@ -376,17 +386,17 @@ class PatientExcelReportWriter:
             if not fill_color:
                 fill_color = (
                     self.colors["white"]
-                    if (row - 11) % 2
+                    if (row - 8) % 2
                     else self.colors["pale_blue"]
                 )
             if fill_color:
-                for column in range(1, 11):
+                for column in range(1, 13):
                     ws.cell(row, column).fill = PatternFill(
                         "solid", fgColor=fill_color
                     )
             # Excel does not auto-fit wrapped cells with an explicit height.
             # Allow for wrapping, not just newline characters (HSMD is last).
-            widths = [14, 31, 25, 52, 32, 22, 22, 22, 22, 22]
+            widths = [14, 31, 25, 52, 32, 22, 22, 22, 22, 22, 16, 20]
             lines = max(
                 sum(max(1, len(textwrap.wrap(line, max(1, width - 7))))
                     for line in str(value or "").split("\n"))
@@ -400,9 +410,19 @@ class PatientExcelReportWriter:
         ws.column_dimensions["E"].width = 32
         for column in "FGHIJ":
             ws.column_dimensions[column].width = 22
-        ws.auto_filter.ref = f"A10:J{max(10, 10 + len(variants))}"
-        ws.freeze_panes = "A10"
-        ws.print_area = f"A1:J{max(16, 11 + len(variants))}"
+        ws.column_dimensions["K"].width = 16
+        ws.column_dimensions["L"].width = 20
+        ws.auto_filter.ref = f"A7:L{max(7, 7 + len(variants))}"
+        ws.freeze_panes = "A8"
+        ws.print_area = f"A1:L{max(13, 8 + len(variants))}"
+
+    @staticmethod
+    def _cosmic_id_label(variant: VariantRecord) -> str:
+        return (
+            match.group(0).upper()
+            if (match := re.search(r"\b(?:COSM|COSV)\d+\b", variant.cosmic_id or "", re.I))
+            else "Ikke ID i Archer"
+        )
 
     def _attachment_sheet(
         self,
@@ -411,12 +431,18 @@ class PatientExcelReportWriter:
         variants: list[VariantRecord],
         evidence: dict[str, list[DatabaseEvidence]],
     ) -> None:
-        ws = workbook.create_sheet("Vedlegg")
+        ws = workbook.create_sheet("MTBP")
         self._base_sheet(ws)
+        ws.sheet_view.showGridLines = True
         ws.sheet_properties.tabColor = self.colors["muted"]
         ws["A1"] = patient_id
         ws["A1"].font = Font(size=18, bold=True, color=self.colors["navy"])
         ws.column_dimensions["A"].width = max(18, len(patient_id) + 4)
+        for row in range(2, 6):
+            for column in range(1, 13):
+                ws.cell(row, column).fill = PatternFill(
+                    "solid", fgColor=self.colors["pale_blue"]
+                )
         report_paths: list[Path] = []
         seen: set[str] = set()
         for variant in variants:
@@ -427,30 +453,46 @@ class PatientExcelReportWriter:
                 if value and value not in seen:
                     seen.add(value)
                     report_paths.append(Path(value))
-        row = 3
+        row = 6
         for report_path in report_paths:
             ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
             ws.cell(row, 1, "MTBP – samlet pasientrapport")
             self._section_style(ws.cell(row, 1))
-            row = self._add_image(ws, report_path, row + 1) + 1
+            display_path = self._trim_mtbp_intro(report_path)
+            row = self._add_image(ws, display_path, row + 1) + 1
 
-    def _data_sheet(
-        self,
-        workbook: Workbook,
-        variants: list[VariantRecord],
-        evidence: dict[str, list[DatabaseEvidence]],
-    ) -> None:
-        raw_writer = ExcelReportWriter()
-        raw_writer._raw_variant_sheet(
-            workbook,
-            "Data",
-            variants,
-            evidence,
-            include_selection=False,
-        )
-        ws = workbook["Data"]
-        ws.sheet_properties.tabColor = self.colors["green"]
-        ws.sheet_view.showGridLines = False
+    @staticmethod
+    def _trim_mtbp_intro(report_path: Path) -> Path:
+        """Create an attachment copy beginning at MTBP's Genomics/report content."""
+        geometry_path = report_path.with_suffix(".geometry.json")
+        if not report_path.is_file() or not geometry_path.is_file():
+            return report_path
+        try:
+            geometry = json.loads(geometry_path.read_text(encoding="utf-8"))
+            content_top = float(geometry.get("content_top") or 0)
+            if content_top <= 0:
+                legacy_tops = [
+                    float(box.get("y") or 0)
+                    for row in geometry.get("rows") or []
+                    if isinstance(row, dict)
+                    for box in [row.get("section") or row.get("header") or row.get("row")]
+                    if isinstance(box, dict) and float(box.get("y") or 0) > 0
+                ]
+                content_top = min(legacy_tops, default=0)
+            document_height = float(geometry.get("height") or 0)
+            if content_top <= 0 or document_height <= content_top:
+                return report_path
+            with PillowImage.open(report_path) as source:
+                pixel_top = round(content_top * source.height / document_height)
+                if pixel_top <= 0 or pixel_top >= source.height - 1:
+                    return report_path
+                output = report_path.with_name(
+                    f"{report_path.stem}-attachment{report_path.suffix}"
+                )
+                source.crop((0, pixel_top, source.width, source.height)).save(output)
+            return output
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return report_path
 
     def _variant_sheet(
         self,

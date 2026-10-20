@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from collections import defaultdict
 from math import isnan
@@ -7,12 +8,20 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook
+from openpyxl.packaging.custom import StringProperty
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from archer_processor.core.highlights import priority_warning, variant_highlight
+from archer_processor.core.highlights import (
+    is_automatic_database_skip,
+    priority_warning,
+    variant_highlight,
+)
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
 from archer_processor.core.sorting import variant_sort_key
+from archer_processor.reports.who_genes import WHO_DRIVER_GENES
+from archer_processor.reports.archer_layout import V7_COLUMNS, V7_HIDDEN_COLUMNS
+from archer_processor.io.tsv_reader import ArcherTsvReader
 
 
 DEFAULT_DATABASE_COLUMNS = [
@@ -84,6 +93,9 @@ REFERENCE_HIDDEN_COLUMNS = {
 
 
 class ExcelReportWriter:
+    def __init__(self, who_driver_genes: frozenset[str] | None = None) -> None:
+        self.who_driver_genes = WHO_DRIVER_GENES if who_driver_genes is None else who_driver_genes
+
     colors = {
         "navy": "163B5C",
         "blue": "2F75B5",
@@ -111,6 +123,13 @@ class ExcelReportWriter:
     ) -> Path:
         evidence = evidence or {}
         workbook = Workbook()
+        workbook.custom_doc_props.append(
+            StringProperty(name="VPMRunDate", value=result.run_date)
+        )
+        version = result.archer_version
+        if version == "unknown":
+            version = ArcherTsvReader.detect_version(self._raw_columns(result.variants))
+        workbook.custom_doc_props.append(StringProperty(name="ArcherVersion", value=version))
         workbook.remove(workbook.active)
         self._raw_variant_sheet(
             workbook,
@@ -120,6 +139,8 @@ class ExcelReportWriter:
             hide_excluded,
             include_selection=True,
             database_skip_keys=database_skip_keys or set(),
+            run_date=result.run_date,
+            archer_version=version,
         )
         self._raw_variant_sheet(
             workbook,
@@ -131,12 +152,45 @@ class ExcelReportWriter:
             ],
             evidence,
             hide_excluded,
+            run_date=result.run_date,
+            archer_version=version,
         )
+        self._evidence_storage_sheet(workbook, evidence)
         for ws in workbook.worksheets:
             ws.sheet_view.showGridLines = False
+        return self._save_atomically(workbook, output_path)
+
+    @staticmethod
+    def _save_atomically(workbook: Workbook, output_path: Path) -> Path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        workbook.save(output_path)
+        temporary = output_path.with_name(
+            f"{output_path.stem}.{os.getpid()}.tmp.xlsx"
+        )
+        try:
+            workbook.save(temporary)
+            temporary.replace(output_path)
+        finally:
+            if temporary.exists() and temporary != output_path:
+                temporary.unlink(missing_ok=True)
         return output_path
+
+    @staticmethod
+    def _evidence_storage_sheet(workbook: Workbook, evidence: dict[str, list[DatabaseEvidence]]) -> None:
+        """Keep source results for resume without cluttering review columns."""
+        ws = workbook.create_sheet("_Evidence")
+        ws.append([
+            "Variant key", "Database", "Status", "Summary", "Accession",
+            "Clinical significance", "URL", "Raw JSON chunks",
+        ])
+        for key, items in evidence.items():
+            for item in items:
+                raw_json = json.dumps(item.raw, default=str, ensure_ascii=False)
+                chunks = [raw_json[index:index + 30_000] for index in range(0, len(raw_json), 30_000)]
+                ws.append([
+                    key, item.database, item.status, item.summary, item.accession,
+                    item.clinical_significance, item.url, *chunks,
+                ])
+        ws.sheet_state = "veryHidden"
 
     def _database_selection_sheet(
         self,
@@ -544,22 +598,38 @@ class ExcelReportWriter:
         *,
         include_selection: bool = False,
         database_skip_keys: set[str] | None = None,
+        include_database_evidence: bool = True,
+        preserve_variant_order: bool = False,
+        archer_version: str = "unknown",
+        run_date: str = "",
     ) -> None:
         ws = workbook.create_sheet(title)
         raw_columns = self._raw_columns(variants)
-        database_columns = self._database_columns(evidence)
+        is_v7 = archer_version == "v7"
+        if is_v7:
+            raw_columns = list(V7_COLUMNS) + [
+                column for column in raw_columns
+                if column not in V7_COLUMNS and column != "Run date"
+            ]
+        database_columns = []
         headers = (
             (["Skip Database Search (X)"] if include_selection else [])
             + raw_columns
+            + (["Run date"] if is_v7 and run_date else [])
             + [f"{database} Evidence" for database in database_columns]
+            + (["Run_dato"] if run_date and not is_v7 else [])
         )
         self._headers(ws, headers)
         raw_offset = 1 if include_selection else 0
-        evidence_start = raw_offset + len(raw_columns) + 1
+        evidence_start = raw_offset + len(raw_columns) + 1 + int(is_v7 and bool(run_date))
         evidence_columns = set(range(evidence_start, evidence_start + len(database_columns)))
         skip_keys = database_skip_keys or set()
 
-        sorted_variants = sorted(variants, key=variant_sort_key)
+        sorted_variants = (
+            list(variants)
+            if preserve_variant_order
+            else sorted(variants, key=variant_sort_key)
+        )
         for row_index, variant in enumerate(sorted_variants, start=2):
             evidence_by_database = self._evidence_by_database(evidence.get(self._key(variant), []))
             values = [
@@ -567,7 +637,7 @@ class ExcelReportWriter:
                     [
                         "X"
                         if self._key(variant) in skip_keys
-                        or variant_highlight(variant) in {"artifact", "artifact_light"}
+                        or is_automatic_database_skip(variant)
                         else ""
                     ]
                     if include_selection
@@ -575,11 +645,15 @@ class ExcelReportWriter:
                 ),
                 *[
                     self._raw_value(
-                        variant.af if column == "AF" else variant.raw.get(column)
+                        self._variant_raw_value(variant, column)
                     )
                     for column in raw_columns
                 ],
+                *([run_date.replace("-", "_")] if is_v7 and run_date else []),
                 *[self._evidence_cell(evidence_by_database.get(database, [])) for database in database_columns],
+                *([
+                    run_date.replace("-", "_"),
+                ] if run_date and not is_v7 else []),
             ]
             for col_index, value in enumerate(values, start=1):
                 cell = ws.cell(row_index, col_index, value)
@@ -587,7 +661,10 @@ class ExcelReportWriter:
                 cell.alignment = Alignment(vertical="center", wrap_text=False)
                 raw_index = col_index - raw_offset - 1
                 if 0 <= raw_index < len(raw_columns) and raw_columns[raw_index] == "AF" and value not in [None, ""]:
-                    cell.number_format = "0.00%"
+                    cell.number_format = "0%"
+                    cell.font = Font(bold=True)
+                if 0 <= raw_index < len(raw_columns) and raw_columns[raw_index] == "Symbol":
+                    cell.font = Font(bold=True)
             if include_selection:
                 ws.cell(row_index, 1).fill = PatternFill(
                     "solid", fgColor=self.colors["yellow"]
@@ -604,7 +681,11 @@ class ExcelReportWriter:
             ws.row_dimensions[row_index].height = 18
             if hide_excluded and variant.decision == "excluded":
                 ws.row_dimensions[row_index].hidden = True
-        ws.freeze_panes = "G2" if include_selection else "F2"
+        if is_v7:
+            # Template I1 freezes through Depth; shift once for the review selector.
+            ws.freeze_panes = "J1" if include_selection else "I1"
+        else:
+            ws.freeze_panes = "G2" if include_selection else "F2"
         ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{len(variants) + 1}"
         self._fit(ws, max_width=46)
         if include_selection:
@@ -613,7 +694,7 @@ class ExcelReportWriter:
             ws["A1"].font = Font(bold=True, color=self.colors["navy"])
         for index, header in enumerate(headers, start=1):
             letter = get_column_letter(index)
-            if header in REFERENCE_HIDDEN_COLUMNS:
+            if header in (V7_HIDDEN_COLUMNS if is_v7 else REFERENCE_HIDDEN_COLUMNS):
                 ws.column_dimensions[letter].hidden = True
             elif header.endswith(" Evidence"):
                 ws.column_dimensions[letter].width = 34
@@ -625,7 +706,20 @@ class ExcelReportWriter:
             for column in variant.raw:
                 if column not in columns:
                     columns.append(column)
-        return columns
+        return columns or ["Sample", "Symbol", "HGVSc", "HGVSp", "AF"]
+
+    @staticmethod
+    def _variant_raw_value(variant: VariantRecord, column: str) -> Any:
+        if column == "AF":
+            return variant.af
+        if column in variant.raw:
+            return variant.raw.get(column)
+        return {
+            "Sample": variant.sample,
+            "Symbol": variant.symbol,
+            "HGVSc": variant.hgvsc,
+            "HGVSp": variant.hgvsp,
+        }.get(column)
 
     def _raw_value(self, value: Any) -> Any:
         if value is None:

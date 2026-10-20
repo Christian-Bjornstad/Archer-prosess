@@ -1,20 +1,28 @@
 from datetime import datetime
+from dataclasses import replace
 from pathlib import Path
 import re
 import threading
 import time
 
 from PIL import Image
-from PyQt6.QtWidgets import QPushButton
+from PyQt6.QtCore import QThread
+from PyQt6.QtWidgets import QAbstractItemView, QPushButton
 
 from archer_processor.core import DatabaseEvidence, VariantProcessor, default_artifact_rules
+from archer_processor.core.highlights import is_automatic_database_skip
 from archer_processor.gui.app import (
     BrowserReviewWorker,
     DatabaseWorker,
     MainWindow,
     PatientReportWorker,
+    WorkbookWriteWorker,
+    _browser_database_lanes,
     _completed_evidence_sources,
+    _evidence_completion_summary,
+    _pending_source_counts,
     _protected_remote_evidence_sources,
+    _retryable_source_pairs,
 )
 from archer_processor.gui.status_model import (
     CellState,
@@ -26,8 +34,9 @@ from archer_processor.gui.status_model import (
 )
 from archer_processor.gui.widgets.status_matrix import StatusMatrix
 from archer_processor.gui.widgets.run_status import RunStatusStrip
+from archer_processor.io import ArcherTsvReader
 from archer_processor.reports import ExcelReportWriter, PatientReportOutcome
-from archer_processor.services import DatabaseSearchService
+from archer_processor.services import BrowserReviewService, DatabaseSearchService
 from archer_processor.services import AppSettings
 
 
@@ -40,19 +49,22 @@ def test_primary_and_secondary_text_actions_are_at_least_44px(qt_app):
     ]
 
     assert all(button.minimumHeight() >= 44 for button in text_actions)
-    assert window.patient_excel_btn.text() == "Generer VEDLEGG_APP"
+    assert window.patient_excel_btn.text() == "Generer vedlegg"
     assert window.patient_excel_btn.parent().objectName() == "ReportsGroup"
 
 
 def test_evidence_actions_fit_target_window_sizes(qt_app):
     window = MainWindow()
-    window._switch_page(2)
+    window._switch_page(1)
     window.show()
     for width, height in [(1120, 720), (1440, 900)]:
         window.resize(width, height)
         qt_app.processEvents()
         viewport = window.database_scroll.viewport().rect()
         for button in [
+            window.priority_search_btn,
+            window.retry_selected_btn,
+            window.remaining_search_btn,
             window.rewrite_btn,
             window.patient_excel_btn,
         ]:
@@ -61,13 +73,16 @@ def test_evidence_actions_fit_target_window_sizes(qt_app):
             assert point.x() + button.width() <= viewport.width()
 
 
-def test_entire_evidence_page_scrolls_and_import_keeps_log(qt_app):
+def test_advanced_evidence_scrolls_with_report_actions_fixed(qt_app):
     window = MainWindow()
-    window._switch_page(2)
+    window._switch_page(1)
     window.resize(1120, 720)
     window.show()
     qt_app.processEvents()
+    window.advanced_evidence_btn.click()
+    qt_app.processEvents()
     before = window.search_btn.mapTo(window, window.search_btn.rect().topLeft())
+    reports_before = window.patient_excel_btn.mapTo(window, window.patient_excel_btn.rect().topLeft())
     window.database_scroll.verticalScrollBar().setValue(window.database_scroll.verticalScrollBar().maximum())
     qt_app.processEvents()
     after = window.search_btn.mapTo(window, window.search_btn.rect().topLeft())
@@ -75,9 +90,32 @@ def test_entire_evidence_page_scrolls_and_import_keeps_log(qt_app):
     assert not hasattr(window, "evidence_splitter")
     assert not hasattr(window, "evidence_log")
     assert window.database_scroll.geometry().top() == 0
-    assert window.database_scroll.geometry().bottom() >= window.database_scroll.parentWidget().height() - 2
+    reports = window.patient_excel_btn.parentWidget()
+    assert reports.parentWidget() is window.database_scroll.parentWidget()
+    assert window.database_scroll.geometry().bottom() < reports.geometry().top()
+    assert reports.geometry().bottom() >= reports.parentWidget().height() - 2
+    assert window.patient_excel_btn.mapTo(window, window.patient_excel_btn.rect().topLeft()) == reports_before
     window._log('Test log message')
     assert 'Test log message' in window.log.toPlainText()
+    window.close()
+
+
+def test_activity_log_keeps_complete_disk_history_beyond_visible_limit(
+    qt_app, tmp_path
+):
+    window = MainWindow()
+    window._start_run_journal(tmp_path, "evidence")
+
+    for index in range(525):
+        window._log(f"persistent event {index}")
+
+    assert window.log.blockCount() <= 500
+    assert window.run_journal is not None
+    disk_lines = window.run_journal.text_path.read_text(encoding="utf-8").splitlines()
+    assert len(disk_lines) == 525
+    assert "persistent event 0" in disk_lines[0]
+    assert "persistent event 524" in disk_lines[-1]
+    assert window.open_log_folder_btn.isEnabled()
     window.close()
 
 
@@ -133,9 +171,9 @@ def test_database_tab_contains_current_sources(qt_app):
     assert window.browser_signin_btn.isEnabled()
     assert not window.browser_review_btn.isEnabled()
     assert not window.stop_search_btn.isEnabled()
-    assert window.stop_search_btn.text() == "Stop Search"
+    assert window.stop_search_btn.text() == "Stopp"
     assert not window.pause_search_btn.isEnabled()
-    assert window.pause_search_btn.text() == "Pause Search"
+    assert window.pause_search_btn.text() == "Pause"
     assert not window.patient_excel_btn.isEnabled()
     assert not hasattr(window, "patient_pdf_btn")
     assert not hasattr(window, "clinvar_key_edit")
@@ -155,8 +193,8 @@ def test_artifact_settings_show_catalog_and_af_exception(qt_app):
         for index in range(window.artifact_table.columnCount())
     ]
 
-    assert window.artifact_table.rowCount() == 39
-    assert headers == ["Gene", "HGVSc", "Artifact through AF", "Reason"]
+    assert window.artifact_table.rowCount() == 51
+    assert headers == ["Gen", "HGVSc", "Artefakt til og med AF", "Begrunnelse"]
     assert window.artifact_table.item(0, 1).text() == "NM_015338.5:c.1934dup"
     assert window.artifact_table.item(0, 2).text() == "5.5%"
     assert window._artifact_rules_from_table() == default_artifact_rules()
@@ -166,45 +204,26 @@ def test_settings_are_grouped_into_four_operator_sections(qt_app):
     window = MainWindow()
 
     assert [group.title() for group in window.settings_groups] == [
-        "Local files",
-        "Browser access",
-        "Search pacing",
-        "Artifact rules",
+        "Rapportmappe og referanselister",
+        "Tilgang i Edge",
+        "Søkevalg",
+        "Manuelle artefaktregler",
     ]
     assert not hasattr(window, "history_edit")
-
-
-def test_variant_workspace_has_no_external_history_column(qt_app):
-    window = MainWindow()
-
-    headers = [
-        window.variant_table.horizontalHeaderItem(column).text()
-        for column in range(window.variant_table.columnCount())
-    ]
-
-    assert headers == [
-        "Sample",
-        "Gene",
-        "HGVSc",
-        "AF",
-        "Depth",
-        "Decision",
-        "Warnings",
-    ]
 
 
 def test_sidebar_navigation_switches_workspace_pages(qt_app):
     window = MainWindow()
 
-    assert len(window.nav_buttons) == 4
+    assert len(window.nav_buttons) == 3
     assert window.nav_buttons[0].isChecked()
     assert window.tabs.currentIndex() == 0
 
-    window._switch_page(2)
+    window._switch_page(1)
 
-    assert window.tabs.currentIndex() == 2
-    assert window.nav_buttons[2].isChecked()
-    assert window.page_title.text() == "Evidence search"
+    assert window.tabs.currentIndex() == 1
+    assert window.nav_buttons[1].isChecked()
+    assert window.page_title.text() == "Kilder og søk"
     assert window.page_eyebrow.text().endswith("EVIDENCE")
 
 
@@ -213,11 +232,11 @@ def test_navigation_uses_short_labels_without_numbered_workflow_copy(qt_app):
 
     labels = [button.text() for button in window.navigation.buttons]
 
-    assert labels == ["Import", "Variants", "Evidence", "Settings"]
+    assert labels == ["Importer", "Kilder og søk", "Innstillinger"]
     assert all(not re.match(r"\d", label) for label in labels)
 
 
-def test_run_status_strip_exposes_interrupted_recovery_action(qt_app):
+def test_run_status_strip_exposes_interruption_without_duplicate_search_action(qt_app):
     strip = RunStatusStrip()
     strip.set_snapshot(
         RunSnapshot(
@@ -228,9 +247,9 @@ def test_run_status_strip_exposes_interrupted_recovery_action(qt_app):
         )
     )
 
-    assert strip.phase_label.text() == "Interrupted · resume available"
+    assert strip.phase_label.text() == "Stoppet"
     assert "7 / 28" in strip.progress_label.text()
-    assert not strip.resume_button.isHidden()
+    assert strip.resume_button.isHidden()
 
 
 def test_status_matrix_renders_visible_text_for_every_state(qt_app):
@@ -249,9 +268,9 @@ def test_status_matrix_renders_visible_text_for_every_state(qt_app):
         ]
     )
 
-    assert matrix.item(0, 2).text() == "Complete"
-    assert matrix.item(0, 3).text() == "Retry"
-    assert matrix.item(0, 4).text() == "Save pending"
+    assert matrix.item(0, 2).text() == "Utført"
+    assert matrix.item(0, 3).text() == "Prøv igjen"
+    assert matrix.item(0, 4).text() == "Lagring venter"
 
 
 def test_activity_is_logged_without_duplicate_evidence_panel(qt_app):
@@ -276,7 +295,7 @@ def test_evidence_has_run_queue_without_redundant_retry_button(qt_app):
     from PyQt6.QtWidgets import QLabel
     window = MainWindow()
     labels = {label.text() for label in window.database_scroll.findChildren(QLabel)}
-    assert "Run queue" in labels
+    assert "Ingen review-fil lastet" in labels
     assert "Research queue" not in labels
     assert not hasattr(window, "rerun_failed_btn")
     window._set_busy("Searching")
@@ -321,8 +340,409 @@ def test_selected_patient_ids_deduplicate_selected_rows(qt_app, tmp_path):
     window._refresh_operations_cockpit()
     first_patient = window.status_matrix.item(0, 0).text()
     window.status_matrix.selectRow(0)
+    window.status_matrix.set_selected_patients([window.status_matrix.item(0, 0).text()])
 
     assert window._selected_patient_ids() == [first_patient]
+
+    window._refresh_operations_cockpit()
+    assert window._selected_patient_ids() == [first_patient]
+
+
+def test_input_folder_sets_sequencing_date(qt_app, tmp_path):
+    window = MainWindow()
+    window.input_edit.setText(str(tmp_path / "2026_09_18_VPM" / "variants.tsv"))
+    assert window.run_date.date().toString("yyyy-MM-dd") == "2026-09-18"
+    assert not window.run_date.isEnabled()
+
+    window.input_edit.setText(str(tmp_path / "2026_09_19_VPM.tsv"))
+    assert window.run_date.date().toString("yyyy-MM-dd") == "2026-09-19"
+
+    window.input_edit.setText(str(tmp_path / "variants.tsv"))
+    window.output_edit.setText(str(tmp_path / "2026_09_20_VPM_review.xlsx"))
+    assert window.run_date.date().toString("yyyy-MM-dd") == "2026-09-20"
+
+
+def test_priority_controls_require_an_explicit_patient_selection(qt_app, tmp_path):
+    window = MainWindow()
+    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+    window.result = VariantProcessor().process(
+        fixture, "2026-09-15", tmp_path / "review.xlsx"
+    )
+    window._refresh_operations_cockpit()
+
+    assert window._explicitly_selected_patient_ids() == []
+    assert not window.priority_search_btn.isEnabled()
+    assert not window.retry_selected_btn.isEnabled()
+    assert window.priority_selection_status.text() == "Ingen avkrysset · søk gjelder alle"
+    assert (
+        window.status_matrix.selectionMode()
+        == QAbstractItemView.SelectionMode.ExtendedSelection
+    )
+    assert window.remaining_search_btn.isEnabled()
+
+    first_patient = window.status_matrix.item(0, 0).text()
+    window.status_matrix.selectRow(0)
+    window.status_matrix.set_selected_patients([window.status_matrix.item(0, 0).text()])
+    qt_app.processEvents()
+
+    assert window._explicitly_selected_patient_ids() == [first_patient]
+    assert window.priority_search_btn.isEnabled()
+    assert not window.retry_selected_btn.isEnabled()
+    assert window.priority_selection_status.text().startswith("1 av ")
+
+
+def test_matrix_tracks_source_completion_failure_and_search_scope(qt_app, tmp_path, monkeypatch):
+    window = MainWindow()
+    window.result = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-15", tmp_path / "review.xlsx",
+    )
+    window.included_only_check.setChecked(False)
+    variant = window._variants_for_search()[0]
+    future = replace(variant, sample="FUTURE_VPM_A")
+    window.result.variants = [variant, future]
+    key = BrowserReviewService.variant_key(variant)
+    future_key = BrowserReviewService.variant_key(future)
+    window._prepare_search_status([variant, future], ["ClinVar", "Franklin"], set())
+    window._set_busy("Searching")
+    window._source_state_changed(variant.patient_id, "ClinVar", True)
+    window._source_state_changed(variant.patient_id, "Franklin", True)
+    clinvar_column = 2 + window.databases.index("ClinVar")
+    franklin_column = 2 + window.databases.index("Franklin")
+    assert window.status_matrix.item(0, clinvar_column).text() == "Søker"
+    window._search_evidence_updated({key: [DatabaseEvidence("ClinVar", "found", "ok")]})
+    window._source_state_changed(variant.patient_id, "ClinVar", False)
+    assert window.status_matrix.item(0, clinvar_column).text() == "Utført"
+
+    monkeypatch.setattr(window, "_auto_rewrite_workbook", lambda: None)
+    monkeypatch.setattr("archer_processor.gui.app.QMessageBox.critical", lambda *args: None)
+    window._search_started_at = time.monotonic()
+    window.status_matrix.selectRow(0)
+    window.status_matrix.set_selected_patients([window.status_matrix.item(0, 0).text()])
+    window._worker_failed("Microsoft Edge timed out during Runtime.evaluate")
+
+    assert window.status_matrix.item(0, franklin_column).text() == "Prøv igjen"
+    assert window.status_matrix.item(1, franklin_column).text() == "Venter"
+    assert future_key not in window.evidence
+    assert window.retry_selected_btn.isEnabled()
+    assert not window._active_sources
+
+
+def test_matrix_marks_unsearched_variants_as_skipped(qt_app, tmp_path):
+    window = MainWindow()
+    window.result = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-15", tmp_path / "review.xlsx",
+    )
+    automatic_skip = next(
+        variant for variant in window.result.variants
+        if is_automatic_database_skip(variant)
+    )
+    window.result.variants = [automatic_skip]
+    window._refresh_operations_cockpit()
+    assert window.status_matrix.item(0, 2).text() == "Hoppet over"
+
+
+def test_source_failure_keeps_mtbp_resume_id_and_completed_evidence(qt_app, tmp_path):
+    window = MainWindow()
+    window.result = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-15", tmp_path / "review.xlsx",
+    )
+    window.included_only_check.setChecked(False)
+    variant = window._variants_for_search()[0]
+    window.result.variants = [variant]
+    key = BrowserReviewService.variant_key(variant)
+    window.evidence = {key: [
+        DatabaseEvidence("MTBP", "partial_capture", "pending", raw={"analysis_id": "ARCHER-retained"}),
+        DatabaseEvidence("ClinVar", "found", "ok"),
+    ]}
+    window._prepare_search_status([variant], ["MTBP"], set())
+    window._source_state_changed(variant.patient_id, "MTBP", True)
+    window._record_active_search_failure("Runtime.evaluate timed out")
+    by_database = {item.database: item for item in window.evidence[key]}
+    assert by_database["MTBP"].status == "timeout"
+    assert by_database["MTBP"].raw["analysis_id"] == "ARCHER-retained"
+    assert by_database["ClinVar"].status == "found"
+
+
+def test_retry_selected_enables_only_for_attempted_failures(qt_app, tmp_path, monkeypatch):
+    window = MainWindow()
+    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+    window.result = VariantProcessor().process(
+        fixture, "2026-09-15", tmp_path / "review.xlsx"
+    )
+    window.included_only_check.setChecked(False)
+    for check in window.db_checks.values():
+        check.setChecked(False)
+    window.db_checks["ClinVar"].setChecked(True)
+    window._refresh_operations_cockpit()
+    variant = window._variants_for_search()[0]
+    first_patient = variant.patient_id
+    patient_row = next(
+        row for row in range(window.status_matrix.rowCount())
+        if window.status_matrix.item(row, 0).text() == first_patient
+    )
+    window.status_matrix.selectRow(patient_row)
+    window.status_matrix.set_selected_patients([first_patient])
+    qt_app.processEvents()
+
+    assert not window.retry_selected_btn.isEnabled()
+    key = BrowserReviewService.variant_key(variant)
+    window.evidence[key] = [DatabaseEvidence("ClinVar", "timeout", "slow")]
+    window._update_priority_controls()
+    assert window.retry_selected_btn.isEnabled()
+    assert window.retry_selected_btn.text() == "Prøv feilede på nytt (1)"
+
+    launches = []
+    monkeypatch.setattr(window, "_start_database_search", lambda **kwargs: launches.append(kwargs))
+    window.retry_selected_btn.click()
+    assert launches == [{
+        "patient_ids": {first_patient},
+        "report_after_search": [first_patient],
+        "scope_label": "feilede oppslag for valgte pasienter",
+        "retry_failed_only": True,
+    }]
+
+    window.db_checks["ClinVar"].setChecked(False)
+    assert not window.retry_selected_btn.isEnabled()
+
+
+def test_retry_pairs_exclude_unattempted_and_completed_lookups():
+    variants = ArcherTsvReader().read(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+    )[:2]
+    first_key = BrowserReviewService.variant_key(variants[0])
+    second_key = BrowserReviewService.variant_key(variants[1])
+    evidence = {
+        first_key: [
+            DatabaseEvidence("ClinVar", "timeout", "slow"),
+            DatabaseEvidence("OncoKB", "found", "ok"),
+        ],
+        second_key: [DatabaseEvidence("ClinVar", "not_found", "no hit")],
+    }
+
+    assert _retryable_source_pairs(
+        variants, evidence, ["ClinVar", "OncoKB", "MTBP"]
+    ) == {(first_key, "ClinVar")}
+
+
+def test_selected_retry_worker_only_receives_failed_lookup_scope(
+    qt_app, tmp_path, monkeypatch
+):
+    window = MainWindow()
+    window.result = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-15", tmp_path / "review.xlsx",
+    )
+    window.included_only_check.setChecked(False)
+    for check in window.db_checks.values():
+        check.setChecked(False)
+    window.db_checks["ClinVar"].setChecked(True)
+    window.db_checks["OncoKB"].setChecked(True)
+    selected = window._variants_for_search()[0]
+    unattempted = replace(
+        selected,
+        hgvsc="NM_000546.6:c.525A>G",
+        source_row=selected.source_row + 101,
+    )
+    other = replace(
+        selected,
+        sample="OTHER_VPM_1",
+        source_row=selected.source_row + 100,
+    )
+    window.result.variants.extend([unattempted, other])
+    selected_key = BrowserReviewService.variant_key(selected)
+    unattempted_key = BrowserReviewService.variant_key(unattempted)
+    other_key = BrowserReviewService.variant_key(other)
+    window.evidence = {
+        selected_key: [
+            DatabaseEvidence("ClinVar", "timeout", "slow"),
+            DatabaseEvidence("OncoKB", "found", "ok"),
+        ],
+        other_key: [DatabaseEvidence("ClinVar", "error", "failed")],
+    }
+    monkeypatch.setattr(window, "_save_settings", lambda **kwargs: True)
+    monkeypatch.setattr(QThread, "start", lambda self: None)
+
+    window._start_database_search(
+        patient_ids={selected.patient_id}, retry_failed_only=True
+    )
+
+    worker = window.database_worker
+    assert {variant.patient_id for variant in worker.variants} == {
+        selected.patient_id
+    }
+    assert (selected_key, "ClinVar") not in worker.completed_sources
+    assert (selected_key, "OncoKB") in worker.completed_sources
+    assert (unattempted_key, "ClinVar") in worker.completed_sources
+    assert unattempted not in worker.variants
+    assert (other_key, "ClinVar") not in worker.completed_sources
+    assert all(
+        (BrowserReviewService.variant_key(variant), "OncoKB")
+        in worker.completed_sources
+        for variant in worker.report_variants
+        if variant.patient_id == selected.patient_id
+    )
+    window._set_ready()
+
+
+def test_pending_search_scope_can_be_limited_to_selected_patients(qt_app, tmp_path):
+    window = MainWindow()
+    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+    window.result = VariantProcessor().process(
+        fixture, "2026-09-15", tmp_path / "review.xlsx"
+    )
+    window.included_only_check.setChecked(False)
+    target_patient = window.result.variants[3].patient_id
+
+    pending = window._pending_variants_for_search(
+        ["ClinVar"], patient_ids={target_patient}
+    )
+
+    assert pending
+    assert {variant.patient_id for variant in pending} == {target_patient}
+
+
+def test_pending_source_counts_explains_resume_scope_per_database():
+    variants = ArcherTsvReader().read(Path(__file__).parent / "fixtures" / "sample_variants.tsv")[:2]
+    first_key = BrowserReviewService.variant_key(variants[0])
+    second_key = BrowserReviewService.variant_key(variants[1])
+    completed = {
+        (first_key, "OncoKB"),
+        (first_key, "ClinVar"),
+        (second_key, "ClinVar"),
+    }
+
+    counts = _pending_source_counts(
+        variants, ["OncoKB", "ClinVar", "MTBP"], completed
+    )
+
+    assert counts == {"OncoKB": 1, "ClinVar": 0, "MTBP": 2}
+
+
+def test_priority_action_starts_only_selected_patient_scope(qt_app, tmp_path, monkeypatch):
+    window = MainWindow()
+    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+    window.result = VariantProcessor().process(
+        fixture, "2026-09-15", tmp_path / "review.xlsx"
+    )
+    window._refresh_operations_cockpit()
+    first_patient = window.status_matrix.item(0, 0).text()
+    window.status_matrix.selectRow(0)
+    window.status_matrix.set_selected_patients([window.status_matrix.item(0, 0).text()])
+    qt_app.processEvents()
+    launches = []
+    monkeypatch.setattr(
+        window,
+        "_start_database_search",
+        lambda **kwargs: launches.append(kwargs),
+    )
+
+    window.priority_search_btn.click()
+
+    assert launches == [
+        {
+            "patient_ids": {first_patient},
+            "report_after_search": [first_patient],
+            "scope_label": "prioriterte pasienter",
+        }
+    ]
+
+
+def test_existing_all_patient_search_button_keeps_no_argument_signal(
+    qt_app, tmp_path, monkeypatch
+):
+    window = MainWindow()
+    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
+    window.result = VariantProcessor().process(
+        fixture, "2026-09-15", tmp_path / "review.xlsx"
+    )
+    for check in window.db_checks.values():
+        check.setChecked(False)
+    warnings = []
+    monkeypatch.setattr(window, "_save_settings", lambda **kwargs: True)
+    monkeypatch.setattr(
+        "archer_processor.gui.app.QMessageBox.warning",
+        lambda *args: warnings.append(args),
+    )
+    window.search_btn.setEnabled(True)
+
+    window.search_btn.click()
+
+    assert warnings[0][1] == "No sources"
+
+
+def test_priority_completion_starts_reports_only_after_workbook_is_saved(
+    qt_app, monkeypatch
+):
+    window = MainWindow()
+    window._active_search_report_patient_ids = ["26OUM00001", "26OUM00002"]
+    events = []
+    monkeypatch.setattr(window, "_refresh_operations_cockpit", lambda: None)
+    monkeypatch.setattr(
+        window,
+        "_queue_evidence_workbook_write",
+        lambda: events.append("queued"),
+    )
+    monkeypatch.setattr(window, "_set_ready", lambda: events.append("ready"))
+    monkeypatch.setattr(window, "_complete_run_progress", lambda title: None)
+    monkeypatch.setattr(window, "_log", lambda message: None)
+    monkeypatch.setattr(
+        window,
+        "_start_patient_reports",
+        lambda patient_ids: events.append(("reports", patient_ids)),
+        raising=False,
+    )
+
+    window._database_finished({})
+
+    assert events == ["queued", "ready"]
+    assert window._pending_report_after_workbook == [
+        "26OUM00001",
+        "26OUM00002",
+    ]
+
+
+def test_successful_background_save_releases_pending_patient_reports(
+    qt_app, tmp_path, monkeypatch
+):
+    window = MainWindow()
+    window._pending_report_after_workbook = ["26OUM00001"]
+    window._background_workbook_path = tmp_path / "review.xlsx"
+    reports = []
+    logs = []
+    window._workbook_write_started_at = time.monotonic() - 2
+    monkeypatch.setattr(window, "_log", logs.append)
+    monkeypatch.setattr(window, "_start_patient_reports", reports.append)
+
+    window._background_workbook_thread_finished()
+
+    assert reports == [["26OUM00001"]]
+    assert window._pending_report_after_workbook == []
+    assert "WORKBOOK WRITE | status=completed | duration_seconds=" in logs[0]
+
+
+def test_coalesced_workbook_save_does_not_release_reports_until_latest_snapshot(
+    qt_app, tmp_path, monkeypatch
+):
+    window = MainWindow()
+    window._pending_report_after_workbook = ["26OUM00001"]
+    window._background_workbook_path = tmp_path / "review.xlsx"
+    window._workbook_write_requested = True
+    events = []
+    monkeypatch.setattr(window, "_log", lambda message: None)
+    monkeypatch.setattr(
+        window, "_queue_evidence_workbook_write", lambda: events.append("queued")
+    )
+    monkeypatch.setattr(
+        window, "_start_patient_reports", lambda patient_ids: events.append("reports")
+    )
+
+    window._background_workbook_thread_finished()
+
+    assert events == ["queued"]
+    assert window._pending_report_after_workbook == ["26OUM00001"]
 
 
 def test_report_summary_uses_exact_norwegian_categories(qt_app, tmp_path):
@@ -364,27 +784,10 @@ def test_patient_report_worker_emits_progress_per_patient(qt_app, tmp_path):
     assert [outcome.patient_id for outcome in finished[0]] == ["P2", "P1"]
 
 
-def test_review_filters_and_search_progress_are_visible(qt_app, tmp_path):
+def test_no_excel_preview_and_search_progress_is_visible(qt_app, tmp_path):
     window = MainWindow()
-    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
-    window.result = VariantProcessor().process(
-        fixture, "2026-08-01", tmp_path / "review.xlsx"
-    )
-    window._refresh_variant_table()
-
-    assert not hasattr(window, "review_flag_note")
-    assert "Review flags" not in [
-        window.review_decision_combo.itemText(index)
-        for index in range(window.review_decision_combo.count())
-    ]
-
-    window.review_filter_edit.setText(window.result.variants[0].symbol)
-    assert "Showing" in window.review_count_label.text()
-    assert any(
-        not window.variant_table.isRowHidden(row)
-        for row in range(window.variant_table.rowCount())
-    )
-
+    assert not hasattr(window, "variant_table")
+    assert window.tabs.count() == 3
     window._update_run_progress(2, 5, "Patient 3 is running")
     assert not window.run_progress.isHidden()
     assert window.run_progress.bar.value() == 2
@@ -392,75 +795,20 @@ def test_review_filters_and_search_progress_are_visible(qt_app, tmp_path):
     assert window.run_progress.detail.text() == "Patient 3 is running"
 
 
-def test_variant_workspace_prioritises_toolbar_and_table(qt_app, tmp_path):
+def test_invalid_who_path_is_rejected_in_settings(qt_app, tmp_path, monkeypatch):
     window = MainWindow()
-    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
-    window.result = VariantProcessor().process(
-        fixture, "2026-08-12", tmp_path / "review.xlsx"
+    window.output_dir_edit.setText(str(tmp_path))
+    window.who_genes_edit.setText(str(tmp_path / "mangler.xlsx"))
+    assert not window._validate_who_path()
+    assert "finnes ikke" in window.who_path_status.text()
+    warnings = []
+    monkeypatch.setattr(
+        "archer_processor.gui.app.QMessageBox.warning",
+        lambda *args: warnings.append(args),
     )
-    for index, variant in enumerate(window.result.variants):
-        variant.decision = "included" if index < 3 else "excluded"
-    window._refresh_metrics()
-    window._refresh_variant_table()
-
-    assert window.variant_toolbar.objectName() == "VariantToolbar"
-    assert window.variant_counters.text() == "5 total · 3 included · 2 excluded"
-    assert window.variant_table.minimumHeight() >= 420
-    assert not hasattr(window, "total_card")
-
-
-def test_filtered_empty_state_explains_how_to_restore_rows(qt_app, tmp_path):
-    window = MainWindow()
-    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
-    window.result = VariantProcessor().process(
-        fixture, "2026-08-12", tmp_path / "review.xlsx"
-    )
-    window._refresh_variant_table()
-
-    window.review_filter_edit.setText("NO_SUCH_VARIANT")
-
-    assert not window.variant_empty_state.isHidden()
-    assert "Clear filters" in window.variant_empty_state.text()
-
-
-def test_variant_table_uses_distinct_strong_and_weak_germline_green(qt_app, tmp_path):
-    window = MainWindow()
-    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
-    window.result = VariantProcessor().process(
-        fixture, "2026-08-11", tmp_path / "review.xlsx"
-    )
-    window.result.variants[0].raw["Germ"] = 11
-    window.result.variants[0].af = 0.35
-    window.result.variants[0].artifact_status = ""
-    window.result.variants[0].matched_rules = []
-    window.result.variants[1].raw["Germ"] = 11
-    window.result.variants[1].af = 0.3499
-    window.result.variants[1].artifact_status = ""
-    window.result.variants[1].matched_rules = []
-
-    window._refresh_variant_table()
-
-    assert window.variant_table.item(0, 0).background().color().name() == "#cdedd8"
-    assert window.variant_table.item(1, 0).background().color().name() == "#e9f6ef"
-
-
-def test_variant_table_uses_distinct_asxl1_artifact_oranges(qt_app, tmp_path):
-    window = MainWindow()
-    fixture = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
-    window.result = VariantProcessor().process(
-        fixture, "2026-09-03", tmp_path / "review.xlsx"
-    )
-    strong = window.result.variants[1]
-    strong.af = 0.05
-    strong.matched_rules = ["asxl1_1934dup_artifact"]
-    light = window.result.variants[2]
-    light.af = 0.0525
-    light.matched_rules = ["asxl1_1934dup_artifact"]
-
-    window._refresh_variant_table()
-
-    assert window.variant_table.item(1, 0).background().color().name() == "#ffc000"
-    assert window.variant_table.item(2, 0).background().color().name() == "#f4b183"
+    assert window._save_settings(silent=True) is False
+    assert window.tabs.currentIndex() == 2
+    assert "finnes ikke" in warnings[0][2]
 
 
 def test_locked_workbook_shows_warning_without_raising(qt_app, tmp_path, monkeypatch):
@@ -488,6 +836,76 @@ def test_locked_workbook_shows_warning_without_raising(qt_app, tmp_path, monkeyp
     assert "Evidence remains available in the app" in window.log.toPlainText()
 
 
+def test_background_workbook_worker_owns_evidence_snapshot(tmp_path):
+    result = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-15",
+        tmp_path / "review.xlsx",
+    )
+    key = f"{result.variants[0].sample}|{result.variants[0].hgvsc}"
+    evidence = {key: [DatabaseEvidence("ClinVar", "found", "original")]}
+
+    worker = WorkbookWriteWorker(
+        result,
+        evidence,
+        hide_excluded=False,
+        database_skip_keys=set(),
+    )
+    evidence[key][0].summary = "mutated after queue"
+
+    assert worker.evidence[key][0].summary == "original"
+
+
+def test_background_workbook_queue_coalesces_while_writer_is_active(qt_app, tmp_path):
+    window = MainWindow()
+    window.result = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-15",
+        tmp_path / "review.xlsx",
+    )
+
+    class ActiveThread:
+        def isRunning(self):
+            return True
+
+    window.workbook_write_thread = ActiveThread()
+
+    window._queue_evidence_workbook_write()
+    window._queue_evidence_workbook_write()
+
+    assert window._workbook_write_requested is True
+
+
+def test_manual_workbook_rewrite_is_queued_behind_active_background_write(
+    qt_app, tmp_path, monkeypatch
+):
+    window = MainWindow()
+    window.result = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-15",
+        tmp_path / "review.xlsx",
+    )
+
+    class ActiveThread:
+        pass
+
+    window.workbook_write_thread = ActiveThread()
+    logs = []
+    monkeypatch.setattr(window, "_log", logs.append)
+    monkeypatch.setattr(
+        window,
+        "_try_write_evidence_workbook",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("manual rewrite must not overlap background write")
+        ),
+    )
+
+    window._rewrite_workbook()
+
+    assert window._workbook_write_requested is True
+    assert "queued" in logs[0].casefold()
+
+
 def test_completed_search_status_remains_visible(qt_app):
     window = MainWindow()
     window._update_run_progress(2, 2, "Completed patient")
@@ -509,6 +927,232 @@ def test_completed_search_reports_pending_workbook_save(qt_app):
 
     assert "still open in Excel" in window.run_progress.detail.text()
     assert window.status_badge.text() == "Search complete · save pending"
+
+
+def test_evidence_completion_summary_distinguishes_manual_and_unfinished():
+    evidence = {
+        "a": [DatabaseEvidence("ClinVar", "found")],
+        "b": [DatabaseEvidence("ClinVar", "not_found")],
+        "c": [DatabaseEvidence("OncoKB", "manual_review")],
+        "d": [DatabaseEvidence("MTBP", "timeout")],
+    }
+
+    assert _evidence_completion_summary(evidence) == (
+        "RUN SUMMARY | found_complete=1 | found_incomplete=0 | not_found=1 | "
+        "not_applicable=0 | manual_review=1 | deferred=0 | unfinished=1 | total=4"
+    )
+
+
+def test_evidence_completion_summary_counts_incomplete_found_and_not_applicable():
+    evidence = {
+        "a": [
+            DatabaseEvidence(
+                "MTBP",
+                "found",
+                raw={
+                    "analysis_id": "ARCHER-incomplete",
+                    "remote_report_cleanup": {"status": "retained_incomplete"},
+                },
+            )
+        ],
+        "b": [DatabaseEvidence("COSMIC", "not_applicable")],
+        "c": [DatabaseEvidence("MTBP", "deferred")],
+    }
+
+    assert _evidence_completion_summary(evidence) == (
+        "RUN SUMMARY | found_complete=0 | found_incomplete=1 | not_found=0 | "
+        "not_applicable=1 | manual_review=0 | deferred=1 | unfinished=0 | total=3"
+    )
+
+
+def test_browser_worker_pauses_mtbp_after_ambiguous_submission_and_defers_next_patient(
+    qt_app, tmp_path, monkeypatch
+):
+    base = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-15",
+        tmp_path / "review.xlsx",
+    ).variants[0]
+    variants = [
+        replace(base, sample="26OUM90001_VPM"),
+        replace(base, sample="26OUM90002_VPM"),
+    ]
+    worker = BrowserReviewWorker(
+        variants,
+        ["MTBP"],
+        tmp_path / "evidence",
+        replace(AppSettings(), browser_delay_seconds=0, browser_delay_max_seconds=0),
+    )
+    calls = []
+    finished = []
+
+    class Service:
+        def search_variants(self, batch, databases, *args, **kwargs):
+            calls.append(batch[0].patient_id)
+            variant = batch[0]
+            key = BrowserReviewService.variant_key(variant)
+            return {
+                key: [
+                    DatabaseEvidence(
+                        "MTBP",
+                        "submission_unknown",
+                        "Submission could not be reconciled.",
+                        raw={"analysis_id": "ARCHER-uncertain"},
+                    )
+                ]
+            }
+
+    monkeypatch.setattr(worker, "_build_service", lambda: Service())
+    worker.finished.connect(finished.append)
+
+    worker.run()
+
+    assert calls == [variants[0].patient_id]
+    result = finished[0]
+    first_key = BrowserReviewService.variant_key(variants[0])
+    second_key = BrowserReviewService.variant_key(variants[1])
+    assert result[first_key][0].status == "submission_unknown"
+    assert result[second_key][0].status == "deferred"
+
+
+def test_browser_worker_checkpoints_workbook_once_after_all_patient_lanes(
+    qt_app, tmp_path, monkeypatch
+):
+    variant = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-15",
+        tmp_path / "review.xlsx",
+    ).variants[0]
+    key = BrowserReviewService.variant_key(variant)
+    worker = BrowserReviewWorker(
+        [variant],
+        ["COSMIC", "OncoKB", "Franklin"],
+        tmp_path / "evidence",
+        replace(AppSettings(), browser_delay_seconds=0, browser_delay_max_seconds=0),
+    )
+    checkpoints = []
+    updates = []
+
+    class Service:
+        def search_variants(self, batch, databases, *args, checkpoint=None, **kwargs):
+            partial = {
+                key: [DatabaseEvidence(database, "found", "ok") for database in databases]
+            }
+            if checkpoint is not None:
+                checkpoint(partial)
+            return partial
+
+    monkeypatch.setattr(worker, "_build_service", lambda: Service())
+    worker.patient_finished.connect(checkpoints.append)
+    worker.evidence_updated.connect(updates.append)
+
+    worker.run()
+
+    assert len(checkpoints) == 1
+    qt_app.processEvents()
+    assert len(updates) == 2
+    assert {item.database for item in checkpoints[0][key]} == {
+        "COSMIC",
+        "OncoKB",
+        "Franklin",
+    }
+
+
+def test_browser_worker_pauses_mtbp_after_incomplete_retained_report(
+    qt_app, tmp_path, monkeypatch
+):
+    base = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-15",
+        tmp_path / "review.xlsx",
+    ).variants[0]
+    variants = [
+        replace(base, sample="26OUM91001_VPM"),
+        replace(base, sample="26OUM91002_VPM"),
+    ]
+    worker = BrowserReviewWorker(
+        variants,
+        ["MTBP"],
+        tmp_path / "evidence",
+        replace(AppSettings(), browser_delay_seconds=0, browser_delay_max_seconds=0),
+    )
+    calls = []
+    finished = []
+
+    class Service:
+        def search_variants(self, batch, databases, *args, **kwargs):
+            calls.append(batch[0].patient_id)
+            variant = batch[0]
+            return {
+                BrowserReviewService.variant_key(variant): [
+                    DatabaseEvidence(
+                        "MTBP",
+                        "found",
+                        "captured from incomplete patient report",
+                        raw={
+                            "analysis_id": "ARCHER-incomplete",
+                            "screenshots": [{"path": "saved.png", "url": ""}],
+                            "remote_report_cleanup": {
+                                "status": "retained_incomplete"
+                            },
+                        },
+                    )
+                ]
+            }
+
+    monkeypatch.setattr(worker, "_build_service", lambda: Service())
+    worker.finished.connect(finished.append)
+
+    worker.run()
+
+    assert calls == [variants[0].patient_id]
+    second_key = BrowserReviewService.variant_key(variants[1])
+    assert finished[0][second_key][0].status == "deferred"
+
+
+def test_browser_worker_pauses_oncokb_after_two_consecutive_patient_failures(
+    qt_app, tmp_path, monkeypatch
+):
+    base = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-15",
+        tmp_path / "review.xlsx",
+    ).variants[0]
+    variants = [
+        replace(base, sample=f"26OUM9200{index}_VPM") for index in range(1, 4)
+    ]
+    worker = BrowserReviewWorker(
+        variants,
+        ["OncoKB"],
+        tmp_path / "evidence",
+        replace(AppSettings(), browser_delay_seconds=0, browser_delay_max_seconds=0),
+    )
+    calls = []
+    finished = []
+
+    class Service:
+        def search_variants(self, batch, databases, *args, **kwargs):
+            calls.append(batch[0].patient_id)
+            variant = batch[0]
+            return {
+                BrowserReviewService.variant_key(variant): [
+                    DatabaseEvidence("OncoKB", "error", "render timeout")
+                ]
+            }
+
+    monkeypatch.setattr(worker, "_build_service", lambda: Service())
+    worker.finished.connect(finished.append)
+
+    worker.run()
+
+    assert calls == [
+        variants[0].patient_id,
+        variants[0].patient_id,
+        variants[1].patient_id,
+        variants[1].patient_id,
+    ]
+    third_key = BrowserReviewService.variant_key(variants[2])
+    assert finished[0][third_key][0].status == "deferred"
 
 
 def test_processed_workbook_can_resume_into_review_pages(qt_app, tmp_path, monkeypatch):
@@ -543,7 +1187,7 @@ def test_processed_workbook_can_resume_into_review_pages(qt_app, tmp_path, monke
     assert window.tabs.currentIndex() == 1
     assert window.status_badge.text() == "Workbook loaded"
     assert window.resume_edit.text() == str(output)
-    assert "Restored 5 variants" in window.resume_status.text()
+    assert "Gjenåpnet 5 varianter" in window.resume_status.text()
     assert not window.included_only_check.isChecked()
     assert window.settings.last_processed_workbook == str(output)
     assert saved == [True]
@@ -594,7 +1238,7 @@ def test_new_search_results_merge_with_restored_evidence(qt_app, tmp_path, monke
         tmp_path / "resume.xlsx",
     )
     window.evidence = {key: [DatabaseEvidence("ClinVar", "found", "Existing")]}
-    monkeypatch.setattr(window, "_auto_rewrite_workbook", lambda: None)
+    monkeypatch.setattr(window, "_queue_evidence_workbook_write", lambda: None)
 
     window._database_finished(
         {key: [DatabaseEvidence("OncoKB", "found", "New result")]}
@@ -634,7 +1278,7 @@ def test_browser_worker_passes_restored_evidence_to_provider_resume(
     assert received == [{key: [prior]}]
 
 
-def test_browser_worker_overlaps_mtbp_with_serial_other_provider_lane(
+def test_browser_worker_runs_clinvar_franklin_mtbp_and_fast_providers_in_parallel(
     qt_app, tmp_path, monkeypatch
 ):
     variant = VariantProcessor().process(
@@ -645,11 +1289,11 @@ def test_browser_worker_overlaps_mtbp_with_serial_other_provider_lane(
     key = f"{variant.sample}|{variant.hgvsc}"
     worker = BrowserReviewWorker(
         [variant],
-        ["Franklin", "MTBP", "COSMIC"],
+        ["ClinVar", "Franklin", "MTBP", "COSMIC"],
         tmp_path / "evidence",
         AppSettings(),
     )
-    rendezvous = threading.Barrier(2, timeout=2)
+    rendezvous = threading.Barrier(4, timeout=5)
     calls = []
     calls_lock = threading.Lock()
 
@@ -675,15 +1319,29 @@ def test_browser_worker_overlaps_mtbp_with_serial_other_provider_lane(
     )
 
     assert {tuple(databases) for _, databases in calls} == {
-        ("COSMIC", "Franklin"),
+        ("COSMIC",),
+        ("ClinVar",),
+        ("Franklin",),
         ("MTBP",),
     }
-    assert len({thread_name for thread_name, _ in calls}) == 2
+    assert len({thread_name for thread_name, _ in calls}) == 4
     assert {item.database for item in evidence[key]} == {
         "COSMIC",
+        "ClinVar",
         "Franklin",
         "MTBP",
     }
+
+
+def test_browser_database_lanes_give_clinvar_a_separate_lane():
+    assert _browser_database_lanes(
+        ["MTBP", "ClinVar", "Franklin", "OncoKB", "COSMIC"]
+    ) == [
+        ("fast databases", ["COSMIC", "OncoKB"]),
+        ("ClinVar", ["ClinVar"]),
+        ("Franklin", ["Franklin"]),
+        ("MTBP", ["MTBP"]),
+    ]
 
 
 def test_browser_worker_uses_direct_path_when_only_one_lane_is_selected(
@@ -717,6 +1375,63 @@ def test_browser_worker_uses_direct_path_when_only_one_lane_is_selected(
 
     assert observed == [(calling_thread, ["MTBP"])]
     assert evidence[key][0].database == "MTBP"
+
+
+def test_browser_worker_does_not_retry_identity_mismatch(qt_app, tmp_path):
+    variant = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-07",
+        tmp_path / "identity.xlsx",
+    ).variants[0]
+    key = f"{variant.sample}|{variant.hgvsc}"
+    worker = BrowserReviewWorker(
+        [variant], ["Franklin"], tmp_path / "evidence", AppSettings()
+    )
+    calls = []
+
+    class Service:
+        def search_variants(self, *args, **kwargs):
+            calls.append(1)
+            return {
+                key: [
+                    DatabaseEvidence(
+                        "Franklin", "identity_mismatch", "wrong variant"
+                    )
+                ]
+            }
+
+    worker._search_patient_with_retries(
+        Service(), variant.patient_id, [variant], 1, "Patient 1"
+    )
+
+    assert len(calls) == 1
+
+
+def test_browser_worker_caps_transient_failure_at_one_retry(
+    qt_app, tmp_path, monkeypatch
+):
+    variant = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-07",
+        tmp_path / "timeout.xlsx",
+    ).variants[0]
+    key = f"{variant.sample}|{variant.hgvsc}"
+    worker = BrowserReviewWorker(
+        [variant], ["Franklin"], tmp_path / "evidence", AppSettings()
+    )
+    calls = []
+
+    class Service:
+        def search_variants(self, *args, **kwargs):
+            calls.append(1)
+            return {key: [DatabaseEvidence("Franklin", "timeout", "slow site")]}
+
+    service = Service()
+    monkeypatch.setattr(worker, "_build_service", lambda: service)
+
+    worker.run()
+
+    assert len(calls) == 2
 
 
 def test_resume_keeps_unverified_and_partial_evidence_pending():
@@ -802,15 +1517,46 @@ def test_database_lookup_scope_can_be_limited_to_included_variants(qt_app, tmp_p
     )
 
     window.included_only_check.setChecked(True)
-    assert window._variants_for_search() == window.result.included
+    assert window._variants_for_search() == [
+        variant
+        for variant in window.result.included
+        if not is_automatic_database_skip(variant)
+    ]
 
     window.included_only_check.setChecked(False)
-    assert window._variants_for_search() == window.result.variants
+    expected = [
+        variant
+        for variant in window.result.variants
+        if not is_automatic_database_skip(variant)
+    ]
+    assert window._variants_for_search() == expected
 
-    skipped = window.result.variants[0]
+    skipped = expected[0]
     window.database_skip_keys = {f"{skipped.sample}|{skipped.hgvsc}"}
     assert skipped not in window._variants_for_search()
-    assert len(window._variants_for_search()) == window.result.total_count - 1
+    assert len(window._variants_for_search()) == len(expected) - 1
+
+
+def test_green_germline_rows_never_enter_database_search(qt_app, tmp_path):
+    window = MainWindow()
+    window.result = VariantProcessor().process(
+        Path(__file__).parent / "fixtures" / "sample_variants.tsv",
+        "2026-09-13",
+        tmp_path / "review.xlsx",
+    )
+    base = window.result.variants[3]
+    strong = replace(base, raw={**base.raw, "Germ": 11}, af=0.35)
+    weak = replace(
+        base,
+        source_row=base.source_row + 100,
+        hgvsc="NM_000546.6:c.525A>G",
+        raw={**base.raw, "HGVSc": "NM_000546.6:c.525A>G", "Germ": 11},
+        af=0.10,
+    )
+    window.result.variants = [strong, weak]
+    window.included_only_check.setChecked(False)
+
+    assert window._variants_for_search() == []
 
 
 def test_resume_scope_keeps_only_variants_with_unfinished_selected_sources(
@@ -823,7 +1569,14 @@ def test_resume_scope_keeps_only_variants_with_unfinished_selected_sources(
         tmp_path / "review.xlsx",
     )
     window.included_only_check.setChecked(False)
-    first, second = window.result.variants[:2]
+    first = window.result.variants[3]
+    second = replace(
+        first,
+        source_row=first.source_row + 100,
+        hgvsc="NM_000546.6:c.525A>G",
+        raw={**first.raw, "HGVSc": "NM_000546.6:c.525A>G"},
+    )
+    window.result.variants = [first, second]
     window.evidence = {
         f"{first.sample}|{first.hgvsc}": [
             DatabaseEvidence("ClinVar", "found", "complete"),
@@ -897,7 +1650,7 @@ def test_database_diagnostics_cover_token_and_manual_statuses(qt_app):
     assert diagnostics["ClinVar"].startswith("browser summary capture")
 
 
-def test_main_database_worker_overlaps_mtbp_with_other_browser_sources(
+def test_main_database_worker_runs_three_browser_lanes_in_parallel(
     qt_app, tmp_path, monkeypatch
 ):
     variant = VariantProcessor().process(
@@ -913,7 +1666,7 @@ def test_main_database_worker_overlaps_mtbp_with_other_browser_sources(
         tmp_path / "evidence",
         AppSettings(),
     )
-    rendezvous = threading.Barrier(2, timeout=2)
+    rendezvous = threading.Barrier(3, timeout=2)
     calls = []
     calls_lock = threading.Lock()
 
@@ -939,10 +1692,11 @@ def test_main_database_worker_overlaps_mtbp_with_other_browser_sources(
     )
 
     assert {tuple(databases) for _, databases in calls} == {
-        ("COSMIC", "Franklin"),
+        ("COSMIC",),
+        ("Franklin",),
         ("MTBP",),
     }
-    assert len({thread_name for thread_name, _ in calls}) == 2
+    assert len({thread_name for thread_name, _ in calls}) == 3
     assert {item.database for item in evidence[key]} == {
         "COSMIC",
         "Franklin",
@@ -1016,6 +1770,7 @@ def test_database_worker_completes_all_sources_before_next_patient(
             progress,
             completed_sources,
             checkpoint,
+            activity=None,
             prior_evidence=None,
         ):
             prior_snapshots.append(prior_evidence)
@@ -1069,18 +1824,11 @@ def test_database_worker_completes_all_sources_before_next_patient(
     worker.progress.connect(lambda current, total, detail: progress.append((current, total, detail)))
     worker.run()
 
-    assert events == [
-        (variants[0].patient_id, "OncoKB"),
-        (variants[0].patient_id, "COSMIC"),
-        (variants[0].patient_id, "Franklin"),
-        (variants[0].patient_id, "ClinVar"),
-        (variants[0].patient_id, "MTBP"),
-        (variants[1].patient_id, "OncoKB"),
-        (variants[1].patient_id, "COSMIC"),
-        (variants[1].patient_id, "Franklin"),
-        (variants[1].patient_id, "ClinVar"),
-        (variants[1].patient_id, "MTBP"),
-    ]
+    expected_databases = {"OncoKB", "COSMIC", "Franklin", "ClinVar", "MTBP"}
+    assert {patient for patient, _ in events[:5]} == {variants[0].patient_id}
+    assert {database for _, database in events[:5]} == expected_databases
+    assert {patient for patient, _ in events[5:]} == {variants[1].patient_id}
+    assert {database for _, database in events[5:]} == expected_databases
     assert len(finished) == 1
     assert all(len(items) == 5 for items in finished[0].values())
     assert progress[0][:2] == (0, 2)
@@ -1089,7 +1837,7 @@ def test_database_worker_completes_all_sources_before_next_patient(
     assert 10 <= sum(slept) <= 20
     assert all(delay <= 0.25 for delay in slept)
     assert report_events == []
-    assert prior_snapshots == [restored_evidence] * 4
+    assert prior_snapshots == [restored_evidence] * 8
 
 
 def test_stop_search_requests_safe_interruption_and_keeps_status(
@@ -1120,7 +1868,7 @@ def test_stop_search_requests_safe_interruption_and_keeps_status(
 
     assert thread.interrupted
     assert not worker.pause_control.pause_requested
-    assert window.stop_search_btn.text() == "Stopping…"
+    assert window.stop_search_btn.text() == "Stopper…"
     assert "already collected" in window.run_progress.detail.text()
 
     window._search_cancelled()
@@ -1146,12 +1894,12 @@ def test_pause_and_resume_keep_the_same_active_search_queue(qt_app, tmp_path):
     window._toggle_search_pause()
 
     assert worker.pause_control.pause_requested
-    assert window.pause_search_btn.text() == "Resume Search"
+    assert window.pause_search_btn.text() == "Fortsett"
     assert window.status_badge.text() == "Pausing"
     assert "current browser action" in window.run_progress.detail.text()
 
     window._toggle_search_pause()
 
     assert not worker.pause_control.pause_requested
-    assert window.pause_search_btn.text() == "Pause Search"
+    assert window.pause_search_btn.text() == "Pause"
     assert window.status_badge.text() == "Resuming"

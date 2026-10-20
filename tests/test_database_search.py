@@ -1,4 +1,5 @@
 from pathlib import Path
+from dataclasses import replace
 
 import requests
 
@@ -21,6 +22,21 @@ class FakeDatabaseSearchService(DatabaseSearchService):
             )
             for database in databases
         ]
+
+
+def test_green_germline_variant_is_blocked_at_database_service_boundary(monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    variant = replace(variant, raw={**variant.raw, "Germ": 11}, af=0.35)
+    service = DatabaseSearchService()
+    monkeypatch.setattr(
+        service,
+        "_search_clinvar",
+        lambda candidate: (_ for _ in ()).throw(
+            AssertionError("provider must not receive Germline variant")
+        ),
+    )
+
+    assert service.search_variant(variant, ["ClinVar"]) == []
 
 
 def test_parallel_search_returns_all_variants_and_progress():

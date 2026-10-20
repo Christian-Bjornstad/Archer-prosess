@@ -1,0 +1,1332 @@
+[
+  {
+    "title": "VPM Tolkning",
+    "lead": "Brukerguide fra første fil til ferdig pasientrapport",
+    "image": "01_oversikt",
+    "steps": [
+      [
+        "En guide du kan følge mens du arbeider",
+        "Les først arbeidsflyten på side 5. Følg deretter kapitlene i rekkefølge. Knappenavn er skrevet slik de står i appen, også når de er på engelsk."
+      ],
+      [
+        "Røde rammer og nummer",
+        "På hver side peker tallene i bildet til forklaringene under. Nummereringen begynner på 1 i hvert bilde."
+      ]
+    ],
+    "notes": [
+      "Utgave 1.0 · 18. oktober 2026 · Dokumentert mot den lokale versjonen i Archer-prosess.",
+      "Appbildene er tatt fra det faktiske PyQt-grensesnittet med syntetiske demonstrasjonsdata. Ingen eksterne databasesøk er kjørt for å lage guiden."
+    ],
+    "table": [],
+    "kind": "forside"
+  },
+  {
+    "title": "Slik finner du fram",
+    "lead": "Bruk innholdsfortegnelsen i PDF-en, eller klikk et kapittel i nettleserversjonen.",
+    "image": null,
+    "steps": [],
+    "notes": [],
+    "table": [],
+    "kind": "innhold"
+  },
+  {
+    "title": "Før du begynner",
+    "lead": "Ha dette klart før du lager en ny analyse.",
+    "image": null,
+    "steps": [
+      [
+        "Start riktig app",
+        "Åpne den etablerte snarveien til VPM Tolkning. Denne guiden gjelder appen i Archer-prosess. Den gjelder ikke det eldre programmet som startes av launch_gui.py i HTS-roten."
+      ],
+      [
+        "En Archer-eksport",
+        "Du trenger en tabulatordelt variantfil, vanligvis all_samples_filtered_variants.tsv. Appen støtter eksport fra Archer Analysis v6 og v7."
+      ],
+      [
+        "En mappe for denne kjøringen",
+        "Lag en egen mappe for hver analyse. Legg original TSV og review-arbeidsboken her. Det gjør det enklere å finne igjen rapporter, skjermbilder og logg."
+      ],
+      [
+        "Excel og Microsoft Edge",
+        "Excel brukes til å kontrollere arbeidsbøkene. Edge brukes av appen til oppslag. Maskinens oppsett må tillate lokal Edge-automatisering."
+      ],
+      [
+        "Tilgang til kildene",
+        "Ha tilgjengelige kontoer for kildene som krever innlogging. Kontroller organisasjonens tilgang og lisens før rapportene tas i bruk."
+      ]
+    ],
+    "notes": [
+      "Ved installert Python-oppsett kan appen startes med vpm-tolkning eller python -m archer_processor fra riktig miljø. Førstegangsinstallasjon og maskinoppsett håndteres separat fra den daglige arbeidsflyten.",
+      "Appen samler og organiserer tolkningsstøtte. Resultater og rapporter må gjennomgås av kvalifisert personell før klinisk bruk. Denne guiden forklarer programmet og gir ingen medisinsk klassifikasjonsanbefaling."
+    ],
+    "table": [],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Ordene appen bruker",
+    "lead": "Disse ordene går igjen i knappene, loggen og rapportene.",
+    "image": null,
+    "steps": [],
+    "notes": [],
+    "table": [
+      [
+        "TSV",
+        "En tekstfil der kolonnene er skilt med tabulator. Dette er utgangspunktet for en ny analyse."
+      ],
+      [
+        "Review workbook / review-arbeidsbok",
+        "Excel-filen appen lager fra TSV-en. Den er arbeidsgrunnlag for gjennomgang, X-valg og gjenopptak."
+      ],
+      [
+        "Variant",
+        "Én registrert genetisk endring. Gen, HGVSc, HGVSp og posisjon brukes for å identifisere endringen."
+      ],
+      [
+        "DIT / Patient",
+        "Pasientidentifikatoren appen grupperer rapportene etter. Ved prøvenavn med _VPM_ brukes delen foran _VPM_."
+      ],
+      [
+        "Evidence / evidens",
+        "Innhentet støtteinformasjon fra databasene, med status, tekst, lenker og eventuelle skjermbilder."
+      ],
+      [
+        "Included / Excluded / Flagged",
+        "Appens lokale behandlingsstatus for varianten: inkludert, ekskludert eller flagget for oppmerksomhet."
+      ],
+      [
+        "AF / Depth / AO",
+        "Variantandel / lesedybde / antall alternative observasjoner. AF vises som prosent i arbeidsboken."
+      ],
+      [
+        "HGVSc / HGVSp",
+        "Beskrivelse på kodende DNA-nivå / proteinnivå. Transkript og referansegenom må også passe."
+      ],
+      [
+        "X / VEDLEGG_APP",
+        "X betyr hopp over databasesøk. VEDLEGG_APP er mappen for appens pasientrapporter."
+      ]
+    ],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Hele arbeidsflyten - steg for steg",
+    "lead": "Følg denne rekkefølgen første gang. Sidetallene i innholdsfortegnelsen leder til detaljene.",
+    "image": null,
+    "steps": [
+      [
+        "1. Velg filer i Import",
+        "Velg original TSV, angi en ny Output XLSX og kontroller sekvenseringsdatoen. Kjør Validate TSV."
+      ],
+      [
+        "2. Lag review-arbeidsboken",
+        "Trykk Create Review Workbook. Vent til behandlingen er ferdig. Åpne deretter Excel-filen."
+      ],
+      [
+        "3. Kontroller og merk i Excel",
+        "Gå til With Artifacts. Undersøk variantene. Skriv X i Skip Database Search (X) for oppslag du vil utelate. Lagre og lukk Excel-filen."
+      ],
+      [
+        "4. Les de lagrede valgene inn i appen",
+        "Bruk Load Selection Workbook i Evidence når analysen allerede er åpen. Etter omstart bruker du Open Processed Workbook i Import."
+      ],
+      [
+        "5. Velg kilder og start søk",
+        "Kontroller kontoene og kildevalgene. Bruk Run Evidence Search for vanlig kjøring, eller Kjør valgte pasienter for en prioritert gruppe."
+      ],
+      [
+        "6. Kontroller og lag rapporter",
+        "Se etter Retry, Manual review og Save pending. Bruk Generer VEDLEGG_APP for manuell rapportgenerering. Åpne rapportene og kontroller innholdet."
+      ]
+    ],
+    "notes": [
+      "Prioritert kjøring lager rapporter for den valgte gruppen etter lagring av evidens. Vanlig søk og manuell rapportgenerering er egne handlinger."
+    ],
+    "table": [],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Bli kjent med hovedvinduet",
+    "lead": "Bildet viser startsiden. Bruk menyen til venstre for å bytte arbeidsområde.",
+    "image": "01_oversikt",
+    "steps": [
+      [
+        "1 · Navigasjonen",
+        "Import: velg filer, lag arbeidsbok og les logg. Evidence: velg kilder, kjør søk og lag rapporter. Settings: styr filer, innlogging, ventetider og artefaktregler."
+      ],
+      [
+        "2 · Statusfeltet",
+        "Viser om appen er klar, søker, er satt på pause eller trenger oppfølging. Feltet blir stående når du bytter side."
+      ],
+      [
+        "3 · Analysis input",
+        "Her angir du inndata, utdata og dato for en ny analyse."
+      ],
+      [
+        "4 · Open Processed Workbook",
+        "Bruk denne når du allerede har en arbeidsbok laget av appen. Du trenger ikke behandle TSV-en på nytt."
+      ]
+    ],
+    "notes": [
+      "Sidene kan være høyere enn vinduet. Rull ned inne i Import, Evidence eller Settings hvis en knapp ikke er synlig. En grå knapp er ikke tilgjengelig i nåværende tilstand."
+    ],
+    "table": [],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Import: velg fil, mål og dato",
+    "lead": "Åpne Import. Finn feltgruppen Analysis input.",
+    "image": "02_import",
+    "steps": [
+      [
+        "1 · Input TSV",
+        "Trykk Browse på raden Input TSV. Finn Archer-eksporten, marker filen og velg Åpne. Kontroller at riktig filsti står i feltet."
+      ],
+      [
+        "2 · Output XLSX",
+        "Trykk Browse på raden Output XLSX. Velg mappe og et tydelig filnavn, for eksempel VPM_review_DEMO.xlsx. Velg en egen utfil for kjøringen."
+      ],
+      [
+        "3 · Sekvenseringsdato",
+        "Kontroller datoen. Appen forsøker å hente den fra datert VPM-fil- eller mappenavn. Hvis den ikke finner en dato, må du velge riktig dato selv."
+      ],
+      [
+        "4 · Hide excluded rows in workbook",
+        "Avkrysning skjuler ekskluderte rader i Excel. Radene slettes ikke. La gjerne valget stå av ved første gjennomgang slik at du ser hele grunnlaget."
+      ]
+    ],
+    "notes": [
+      "Eksempelstiene i bildene er demonstrasjon. Velg dine egne filer og mapper. Kontroller dato på nytt etter at du har endret en filsti."
+    ],
+    "table": [],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Valider først, lag arbeidsboken etterpå",
+    "lead": "Knappene ligger under Analysis input. Bildet viser plasseringen før en arbeidsbok er klar.",
+    "image": "03_handlinger",
+    "steps": [
+      [
+        "1 · Validate TSV",
+        "Trykk for å kontrollere at filen kan leses og har nødvendige kolonner. Les resultatet i Activity. Ved feil: rett eksporten eller velg riktig fil før du fortsetter."
+      ],
+      [
+        "2 · Create Review Workbook",
+        "Trykk når fil og mål er valgt og kontrollert. Appen leser variantene, bruker lokale regler og skriver Excel-filen. Vent til arbeidet er ferdig."
+      ],
+      [
+        "3 · Åpne Excel-fil",
+        "Knappen blir tilgjengelig når en arbeidsbok er klar. Trykk for å åpne review-filen i maskinens regnearkprogram. Kontroller filnavnet i Excel."
+      ]
+    ],
+    "notes": [
+      "Valideringen krever Sample, Symbol, HGVSc, AF, Depth, AO, Type, Source, Genomic Location og Ref/Alt Allele. En vellykket kolonnekontroll bekrefter ikke at alle variantopplysninger er faglig korrekte.",
+      "Versjonen oppdages fra Clinical Significance (v6) eller ClinVar Significance (v7). Ukjent sett med overskrifter logges som unknown."
+    ],
+    "table": [],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Excel: hva review-filen inneholder",
+    "lead": "Review-arbeidsboken har to synlige arkfaner. Den viser varianttabellen som du gjennomgår manuelt.",
+    "image": null,
+    "steps": [],
+    "notes": [
+      "Ikke forvent en egen varianttabell inne i appvinduet. Den manuelle radgjennomgangen gjøres i Excel.",
+      "Navn som Database Selection, Vedlegg og andre arkfaner kan forekomme i eldre beskrivelser. Guiden her følger det dagens rapportkode faktisk oppretter. Se Excel-bildet på side 38."
+    ],
+    "table": [
+      [
+        "With Artifacts",
+        "Hele variantgrunnlaget, med kolonnen Skip Database Search (X). Bruk dette arket for gjennomgang og X-valg."
+      ],
+      [
+        "Artifacts Removed",
+        "En tilsvarende visning uten varianter som appen har markert som artefakter. Bruk arket som støttevisning; gjør X-valgene i With Artifacts."
+      ],
+      [
+        "_Evidence",
+        "Et teknisk lagringsark som er svært skjult. Appen bruker det til å lagre resultater for gjenopptak. Ikke rediger dette manuelt."
+      ],
+      [
+        "Frosne og skjulte kolonner",
+        "Enkelte identitetskolonner holdes synlige ved sideveis rulling. Noen tekniske kolonner er skjult. Bruk Excels funksjoner for å vise kolonner ved behov."
+      ],
+      [
+        "AF og sortering",
+        "AF er numerisk og vises som prosent. Variantene sorteres med høyest AF først innen hver pasient; manglende AF kommer sist."
+      ],
+      [
+        "Dato og Archer-versjon",
+        "v6 og v7 har forskjellig kolonneoppsett. v7 bruker tilpasset kolonnerekkefølge med Run date. I v6 legges kjøringsdato til etter kildekolonnene."
+      ]
+    ],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Excel: skriv X på riktig sted",
+    "lead": "X er et valg om å hoppe over et databasesøk. En tom celle er ikke alene en garanti for at varianten blir søkt.",
+    "image": null,
+    "steps": [],
+    "notes": [
+      "X-valg kobles til Sample + HGVSc. Ikke endre disse identitetsfeltene under vanlig gjennomgang. X sletter ikke varianten og er ikke et generelt valg for å fjerne den fra pasientrapporten.",
+      "Automatisk utelatte artefakt- og grønne Germ-rader kan fortsatt bli hoppet over selv om du fjerner X."
+    ],
+    "table": [
+      [
+        "1 · Åpne arket",
+        "Klikk With Artifacts nederst i Excel. Finn kolonnen Skip Database Search (X), normalt første kolonne."
+      ],
+      [
+        "2 · Finn riktig rad",
+        "Kontroller Sample, Symbol og HGVSc på samme rad. Flere varianter kan høre til samme pasient eller samme gen."
+      ],
+      [
+        "3 · Hopp over et oppslag",
+        "Klikk i Skip Database Search (X) på denne raden. Skriv X og trykk Enter. Ikke skriv X i gen- eller variantkolonnen."
+      ],
+      [
+        "4 · Tillat et manuelt utelatt oppslag igjen",
+        "Slett den manuelt satte X-en i samme celle, hvis oppslaget skal vurderes på nytt. Automatiske utelatelser gjelder fortsatt."
+      ],
+      [
+        "5 · Lagre og lukk",
+        "Trykk Ctrl+S i Excel. Lukk review-filen før appen skal skrive til den. Last deretter arbeidsboken/valgene inn i appen."
+      ],
+      [
+        "6 · Kontroller innlesingen",
+        "Se Reviewed workbook i Evidence. Hvis merker ikke passer til kjøringen, undersøk om du har valgt feil arbeidsbok."
+      ]
+    ],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Farger og automatiske utelatelser",
+    "lead": "Fargene beskriver appens regler. De er ikke en endelig medisinsk klassifikasjon.",
+    "image": null,
+    "steps": [],
+    "notes": [
+      "Appen utelater artefakter og de grønne Germ-kategoriene fra automatiske søk. Artefakter med ekskludert status og grønne Germ-varianter utelates også fra pasientrapportene. Kontroller alltid hele With Artifacts."
+    ],
+    "table": [
+      [
+        "Oransje artefaktrad",
+        "Treff på en konfigurert artefaktregel. Artefaktmarkering har forrang framfor grønn Germ-markering."
+      ],
+      [
+        "ASXL1 c.1934dup",
+        "Den konfigurerte standardregelen gjelder til og med 5,5 % AF. Til og med 5,0 % vises sterk oransje; over 5,0 % til og med 5,5 % lys oransje."
+      ],
+      [
+        "Sterk grønn",
+        "Germ > 10 og AF minst 35 %. Varianten utelates automatisk fra databasesøk og fra pasientrapportens tolkningsark."
+      ],
+      [
+        "Svak grønn",
+        "Germ > 10 og AF under 35 %. Samme automatiske utelatelse som for sterk grønn."
+      ],
+      [
+        "Germ > 10, men AF mangler",
+        "Ingen grønn farge kan beregnes. Appen gir en advarsel. Denne fargeregelen gir da ingen automatisk søkeutelatelse."
+      ],
+      [
+        "Tier I og Tier II",
+        "Disse tellingene endrer ikke radfargen i dagens kode. En ufarget rad betyr ikke at den er ferdig vurdert."
+      ],
+      [
+        "Søkeomfang i tillegg",
+        "Included variants only og manuelt satte X påvirker også søkeutvalget. Å slå av Included variants only opphever ikke de automatiske fargebaserte utelatelsene."
+      ]
+    ],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Evidence: les inn valgene fra Excel",
+    "lead": "Etter at du har lagret X-valgene, gå til Evidence og rull ned til Search scope and browser session.",
+    "image": "08_utvalg",
+    "steps": [
+      [
+        "1 · Included variants only",
+        "På: søk bare inkluderte varianter. Av: også øvrige lokale statuser kan inngå. Manuelle X og automatiske utelatelser gjelder i begge tilfeller."
+      ],
+      [
+        "2 · Load Selection Workbook",
+        "Trykk og velg review-filen du nettopp lagret. Appen leser X-valgene som passer til den innlastede analysen. Dette valget slår Included variants only av."
+      ],
+      [
+        "Kontroller Reviewed workbook",
+        "Les antallet X og eventuelle merker som ikke passet denne kjøringen. Oppsummeringen er en hjelp; automatiske utelatelser kan begrense det faktiske søkeutvalget ytterligere."
+      ]
+    ],
+    "notes": [
+      "Bruk Load Selection Workbook når riktig analyse allerede er i minnet. Bruk Open Processed Workbook på Import når du skal gjenopprette hele analysen etter omstart. Markering 3-5 gjelder innlogging og forklares på side 14."
+    ],
+    "table": [],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Evidence: velg hvilke kilder som skal brukes",
+    "lead": "Rull til Evidence sources. En hake betyr at kilden inngår i den valgte søkekjøringen.",
+    "image": "06_kilder",
+    "steps": [
+      [
+        "1 · MTBP",
+        "Lager en samlet kildebasert rapport for pasienten. Appen knytter relevante rapportutsnitt til variantene."
+      ],
+      [
+        "2 · Franklin",
+        "Henter klassifikasjonsvisninger, evidenskort, prediksjoner og populasjonsfrekvenser."
+      ],
+      [
+        "3 · ClinVar",
+        "Henter identitetskontrollert variantresultat og oversikt over germline-/somatisk klassifikasjon."
+      ],
+      [
+        "4 · OncoKB",
+        "Henter Variant Overview og Mutation Effect."
+      ],
+      [
+        "5 · COSMIC",
+        "Bruker COSMIC-ID fra Archer og henter blant annet Overview, Tissue distribution og Samples med lymphoid-filter."
+      ]
+    ],
+    "notes": [
+      "Ta bort haken for kilder du ikke skal bruke i denne kjøringen. Dette sletter ikke tidligere innhentet evidens. Kontroller kildene på nytt før gjenopptak eller kjøring av resten."
+    ],
+    "table": [],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Logg inn på en kilde",
+    "lead": "Bruk Search scope and browser session i Evidence. Kontodetaljer kan legges inn under Settings.",
+    "image": "08_utvalg",
+    "steps": [
+      [
+        "3 · Browser provider",
+        "Åpne rullegardinlisten og velg kilden du vil logge inn på, for eksempel Franklin. Listen velger kilde for Sign In; den erstatter ikke hakene i Evidence sources."
+      ],
+      [
+        "4 · Sign In",
+        "Trykk for å åpne innloggingen. Appen bruker lagrede kontodetaljer når mulig, eller åpner Edge for manuell innlogging. Fullfør eventuelle bekreftelser som nettstedet ber om."
+      ],
+      [
+        "Gjenta ved behov",
+        "Kontroller innlogging for hver kilde du skal bruke. ClinVar er oppført som offentlig nettside og krever ikke e-post/passord i Settings."
+      ],
+      [
+        "5 · Run Browser Sources",
+        "En alternativ start for valgte nettleserkilder. Velg vanligvis hovedknappen Run Evidence Search når du følger standardflyten."
+      ]
+    ],
+    "notes": [
+      "Appen bruker egne Edge-profiler for kildene. En innlogging i din vanlige Edge-profil er derfor ikke nødvendigvis tilgjengelig for appen. Innloggingsvinduer vises selv om automatiserte vinduer normalt er minimert.",
+      "Markering 1-2 gjelder søkeutvalget og er forklart på side 12."
+    ],
+    "table": [],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Start en vanlig søkekjøring",
+    "lead": "Lagre og lukk review-filen i Excel først. Kontroller at riktig analyse, X-utvalg og kilder er lastet.",
+    "image": "07_kjoer",
+    "steps": [
+      [
+        "1 · Run Evidence Search",
+        "Trykk for å starte uferdige oppslag for søkeutvalget og de avkryssede kildene. Etter gjenoppretting kan knappen hete Resume Incomplete Search."
+      ],
+      [
+        "Vent og følg status",
+        "Appen arbeider pasient for pasient. Ulike kilder kan arbeide parallelt for samme pasient. Derfor kan flere kildefelt vise aktivitet samtidig."
+      ],
+      [
+        "2 · Pause Search",
+        "Bruk for en midlertidig pause. Den aktive handlingen må nå et trygt kontrollpunkt før status endres til Paused."
+      ],
+      [
+        "3 · Stop Search",
+        "Bruk når du vil avslutte kjøringen. Fullførte resultater beholdes. Vent til appen bekrefter at stoppingen er ferdig."
+      ]
+    ],
+    "notes": [
+      "Fullførte variant-/kildeoppslag gjenbrukes. Et nytt trykk er derfor ikke en tvungen oppfrisking av alle gamle treff. Vanlig søk følges av manuell rapportgenerering når du er klar."
+    ],
+    "table": [],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Følg det som skjer underveis",
+    "lead": "Statusfeltet og fremdriftskortet viser hvor langt kjøringen har kommet.",
+    "image": "12_aktiv",
+    "steps": [
+      [
+        "1 · Tilstand",
+        "Running betyr at kjøringen arbeider. Pausing og Stopping betyr at en forespørsel er mottatt, men ennå ikke fullført."
+      ],
+      [
+        "2 · Pasientteller",
+        "Viser aktuell fremdrift, for eksempel 2 / 3 patients. Dette er ikke en prosentangivelse for faglig ferdigstilt vurdering."
+      ],
+      [
+        "3 · Pause",
+        "En snarvei til pausefunksjonen. Vent på Paused før du regner kjøringen som satt på pause."
+      ],
+      [
+        "4 · Stop",
+        "En snarvei til stoppfunksjonen. La appen håndtere avslutningen før du lukker den."
+      ],
+      [
+        "5 · Fremdriftskort",
+        "Les detaljlinjen for pasient, kilde og handling. Lange nettstedsoperasjoner kan gjøre at telleren står stille en stund."
+      ]
+    ],
+    "notes": [
+      "Skjermbildet viser en iscenesatt demonstrasjon av en aktiv tilstand. Det er ikke kjørt et faktisk databaseoppslag for denne guiden. Bruk Activity-loggen på Import for nærmere detaljer."
+    ],
+    "table": [],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Kjør en viktig pasient eller gruppe først",
+    "lead": "Rull til Patient progress i Evidence. Du kan prioritere én eller flere pasienter.",
+    "image": "09_prioritet",
+    "steps": [
+      [
+        "1 · Marker pasientrader",
+        "Klikk en rad. Hold Ctrl inne og klikk flere rader for spredte valg, eller bruk Shift for en sammenhengende gruppe. Raden representerer en pasient, ikke bare én variant."
+      ],
+      [
+        "2 · Kontroller antallet",
+        "Les teksten med antall valgte pasienter før du starter. Sjekk at riktig DIT er markert."
+      ],
+      [
+        "3 · Kjør valgte pasienter",
+        "Kjører uferdige oppslag for den markerte gruppen. Deretter lagres evidensarbeidsboken og rapportene for gruppen genereres."
+      ],
+      [
+        "4 · Kjør resterende",
+        "Bruk når den prioriterte gruppen er håndtert. Appen bygger en kø med pasienter som fortsatt har uferdige oppslag."
+      ],
+      [
+        "5 · Prøv feilede på nytt",
+        "Aktiveres når markerte pasienter har oppslag som kan prøves igjen. Antallet i knappen viser relevante variant-/kildepar."
+      ]
+    ],
+    "notes": [
+      "Valg i tabellen brukes også av Generer VEDLEGG_APP. Kontroller derfor radmarkeringen før både søk og rapportgenerering."
+    ],
+    "table": [],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Les pasienttabellen riktig",
+    "lead": "Én rad er én pasient. Én kildecelle oppsummerer variantene for denne pasienten.",
+    "image": "10_status",
+    "steps": [
+      [
+        "1 · Kildestatus og rapportstatus",
+        "DEMO-001 viser fullførte kilder og lagret rapport. DEMO-002 har Retry hos Franklin og Save pending for rapporten. Det er to forskjellige oppfølgingsbehov."
+      ],
+      [
+        "Blandede resultater",
+        "En celle kan vise for eksempel Complete (1/2). Dette beskriver hvor mange varianter som har den viste tilstanden. Hold pekeren over cellen for detaljer."
+      ],
+      [
+        "2 · Prøv feilede på nytt",
+        "Marker pasienten, kontroller valgte kilder og trykk. Appen prøver relevante feil/avbrudd på nytt, mens fullført arbeid beholdes."
+      ]
+    ],
+    "notes": [
+      "Complete betyr at appens oppslag er fullført. Not found betyr at kilden ikke ga et treff. Manual review betyr at resultatet trenger manuell kontroll. Ingen av disse er alene en medisinsk konklusjon.",
+      "Tall og status i dette bildet er syntetiske. Tabellen kan vise Skipped for automatisk eller manuelt utelatte varianter."
+    ],
+    "table": [],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Alle statusene - hva gjør du nå?",
+    "lead": "Bruk denne siden som oppslagsverk under en kjøring.",
+    "image": null,
+    "steps": [],
+    "notes": [],
+    "table": [
+      [
+        "Ready / Loading workbook",
+        "Appen er klar / leser en eksisterende arbeidsbok. Vent på at innlesingen blir ferdig før du starter søk."
+      ],
+      [
+        "Queued / Running",
+        "Oppslaget venter / arbeider. Følg status og logg. En langsom kilde kan bruke lengre tid enn de andre."
+      ],
+      [
+        "Pausing / Paused",
+        "Pause er bestilt / pausen er aktiv. Fortsett med Resume Search når du er klar."
+      ],
+      [
+        "Stopping / Interrupted",
+        "Stopp er bestilt / kjøringen er avbrutt. Gjenoppta uferdig arbeid når årsaken er håndtert."
+      ],
+      [
+        "Complete / Not found",
+        "Oppslag fullført / ingen treff funnet. Kontroller identitet og dokumentasjon; fravær av treff er ikke et bevis på variantens betydning."
+      ],
+      [
+        "Retry / Complete · retry available",
+        "Ett eller flere oppslag trenger nytt forsøk. Kontroller årsaken, marker pasienten og bruk Prøv feilede på nytt eller gjenoppta uferdig søk."
+      ],
+      [
+        "Manual review / Skipped",
+        "Manuell kontroll kreves / varianten er hoppet over. Undersøk detaljene og søkeutvalget."
+      ],
+      [
+        "Report saved / Save pending",
+        "Rapporten er lagret / lagringen venter. Lukk låst fil i Excel og bruk Retry Pending Saves når knappen vises."
+      ],
+      [
+        "Not ready / Report save pending",
+        "Ingen ferdig rapport registrert / lagring må følges opp. Se om meldingen gjelder review-arbeidsboken eller pasientrapporten."
+      ]
+    ],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Pause, stopp og gjenopptak",
+    "lead": "Bruk appens kontroller når du må avbryte arbeidet.",
+    "image": "13_avbrutt",
+    "steps": [
+      [
+        "Pause i samme økt",
+        "Trykk Pause Search, vent på Paused og bruk Resume Search for å fortsette samme kø. Ikke start en ny analyse mens du venter."
+      ],
+      [
+        "Stopp en kjøring",
+        "Trykk Stop Search og vent til status er endret. Ferdige resultater beholdes, og review-filen forsøkes oppdatert når den kan skrives."
+      ],
+      [
+        "1 · Interrupted",
+        "Dette viser at kjøringen er avbrutt og at det finnes en gjenopptaksvei. Undersøk Activity for årsaken."
+      ],
+      [
+        "2 · Resume incomplete search",
+        "Bruk hovedknappen i Run queue, som kan hete Resume Incomplete Search. Statusfeltet kan også vise en tilsvarende gjenopptaksknapp."
+      ],
+      [
+        "Etter omstart",
+        "Gå til Import og velg Open Processed Workbook. Velg den lagrede review-filen, kontroller kilder/utvalg og start uferdig søk."
+      ]
+    ],
+    "notes": [
+      "Feil, tidsavbrudd, ufullstendige skjermbilder og oppslag som trenger ny identitetskontroll kan bli forsøkt igjen. Oppslag som er registrert som fullførte, gjentas ikke automatisk.",
+      "Bruk hovedknappen i Run queue som dokumentert vei til gjenopptak. Det er denne som kobles til selve søkestarten i dagens app."
+    ],
+    "table": [],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Lagre evidens og lag pasientrapporter",
+    "lead": "Rull helt ned til Reports i Evidence.",
+    "image": "11_rapporter",
+    "steps": [
+      [
+        "1 · Update Review Workbook",
+        "Skriver den innhentede evidensen til review-filen. Bruk etter behov, særlig når en tidligere oppdatering ble hindret av at filen var åpen i Excel."
+      ],
+      [
+        "2 · Generer VEDLEGG_APP",
+        "Lager én rapport per valgt pasient. Hvis ingen pasientrader er valgt, gjelder handlingen alle pasientene. Kontroller markeringene før du trykker."
+      ],
+      [
+        "3 · Retry Pending Saves",
+        "Vises ved låste pasientrapporter. Lukk de aktuelle filene i Excel og trykk for å forsøke lagringen igjen. Databasesøkene gjentas ikke."
+      ],
+      [
+        "Les resultatmeldingen",
+        "Appen oppsummerer opprettede, oppdaterte, låste og feilede rapporter. Åpne utmappen og kontroller at de forventede filene finnes."
+      ]
+    ],
+    "notes": [
+      "Rapportene ligger i VEDLEGG_APP ved siden av review-filen. Navnet er <DIT>_VPM_Tolkning_APP.xlsx, for eksempel DEMO-001_VPM_Tolkning_APP.xlsx.",
+      "En rapport kan genereres med manglende evidens. Kontroller innhold og statuser før rapporten brukes."
+    ],
+    "table": [],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Åpne og les pasientrapporten",
+    "lead": "Åpne VEDLEGG_APP i Filutforsker, og dobbeltklikk filen for riktig DIT.",
+    "image": null,
+    "steps": [],
+    "notes": [
+      "Kommentar, HSMD-linje og pasientkommentar er laget for å bevares når rapporten genereres på nytt. Lagre og lukk rapporten først. Andre manuelle endringer er ikke lovet bevart; ta en kopi før større redigeringer. Se markerte Excel-bilder på side 39-41."
+    ],
+    "table": [
+      [
+        "1 · Oversikt",
+        "Start her. Kontroller DIT/pasientnummer og sekvenseringsdato. Tabellen viser gen, HGVSc, HGVSp, kort evidens, kommentar, kildekolonner, gnomAD AF og WHO drivergen."
+      ],
+      [
+        "2 · Kommentar om pasienten",
+        "Det lys oransje feltet D3:L4 er til pasientkommentar. Skriv i feltets øverste venstre celle i Excel."
+      ],
+      [
+        "3 · Kommentar om varianten",
+        "Bruk Kommentar-kolonnen på variantens rad. Kontroller identiteten før du skriver."
+      ],
+      [
+        "4 · HSMD -",
+        "Den manuelle HSMD-linjen ligger i Kort evidens. Ved redigering av en celle med flere linjer kan du bruke F2 og eventuelt Alt+Enter for linjeskift."
+      ],
+      [
+        "5 · Kildelenker og WHO",
+        "Klikk lenker for kontroll i kilde når de finnes. X i WHO drivergen er en markering mot valgt genliste og er noe annet enn X for å hoppe over søk."
+      ],
+      [
+        "6 · MTBP og variantfaner",
+        "MTBP-fanen viser samlet rapportbilde. De øvrige fanene viser variantens korte evidens og tilhørende skjermbilder."
+      ]
+    ],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Variantfaner og manglende bilder",
+    "lead": "Klikk fanen med gen/variant nederst i pasientrapporten.",
+    "image": null,
+    "steps": [],
+    "notes": [
+      "Rapporten bygger på de variantene som ligger i analysen. En manuelt satt X er et søkevalg og kan derfor gi en variant med manglende evidens i rapporten. Artefakter og grønne Germ-kategorier har egne utelatelsesregler."
+    ],
+    "table": [
+      [
+        "Navn på fanen",
+        "Et unikt gen bruker vanligvis gensymbolet. Ved flere varianter i samme gen legges proteinendring til, eller cDNA-endring når proteinopplysning mangler."
+      ],
+      [
+        "Identitet øverst",
+        "Kontroller gen og HGVSc i overskriften. Linjen under kan vise HGVSp, genomisk posisjon, AF, Depth og konsekvens."
+      ],
+      [
+        "Kort evidensoversikt og kildelenker",
+        "Les kilde for kilde. Åpne kildehenvisninger ved behov for å kontrollere oppslag og kontekst. MTBP har ikke personlig rapportlenke i filen."
+      ],
+      [
+        "Skjermbilder",
+        "Bildene presenteres i rekkefølgen MTBP, Franklin, ClinVar, OncoKB og COSMIC. Bla nedover i arket for å se alle bilder og bildetekster."
+      ],
+      [
+        "Skjermbilde ikke tilgjengelig",
+        "Dette er en tydelig mangelmelding. Undersøk om kilden var valgt, om oppslaget fant treff, eller om bildet må innhentes på nytt."
+      ],
+      [
+        "Kontroll av riktig variant",
+        "Sammenhold gen, transkript, cDNA/protein og referansegenom med review-filen. Ikke godkjenn et bilde bare fordi det viser riktig gen."
+      ]
+    ],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Kildene: hva MTBP og Franklin gjør",
+    "lead": "Dette beskriver appens innhenting. Nettstedene kan endre utseende og kreve ny innlogging.",
+    "image": null,
+    "steps": [],
+    "notes": [
+      "Kontroller MTBP cancer type i Settings før kjøring. Hvis et nettsted stopper på innlogging eller interaktiv bekreftelse, håndter dette og bruk appens gjenopptak/nytt forsøk. Ikke lagre en innloggingsside som variantdokumentasjon."
+    ],
+    "table": [
+      [
+        "MTBP · ett pasientsett",
+        "Appen sender en samlet variantgruppe med appgenererte pseudonyme identifikatorer. Den lager ikke et nytt selvstendig pasientrapportoppslag for hvert bildeutsnitt."
+      ],
+      [
+        "MTBP · identitet og bilder",
+        "Transkriptkvalifisert HGVSc prøves først. Genomisk GRCh37-format brukes som reserve for avviste varianter. Fullrapport og lokale variantutsnitt lagres."
+      ],
+      [
+        "MTBP · opprydding",
+        "Appgenererte ARCHER-rapporter ryddes fra portalen som del av arbeidsflyten. Lokale bilder og auditdata er derfor viktige. Manuelt navngitte rapporter skal ikke inngå i denne oppryddingen."
+      ],
+      [
+        "Franklin · søk",
+        "Appen bruker hg19 og Somatic, prøver HGVSc først og kontrollerer variantidentiteten. Genomisk notation kan brukes som reserve."
+      ],
+      [
+        "Franklin · dokumentasjon",
+        "Innhenter klassifikasjonsoversikter for ACMG/Oncology, navngitte evidenskort, Predictions og Population Frequencies."
+      ],
+      [
+        "Franklin · ufullstendig innhenting",
+        "Blankt, avkuttet eller ufullstendig nødvendig bilde skal gi behov for nytt forsøk. Kontroller at de forventede delene faktisk finnes i variantfanen."
+      ]
+    ],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Kildene: ClinVar, OncoKB og COSMIC",
+    "lead": "Bruk tabellen når du kontrollerer at rapporten har forventet dokumentasjon.",
+    "image": null,
+    "steps": [],
+    "notes": [
+      "Ingen treff, identitetskonflikt og manglende tilgang må vurderes som ulike hendelser. Se logg og kildecelle før du velger neste handling. Guiden lover ikke at en ekstern kilde alltid er tilgjengelig."
+    ],
+    "table": [
+      [
+        "ClinVar · søk og verifikasjon",
+        "Appen prøver gen + protein, deretter cDNA, deretter gen + GRCh37-posisjon. Det åpnede resultatet må passe med gen, posisjon og cDNA eller protein."
+      ],
+      [
+        "ClinVar · bilde",
+        "Fokusert varianttittel og oppsummering av germline-/somatisk klassifikasjon. Eldre resultater som ikke er verifisert, kan bli lagt i kø for ny kontroll."
+      ],
+      [
+        "OncoKB · bilde",
+        "Variant Overview og Mutation Effect. Appen forsøker å fjerne cookieoverlegget før bildet tas."
+      ],
+      [
+        "COSMIC · variantvalg",
+        "Appen bruker COSM/COSV-ID-ene fra Archer-feltet COSMICID i kildeorden. Flere kandidater eller identitetskonflikt skal gi stopp for automatisk godkjenning av treffet."
+      ],
+      [
+        "COSMIC · genom og bilde",
+        "Appen velger GRCh37 og kontrollerer aktivt genomvalg. Bildene omfatter Overview, Tissue distribution og Samples filtrert til lymphoid."
+      ],
+      [
+        "COSMIC · manglende ID",
+        "Pasientoversikten kan vise Ikke ID i Archer. Det er ikke det samme som at varianten er bevist fraværende i COSMIC."
+      ]
+    ],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Settings: lokale filer og WHO-liste",
+    "lead": "Velg Settings og finn Local files øverst.",
+    "image": "14_lokale_filer",
+    "steps": [
+      [
+        "1 · Default report folder",
+        "Trykk Browse og velg mappen som skal foreslås ved filvalg. Kontroller fortsatt konkret Output XLSX ved hver ny analyse."
+      ],
+      [
+        "2 · WHO-drivergener",
+        "La feltet stå tomt for den innebygde genlisten. Vil du bruke en lokal liste, trykk Velg fil og velg en støttet .xlsx-, .csv- eller .txt-fil."
+      ],
+      [
+        "3 · Kontrollmelding",
+        "Les meldingen under feltet. En ugyldig filsti eller liste blokkerer lagring av innstillingene og må rettes."
+      ],
+      [
+        "Lagre endringen",
+        "Rull ned til Save Configuration og trykk. Ved ny rapportgenerering brukes den valgte WHO-listen til markering av WHO drivergen."
+      ]
+    ],
+    "notes": [
+      "WHO-feltet er en lokal genliste for markering i rapporten. Dette valget er ingen ny database som automatisk kjøres sammen med Evidence sources."
+    ],
+    "table": [],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Settings: e-post, passord og nettlesertilgang",
+    "lead": "Browser access har én rad per kilde. Bildet viser tomme demofelt.",
+    "image": "15_konto",
+    "steps": [
+      [
+        "1 · Account email",
+        "Fyll inn e-post for riktig kilde. Feltet som er markert 1, er COSMIC-raden. OncoKB-raden har tilsvarende felt under."
+      ],
+      [
+        "2 · Password",
+        "Skriv passordet på samme rad som e-posten. Tegnene skjules i feltet. Kontroller at du ikke forskyver kontoopplysninger mellom kildene."
+      ],
+      [
+        "3 · Franklin",
+        "Fyll inn Franklin-kontoen på Franklin-raden hvis den skal brukes. Bruk Sign In i Evidence for å kontrollere tilgangen."
+      ],
+      [
+        "4 · MTBP",
+        "Fyll inn MTBP-kontoen på MTBP-raden. ClinVar-raden viser Not required for kontoopplysninger."
+      ],
+      [
+        "Save Configuration",
+        "Rull ned og lagre. Appen forsøker å lagre passord gjennom Windows Credential Manager; de vanlige innstillingene ligger lokalt i config.json."
+      ]
+    ],
+    "notes": [
+      "Ikke del config.json, nettleserprofiler eller skjermbilder av utfylte kontofelt ukritisk. Nettleserprofiler kan inneholde innloggede økter. Denne guiden bruker ingen virkelige kontoopplysninger."
+    ],
+    "table": [],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Settings: ventetid og minimerte vinduer",
+    "lead": "Search pacing styrer tempo og synlighet for nettlesersøk.",
+    "image": "16_tempo",
+    "steps": [
+      [
+        "1 · MTBP cancer type",
+        "Kontroller nøyaktig krefttype som skal brukes i MTBP. Standardverdien er Blood."
+      ],
+      [
+        "2 og 3 · Minimum og Maximum",
+        "Tilfeldig pause mellom varianter på samme nettsted. Standard er 3-8 sekunder. Maksimum kan ikke være lavere enn minimum ved lagring."
+      ],
+      [
+        "4 · MTBP report timeout",
+        "Hvor lenge appen kan vente på MTBP-rapporten. Standard er 20 minutter; feltet tillater 5-60 minutter."
+      ],
+      [
+        "5 · Keep automated Edge windows minimized",
+        "På: automatiserte Edge-vinduer starter minimert. Du kan bruke andre programmer mens søket arbeider. Sign In-vinduer vises fortsatt."
+      ],
+      [
+        "Mellom kilder",
+        "Appen bruker fast 3 sekunder ved overgang mellom kilder. Rull ned og trykk Save Configuration etter endring."
+      ]
+    ],
+    "notes": [
+      "Ikke bruk antall sekunder som forventet total kjøretid. Nettstedets responstid, antall varianter, rapportventing og eventuelle nye forsøk kommer i tillegg."
+    ],
+    "table": [],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Settings: se og endre artefaktreglene",
+    "lead": "Rull ned til Artifact rules. Endringer påvirker lokal filtrering ved behandling av varianter.",
+    "image": "17_artefakter",
+    "steps": [
+      [
+        "1 · Regeltabellen",
+        "Se Gene, HGVSc, Artifact through AF og Reason. Rull inne i tabellen for å se resten. Dobbeltklikk en celle for å redigere."
+      ],
+      [
+        "2 · Add Artifact",
+        "Legger til en tom rad. Fyll inn HGVSc og øvrige relevante felt. En rad uten HGVSc tas ikke med når innstillingene leses fra tabellen."
+      ],
+      [
+        "3 · Remove Selected",
+        "Fjerner rader som har markerte celler. Kontroller utvalget før du trykker."
+      ],
+      [
+        "4 · Reset Defaults",
+        "Bytter tabellinnholdet tilbake til appens standardliste. Dette kan erstatte lokale tilpasninger i tabellen."
+      ],
+      [
+        "5 · Save Configuration",
+        "Lagrer innstillingene. Ikke regn med at en arbeidsbok som allerede er laget, automatisk bygges om bare fordi du endrer reglene."
+      ]
+    ],
+    "notes": [
+      "Dokumenter lokale regelendringer. Skal review-filen beregnes på nytt fra TSV, velg en ny utfil slik at du kan sammenligne med forrige resultat."
+    ],
+    "table": [],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Artefaktregel: forstå hvert felt",
+    "lead": "Bildet viser et utsnitt av den faktiske regeltabellen.",
+    "image": "18_artefakt_rad",
+    "steps": [
+      [
+        "Gene",
+        "Gensymbol, for eksempel ASXL1. Kontroller at det hører sammen med varianten."
+      ],
+      [
+        "HGVSc",
+        "Transkript og cDNA-endring identifiserer regelen. Ved sammenligning ignorerer appen transkriptets versjonssuffiks, men beholder transkriptaksessjon og eksakt cDNA-endring."
+      ],
+      [
+        "Artifact through AF",
+        "En øvre, inkluderende AF-grense. Skriv eksplisitt prosent, som 5.5%, når det er meningen. Tomt felt betyr at regelen ikke har en slik øvre AF-grense."
+      ],
+      [
+        "Reason",
+        "Skriv en forståelig begrunnelse for hvorfor varianten er lagt i artefaktlisten."
+      ],
+      [
+        "Kontroller før bruk",
+        "Kontroller transkript, endring og grense mot den lokale prosedyren. Lagre og undersøk resultatet ved ny behandling av et egnet kontrollgrunnlag."
+      ]
+    ],
+    "notes": [
+      "Teksten over tabellen viser et eldre antall standardoppføringer. Bruk innholdet i den faktiske tabellen som grunnlag; ikke bruk dette hjelpetallet som kontroll på at hele listen er lest."
+    ],
+    "table": [],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Åpne en tidligere analyse",
+    "lead": "Du kan fortsette uten å lage review-filen på nytt.",
+    "image": "05_gjenopprett",
+    "steps": [
+      [
+        "1 · Restore analysis",
+        "Hvis siste analyse tilbys, kontroller filnavnet og trykk for å laste den. At panelet vises, betyr ikke at data eller nettsider allerede er åpnet."
+      ],
+      [
+        "2 · Dismiss",
+        "Skjuler tilbudet om siste analyse. Bruk dette hvis du skal arbeide med en annen fil."
+      ],
+      [
+        "3 · Open Processed Workbook",
+        "Velg selv hvilken eksisterende review-fil som skal åpnes. Vent på innlesingen. Appen gjenoppretter varianter, X-valg og lagret evidens."
+      ],
+      [
+        "Kontroller før videre søk",
+        "Etter innlesing åpnes Evidence. Kontroller kilder, utvalg og statuser. Start deretter Resume Incomplete Search / Run Evidence Search for uferdig arbeid."
+      ]
+    ],
+    "notes": [
+      "Behold mappen <review-filnavn>_browser_evidence ved review-filen. Appen bruker tilhørende skjermbilder og auditdata ved gjenopptak. Hvis bare Excel-filen flyttes, kan bildekoblinger bli borte."
+    ],
+    "table": [],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Activity: finn ut hva appen har gjort",
+    "lead": "Gå til Import og rull ned til Activity.",
+    "image": "04_logg",
+    "steps": [
+      [
+        "1 · Les loggen",
+        "Meldingene har klokkeslett. Se etter valideringsfeil, oppdaget Archer-versjon, innlesing, søkeproblemer og lagringsmeldinger. Begynn ved tidspunktet der problemet oppsto."
+      ],
+      [
+        "Kopier relevant tekst",
+        "Klikk i loggfeltet, bruk Ctrl+A og Ctrl+C hvis du trenger hele den synlige loggen. Ved deling må teksten kontrolleres for identifikatorer og andre opplysninger."
+      ],
+      [
+        "2 · Open full log folder",
+        "Åpner mappen med full kjøringslogg når en slik logg er opprettet. Bruk den når den korte visningen ikke har nok historikk."
+      ],
+      [
+        "Ta vare på sammenhengen",
+        "Noter review-fil, tidspunkt, kilde, handling og feilmelding. Dette gjør det enklere å skille filfeil fra innloggingsfeil og feil ved et bestemt oppslag."
+      ]
+    ],
+    "notes": [
+      "Det synlige loggfeltet beholder maksimalt 500 tekstblokker. Det er derfor ikke nødvendigvis en komplett historikk for en lang kjøring. Eksempelloggen på bildet er syntetisk."
+    ],
+    "table": [],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Når noe ikke virker",
+    "lead": "Finn symptomet til venstre og følg handlingen til høyre.",
+    "image": null,
+    "steps": [],
+    "notes": [],
+    "table": [
+      [
+        "Create Review Workbook er grå",
+        "Velg både Input TSV og Output XLSX. Se at feltene ikke er tomme og at kildefilen finnes."
+      ],
+      [
+        "Missing required columns",
+        "Du har feil eksport eller endrede kolonnenavn. Eksporter original tabulatordelt variantfil og kjør Validate TSV igjen."
+      ],
+      [
+        "X-valg ser ikke ut til å virke",
+        "Lagre Excel-filen, last riktig arbeidsbok/valg inn i appen og kontroller antallet. Sjekk at X står i riktig kolonne på riktig variant."
+      ],
+      [
+        "En variant blir fortsatt hoppet over",
+        "Kontroller Included variants only, X, artefaktregler og grønne Germ-markeringer. Å fjerne manuell X opphever ikke automatiske utelatelser."
+      ],
+      [
+        "Innlogging, timeout eller Retry",
+        "Kontroller kilden med Sign In, les loggen og prøv feilede oppslag igjen for riktig pasient og kilde."
+      ],
+      [
+        "Filen kan ikke lagres / Save pending",
+        "Lukk målfilen i Excel. For review-filen: Update Review Workbook. For låste pasientrapporter: Retry Pending Saves."
+      ],
+      [
+        "Ingen bilder i rapporten",
+        "Undersøk kildevalg, status, bildefiler og eventuell partial capture. Kontroller at riktig evidence-mappe er tilgjengelig og gjenoppta manglende oppslag."
+      ],
+      [
+        "Bare én pasient fikk rapport",
+        "Kontroller om én rad var markert. Generer VEDLEGG_APP bruker markerte pasienter, eller alle når ingen er valgt."
+      ],
+      [
+        "Knappen er ikke synlig",
+        "Rull ned inne i siden eller gjør vinduet større. Evidence har kontroller både øverst og nederst."
+      ]
+    ],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Filer, mapper og trygg gjenfinning",
+    "lead": "Behold filene fra samme kjøring samlet. Eksempel: C:/VPM/2026-10-18/DEMO/",
+    "image": null,
+    "steps": [],
+    "notes": [
+      "Pasientrapporter inneholder innebygde bilder når bildene er tilgjengelige ved generering. For å kunne gjenoppta analysen og lage rapportene på nytt trenger du også tilhørende grunnlag og evidensfiler."
+    ],
+    "table": [
+      [
+        "Original TSV",
+        "Behold eksporten som utgangspunkt. Bruk et eget filnavn for nye bearbeidede resultater."
+      ],
+      [
+        "VPM_review_DEMO.xlsx",
+        "Review-filen du selv navnga. Inneholder variantgrunnlag, X-valg og teknisk lagret evidens."
+      ],
+      [
+        "VPM_review_DEMO_browser_evidence/",
+        "Tilordnet mappe med kildebilder og auditdata. Behold hele strukturen ved sikkerhetskopiering og videre arbeid."
+      ],
+      [
+        "VEDLEGG_APP/",
+        "Pasientrapportene. Eksempel: DEMO-001_VPM_Tolkning_APP.xlsx. Appen kan erstatte eksisterende rapporter ved ny generering."
+      ],
+      [
+        "Full kjøringslogg",
+        "Finn konkret loggmappe med Open full log folder. Ta vare på loggen hvis det er et problem som må undersøkes."
+      ],
+      [
+        "%USERPROFILE%/.archer-prosess/",
+        "Lokale innstillinger og appens nettleserprofiler. Dette er ikke en mappe som skal deles som rapportvedlegg."
+      ],
+      [
+        "Sikkerhetskopi",
+        "Ta kopi av hele analysemappen etter at filer er lagret og lukket. Ved flytting: åpne review-filen igjen og kontroller at bilder faktisk blir funnet."
+      ]
+    ],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Øvelse: gjennomfør én komplett analyse",
+    "lead": "Bruk et godkjent øvingsgrunnlag med syntetiske data. Eksempelet under beskriver forventet arbeidsrekkefølge.",
+    "image": null,
+    "steps": [
+      [
+        "A · Opprett",
+        "Velg DEMO-TSV i Import. Sett Output XLSX til VPM_review_DEMO.xlsx og kontroller dato. Valider, lag arbeidsbok og åpne den i Excel."
+      ],
+      [
+        "B · Velg",
+        "I With Artifacts: finn en variant som skal utelates fra søk og sett X. La en annen egnet variant stå uten manuell X. Lagre og lukk."
+      ],
+      [
+        "C · Bekreft",
+        "I Evidence: Load Selection Workbook. Kontroller X-oppsummeringen og kildene. Bruk Sign In for kildene som krever det."
+      ],
+      [
+        "D · Prioriter",
+        "Marker DEMO-pasienten i Patient progress. Trykk Kjør valgte pasienter. Følg fremdriften og undersøk alle avvik før videre arbeid."
+      ],
+      [
+        "E · Kontroller rapport",
+        "Åpne VEDLEGG_APP. Finn riktig DIT-fil, kontroller Oversikt, MTBP og variantfaner. Legg eventuelt inn kommentar, lagre og lukk."
+      ],
+      [
+        "F · Fortsett",
+        "Kjør resterende hvis grunnlaget har flere pasienter. Håndter Retry og Save pending. Bruk Generer VEDLEGG_APP for ønsket sluttgenerering."
+      ]
+    ],
+    "notes": [
+      "De syntetiske dataene i guidebildene er laget for å vise grensesnittet. De er ikke et verifisert databasefasitsvar eller et ferdig medisinsk øvingssett."
+    ],
+    "table": [],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Sjekkliste før du avslutter",
+    "lead": "Bruk listen ved hver ferdigstilt kjøring.",
+    "image": null,
+    "steps": [],
+    "notes": [],
+    "table": [
+      [
+        "Riktig grunnlag",
+        "Jeg har kontrollert kildefil, pasient-/prøveidentitet, Archer-versjon og sekvenseringsdato."
+      ],
+      [
+        "Gjennomgang utført",
+        "Jeg har sett With Artifacts og forstått X-valg, artefakter og Germ-markeringer. Filen og valgene er lagret."
+      ],
+      [
+        "Riktig søkeutvalg",
+        "Valgte kilder og eventuelle prioriterte pasienter er riktige. Jeg har undersøkt utelatelser som var uventede."
+      ],
+      [
+        "Avvik håndtert",
+        "Retry, Manual review, Not found og manglende bilder er undersøkt og fulgt opp etter lokal prosedyre."
+      ],
+      [
+        "Lagring bekreftet",
+        "Review-filen er oppdatert. Ingen uavklarte Save pending står igjen. Jeg har åpnet forventede pasientrapporter."
+      ],
+      [
+        "Rapport kontrollert",
+        "DIT, dato, variantidentitet, evidenstekst, bilder og kildehenvisninger passer sammen. Kommentarer er lagret."
+      ],
+      [
+        "Faglig vurdering utført",
+        "Oppslag og automatisk innsamling er vurdert av ansvarlig person. Programstatus Complete er ikke brukt som faglig godkjenning."
+      ],
+      [
+        "Grunnlag bevart",
+        "Originalfil, review-fil, evidence-mappe, rapporter og relevant logg er lagret i riktig område."
+      ]
+    ],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Funksjonsregister og dokumentasjonsgrunnlag",
+    "lead": "Guiden dekker de brukerrettede kontrollene i den lokale appen per 18. oktober 2026.",
+    "image": null,
+    "steps": [],
+    "notes": [
+      "Nettleserversjonen og PDF-en har samme innhold. Nettleserversjonen lar deg åpne bildene i stor visning. Ved senere endring av appen bør bilder, knappetekster og arbeidsflyt oppdateres samtidig."
+    ],
+    "table": [
+      [
+        "Import",
+        "Filer, dato, skjulte rader og validering: side 7-8. Excel-innhold og X: side 9-11. Restore/Open Processed Workbook: side 31. Logg: side 32."
+      ],
+      [
+        "Evidence",
+        "Utvalg: side 12. Kilder: side 13. Sign In / Run Browser Sources: side 14. Hovedsøk: side 15. Fremdrift: side 16."
+      ],
+      [
+        "Pasientkø og gjenopptak",
+        "Prioritering, resterende og feilforsøk: side 17-19. Pause, stopp og gjenopptak: side 20."
+      ],
+      [
+        "Rapporter",
+        "Update Review Workbook, Generer VEDLEGG_APP og Retry Pending Saves: side 21. Rapportinnhold, kommentarer og bilder: side 22-23."
+      ],
+      [
+        "Settings",
+        "Lokale filer/WHO: side 26. Kontoer: side 27. Tempo/minimering: side 28. Artefakter og lagring: side 29-30."
+      ],
+      [
+        "Oppfølging",
+        "Feilsøking: side 33. Filer og sikkerhetskopi: side 34. Øvelse: side 35. Sluttkontroll: side 36."
+      ],
+      [
+        "Primærgrunnlag",
+        "src/archer_processor/gui/app.py, gui/widgets, gui/status_model.py, core/highlights.py, io/tsv_reader.py, services/settings.py og reports/*.py i Archer-prosess."
+      ],
+      [
+        "Verifikasjon og avgrensning",
+        "18 appbilder er rendret fra det faktiske grensesnittet. Fire Excel-bilder viser filer produsert av appens rapportkode. Alle bruker syntetiske data og røde annotasjoner. Beskrivelser er kontrollert mot kildekoden. Eksterne nettsteder og kliniske resultater er ikke testet i denne dokumentasjonsjobben."
+      ]
+    ],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Excel-bilde: arkfaner og X-kolonne",
+    "lead": "Dette er en faktisk review-fil åpnet i Excel, med to syntetiske varianter.",
+    "image": "19_excel_review",
+    "steps": [
+      [
+        "1 · Skip Database Search (X)",
+        "Den gule kolonnen til venstre inneholder søkevalget. Klikk cellen på riktig variantlinje og skriv X for å utelate oppslaget."
+      ],
+      [
+        "2 · Eksempel på X",
+        "TET2-raden har X. TP53-raden over har tom celle. Kontroller gen og HGVSc før du endrer markeringen."
+      ],
+      [
+        "3 · With Artifacts",
+        "Dette er arket du skal være i når du merker variantene. Fanen nederst er valgt i bildet."
+      ],
+      [
+        "4 · Artifacts Removed",
+        "Dette er støttevisningen uten artefaktmarkerte varianter. Klikk fanen for å sammenligne, og gå tilbake til With Artifacts når du skal gjøre X-valg."
+      ]
+    ],
+    "notes": [
+      "Når du er ferdig: Ctrl+S, lukk review-filen og bruk Load Selection Workbook i appen. Bildet er beskåret til arbeidsflaten; Excels båndmeny ligger over utsnittet."
+    ],
+    "table": [],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Excel-bilde: kommentarer i Oversikt",
+    "lead": "Pasientrapporten har sitt eget oppsett. Bildet viser venstre del av Oversikt ved 75 % zoom.",
+    "image": "20_excel_oversikt",
+    "steps": [
+      [
+        "1 · DIT og sekvenseringsdato",
+        "Kontroller disse før du leser videre. De skal passe til pasienten og kjøringen du arbeider med."
+      ],
+      [
+        "2 · Pasientkommentar",
+        "Det oransje, sammenslåtte feltet D3:L4 brukes til kommentar på pasientnivå. Feltet fortsetter mot høyre utenfor utsnittet."
+      ],
+      [
+        "3 · Kort evidens",
+        "Her står kildenes korte resultater og HSMD-linjen. Ikke søkt i dette demonstrasjonsbildet betyr at ingen kilde er kjørt."
+      ],
+      [
+        "4 · Kommentar",
+        "Dette er feltet for din kommentar til varianten på denne raden. Det er forskjellig fra pasientkommentaren øverst."
+      ],
+      [
+        "5 · Arkfaner",
+        "Oversikt er valgt. MTBP viser samlet rapport, og genfanene åpner dokumentasjon for variantene."
+      ]
+    ],
+    "notes": [
+      "Bruk rullefeltet nederst for å se kildekolonner, gnomAD AF og WHO drivergen mot høyre. Zoom kan endres med kontrollen nederst til høyre i Excel."
+    ],
+    "table": [],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Excel-bilde: identitet på variantfanen",
+    "lead": "Klikk genfanen for å åpne dokumentasjonen for én variant.",
+    "image": "21_excel_variant",
+    "steps": [
+      [
+        "1 · Variantoverskriften",
+        "Gen, transkript/cDNA og proteinendring vises øverst. Kontroller at dette er varianten du skal gjennomgå."
+      ],
+      [
+        "2 · Detaljlinjen",
+        "Her vises tilgjengelige detaljer, i eksempelet proteinendring, AF og Depth."
+      ],
+      [
+        "3 · Kort evidensoversikt og kildelenker",
+        "Tabellen har en rad per kilde. Rull nedover for å se hele tabellen og delen Skjermbilder."
+      ],
+      [
+        "4 · Den valgte fanen",
+        "TP53 er valgt her. Klikk Oversikt for å gå tilbake til pasientoversikten, eller neste gen for å gjennomgå en annen variant."
+      ]
+    ],
+    "notes": [
+      "Eksempelrapporten er laget uten databasesøk. Ikke søkt er derfor forventet. Dette bildet viser rapportens oppbygning og skal ikke brukes som eksempel på ferdig innhentet evidens."
+    ],
+    "table": [],
+    "kind": "veiledning"
+  },
+  {
+    "title": "Excel-bilde: slik vises et manglende bilde",
+    "lead": "Her er variantfanen rullet ned. Toppfeltet står fortsatt synlig fordi arket bruker frosne rader.",
+    "image": "22_excel_mangler",
+    "steps": [
+      [
+        "1 · Manglende skjermbilde",
+        "Et oransje felt med Skjermbilde ikke tilgjengelig viser at rapporten mangler bildet på denne plasseringen."
+      ],
+      [
+        "2 · Kildeoverskrift og ny mangelmelding",
+        "ClinVar-overskriften viser hvilken kilde neste bildefelt gjelder. Les overskrift og felt sammen når du undersøker en mangel."
+      ],
+      [
+        "3 · Kontroller variantidentiteten",
+        "Overskriften øverst gjør at du fortsatt ser hvilken variant du arbeider med når du blar nedover."
+      ],
+      [
+        "Følg opp i appen",
+        "Kontroller om kilden var valgt, om den er innlogget og om den viser Retry, Not found eller annen status. Håndter årsaken, gjenoppta relevant arbeid og lag rapporten på nytt."
+      ]
+    ],
+    "notes": [
+      "Alle bildefeltene mangler i dette syntetiske eksempelet fordi det ikke er kjørt eksterne søk. I en reell kjøring må hver uventet mangel undersøkes. Se side 33 for feilsøking."
+    ],
+    "table": [],
+    "kind": "veiledning"
+  }
+]

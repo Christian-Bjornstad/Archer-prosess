@@ -13,7 +13,9 @@ from typing import Iterable
 
 import requests
 
+from archer_processor.core.highlights import is_automatic_database_skip
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
+from archer_processor.core.variant_key_guard import validate_variant_keys
 from archer_processor.services.settings import AppSettings
 from archer_processor.services.system_trust import system_trust_session
 from archer_processor.services.variant_identity import genomic_identity
@@ -132,6 +134,8 @@ class DatabaseSearchService:
         return diagnostics
 
     def search_variant(self, variant: VariantRecord, databases: Iterable[str]) -> list[DatabaseEvidence]:
+        if is_automatic_database_skip(variant):
+            return []
         evidence: list[DatabaseEvidence] = []
         for database in databases:
             if database == "ClinVar":
@@ -165,6 +169,7 @@ class DatabaseSearchService:
         max_workers: int = 3,
         progress: Callable[[int, int, VariantRecord], None] | None = None,
     ) -> dict[str, list[DatabaseEvidence]]:
+        validate_variant_keys(variants)
         database_list = list(databases)
         total = len(variants)
         if total == 0:

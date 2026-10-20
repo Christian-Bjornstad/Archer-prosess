@@ -11,6 +11,8 @@ from typing import Any
 import openpyxl
 
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
+from archer_processor.core.variant_key_guard import validate_variant_keys
+from archer_processor.core.run_date import sequencing_date_from_path
 from archer_processor.core.rules import FilterEngine
 from archer_processor.io import ArcherTsvReader
 
@@ -50,7 +52,14 @@ class ProcessedWorkbookLoader:
         workbook = openpyxl.load_workbook(
             workbook_path, read_only=True, data_only=True
         )
+        persisted_run_date = ""
         try:
+            try:
+                persisted_run_date = self._text(
+                    workbook.custom_doc_props["VPMRunDate"].value
+                )
+            except KeyError:
+                pass
             if SELECTION_SHEET not in workbook.sheetnames:
                 raise ValueError(
                     f"This is not a current VPM review workbook: the "
@@ -81,12 +90,32 @@ class ProcessedWorkbookLoader:
             raw_headers = [
                 header
                 for header in header_values
-                if header != SKIP_HEADER and not header.endswith(" Evidence")
+                if header not in {SKIP_HEADER, "WHO drivergen", "Run_dato", "Run date"}
+                and not header.endswith(" Evidence")
             ]
             variants: list[VariantRecord] = []
             total_rows = max(1, worksheet.max_row - 1)
             skip_keys: set[str] = set()
             cell_evidence: dict[str, dict[str, str]] = {}
+            stored_evidence: dict[str, list[DatabaseEvidence]] = {}
+            if "_Evidence" in workbook.sheetnames:
+                for stored_row in workbook["_Evidence"].iter_rows(min_row=2, values_only=True):
+                    if not stored_row[0] or not stored_row[1]:
+                        continue
+                    try:
+                        raw = json.loads("".join(str(chunk or "") for chunk in stored_row[7:]) or "{}")
+                    except (ValueError, TypeError):
+                        raw = {}
+                    item = DatabaseEvidence(
+                        database=self._text(stored_row[1]),
+                        status=self._text(stored_row[2]),
+                        summary=self._text(stored_row[3]),
+                        accession=self._text(stored_row[4]),
+                        clinical_significance=self._text(stored_row[5]),
+                        url=self._text(stored_row[6]),
+                        raw=raw if isinstance(raw, dict) else {},
+                    )
+                    stored_evidence.setdefault(self._text(stored_row[0]), []).append(item)
             for source_row, row in enumerate(
                 worksheet.iter_rows(min_row=2, values_only=True), start=2
             ):
@@ -122,19 +151,27 @@ class ProcessedWorkbookLoader:
 
         if not variants:
             raise ValueError("The processed workbook does not contain any variants.")
+        validate_variant_keys(variants)
         self.filter_engine.apply(variants)
         evidence = self._restore_evidence(
-            workbook_path, variants, cell_evidence, progress=progress
+            workbook_path, variants, cell_evidence,
+            stored_evidence=stored_evidence, progress=progress,
         )
         timestamp = datetime.fromtimestamp(workbook_path.stat().st_mtime)
+        resolved_run_date = (
+            sequencing_date_from_path(workbook_path)
+            or persisted_run_date
+            or timestamp.date().isoformat()
+        )
         result = ProcessingResult(
             input_path=workbook_path,
             output_path=workbook_path,
-            run_date=timestamp.date().isoformat(),
+            run_date=resolved_run_date,
             variants=variants,
             rules_applied=[rule.rule_id for rule in self.filter_engine.rules],
             started_at=timestamp,
             finished_at=timestamp,
+            archer_version=self.reader.detect_version(raw_headers),
         )
         return ProcessedWorkbookState(result, evidence, skip_keys)
 
@@ -144,6 +181,7 @@ class ProcessedWorkbookLoader:
         variants: list[VariantRecord],
         cell_evidence: dict[str, dict[str, str]],
         *,
+        stored_evidence: dict[str, list[DatabaseEvidence]] | None = None,
         progress: Callable[[int, int, str], None] | None = None,
     ) -> dict[str, list[DatabaseEvidence]]:
         artifact_root = workbook_path.parent / f"{workbook_path.stem}_browser_evidence"
@@ -157,8 +195,10 @@ class ProcessedWorkbookLoader:
         for index, variant in enumerate(variants, start=1):
             key = self._variant_key(variant)
             databases = cell_evidence.get(key, {})
+            stored = {item.database: item for item in (stored_evidence or {}).get(key, [])}
             items: list[DatabaseEvidence] = []
-            for database, cell_value in databases.items():
+            for database in dict.fromkeys([*databases, *stored]):
+                cell_value = databases.get(database, "")
                 audit = self._load_audit(
                     audit_index,
                     artifact_root,
@@ -168,6 +208,8 @@ class ProcessedWorkbookLoader:
                 )
                 if audit is not None:
                     items.append(audit)
+                elif database in stored:
+                    items.append(migrate_loaded_evidence(stored[database], artifact_root))
                 elif cell_value:
                     items.extend(self._parse_evidence_cell(database, cell_value))
             if items:
@@ -184,7 +226,7 @@ class ProcessedWorkbookLoader:
         database: str,
         variant: VariantRecord,
     ) -> DatabaseEvidence | None:
-        selected = audit_index.best(database, variant)
+        selected = audit_index.best(database, variant, patient_index=patient_index)
         if selected is None:
             return None
         _, payload = selected

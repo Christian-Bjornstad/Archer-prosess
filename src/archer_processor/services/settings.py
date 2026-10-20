@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
 from archer_processor.core import default_artifact_rules
+from archer_processor.core.rules import artifact_filter_rules, legacy_artifact_rules, merge_v7_artifacts
 from archer_processor.services import credentials
 
 
 @dataclass(slots=True)
 class AppSettings:
     default_output_dir: str = str(Path.home() / "Desktop")
+    who_driver_genes_path: str = ""
+    artifact_rules_path: str = ""
+    load_warnings: list[str] = field(default_factory=list, metadata={"persist": False})
     clinvar_api_key: str = ""
     cosmic_email: str = ""
     cosmic_password: str = field(default="", repr=False, metadata={"persist": False})
@@ -24,16 +29,17 @@ class AppSettings:
     mtbp_email: str = ""
     mtbp_password: str = field(default="", repr=False, metadata={"persist": False})
     database_workers: int = 1
-    browser_delay_seconds: int = 10
-    browser_delay_max_seconds: int = 20
+    browser_delay_seconds: int = 3
+    browser_delay_max_seconds: int = 8
     browser_background: bool = True
+    browser_profile_root: str = ""
     mtbp_timeout_minutes: int = 20
     search_included_only: bool = True
     gnomad_dataset: str = "gnomad_r2_1"
     mtbp_cancer_type: str = "Blood"
     last_processed_workbook: str = ""
     offer_recent_analysis: bool = True
-    artifact_catalog_version: int = 3
+    artifact_catalog_version: int = 4
     artifact_rules: list[dict[str, str]] = field(default_factory=default_artifact_rules)
     enabled_databases: list[str] = field(
         default_factory=lambda: [
@@ -49,6 +55,30 @@ class AppSettings:
     def config_path(cls) -> Path:
         return Path.home() / ".archer-prosess" / "config.json"
 
+    @property
+    def browser_profile_root_path(self) -> Path:
+        """Selected provider-profile root; blank retains existing sessions."""
+        if self.browser_profile_root.strip():
+            return Path(self.normalize_browser_profile_root(self.browser_profile_root))
+        return Path.home() / ".archer-prosess" / "browser_profiles"
+
+    @staticmethod
+    def normalize_browser_profile_root(value: str) -> str:
+        """Validate a folder choice without creating or migrating profiles."""
+        value = value.strip()
+        if not value:
+            return ""
+        directory = Path(os.path.expandvars(value)).expanduser()
+        if not directory.is_absolute():
+            raise ValueError("Velg en absolutt mappebane for Edge-profiler.")
+        directory = directory.resolve()
+        existing = directory
+        while not existing.exists() and existing.parent != existing:
+            existing = existing.parent
+        if existing.exists() and not existing.is_dir():
+            raise ValueError("Edge-profiler må lagres i en mappe, ikke en fil.")
+        return str(directory)
+
     @classmethod
     def load(cls) -> "AppSettings":
         path = cls.config_path()
@@ -56,15 +86,43 @@ class AppSettings:
             return cls()
         try:
             data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("Configuration must contain a JSON object")
+            data = dict(data)
+            defaults = cls()
+            warnings = []
             persisted_fields = {
                 item.name
                 for item in fields(cls)
                 if item.metadata.get("persist") is not False
             }
+            for name in data.keys() & persisted_fields:
+                value, expected = data[name], getattr(defaults, name)
+                valid = type(value) is type(expected)
+                if type(expected) is int:
+                    valid = type(value) is int and value >= 0
+                elif isinstance(expected, list):
+                    valid = isinstance(value, list)
+                    if valid and name == "enabled_databases":
+                        valid = all(isinstance(item, str) and item in defaults.enabled_databases for item in value)
+                    elif valid and name == "artifact_rules":
+                        valid = all(isinstance(item, dict) and all(isinstance(key, str) and isinstance(entry, str)
+                                    for key, entry in item.items()) for item in value)
+                        if valid:
+                            try:
+                                artifact_filter_rules(value)
+                            except ValueError:
+                                valid = False
+                if not valid:
+                    data[name] = expected
+                    warnings.append(f"Ugyldig innstilling '{name}': standardverdien er brukt. Kontroller Innstillinger.")
             settings = cls(**{key: value for key, value in data.items() if key in persisted_fields})
+            settings.load_warnings = warnings
         except Exception:
-            return cls()
-        # Migrate former defaults to the new 10-20 second website-only range while
+            settings = cls()
+            settings.load_warnings = ["Innstillingsfilen kunne ikke leses. Standardverdier er brukt; kontroller Innstillinger før behandling."]
+            return settings
+        # Migrate former defaults to the new 3-8 second website-only range while
         # preserving any delay range the user actually customized.
         legacy_fixed_delay = (
             "browser_delay_max_seconds" not in data
@@ -72,11 +130,11 @@ class AppSettings:
         )
         former_default_range = (
             (settings.browser_delay_seconds, settings.browser_delay_max_seconds)
-            in {(15, 30), (5, 15)}
+            in {(15, 30), (10, 20), (5, 15)}
         )
         if legacy_fixed_delay or former_default_range:
-            settings.browser_delay_seconds = 10
-            settings.browser_delay_max_seconds = 20
+            settings.browser_delay_seconds = 3
+            settings.browser_delay_max_seconds = 8
         if int(data.get("artifact_catalog_version", 0) or 0) < 2:
             legacy_hgvsc = {
                 "NM_004119.2:c.1419-4dup",
@@ -99,7 +157,7 @@ class AppSettings:
             }
             former_v2_hgvsc = {
                 str(entry.get("hgvsc") or "").strip()
-                for entry in default_artifact_rules()
+                for entry in legacy_artifact_rules()
                 if str(entry.get("hgvsc") or "").strip()
                 not in fragmentation_v1_additions
             }
@@ -110,6 +168,9 @@ class AppSettings:
             if configured_hgvsc == former_v2_hgvsc:
                 settings.artifact_rules = default_artifact_rules()
             settings.artifact_catalog_version = 3
+        if int(data.get("artifact_catalog_version", 0) or 0) < 4:
+            settings.artifact_rules = merge_v7_artifacts(settings.artifact_rules)
+            settings.artifact_catalog_version = 4
         settings.browser_delay_seconds = max(0, int(settings.browser_delay_seconds))
         settings.browser_delay_max_seconds = max(
             settings.browser_delay_seconds,
@@ -133,6 +194,7 @@ class AppSettings:
         return settings
 
     def save(self) -> None:
+        self.browser_profile_root = self.normalize_browser_profile_root(self.browser_profile_root)
         self.browser_delay_seconds = max(0, int(self.browser_delay_seconds))
         self.browser_delay_max_seconds = max(
             self.browser_delay_seconds,
@@ -144,8 +206,12 @@ class AppSettings:
         for item in fields(self):
             if item.metadata.get("persist") is False:
                 data.pop(item.name, None)
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        # A managed credential store can reject a save. Keep the previous
+        # configuration until every password has been accepted.
         credentials.save_password("OncoKB", self.oncokb_email, self.oncokb_password)
         credentials.save_password("COSMIC", self.cosmic_email, self.cosmic_password)
         credentials.save_password("Franklin", self.franklin_email, self.franklin_password)
         credentials.save_password("MTBP", self.mtbp_email, self.mtbp_password)
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        temporary.replace(path)

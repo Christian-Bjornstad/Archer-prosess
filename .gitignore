@@ -27,12 +27,16 @@ outputs/
 *.fq
 *.fq.gz
 *.pdf
+!docs/brukerguide/VPM_Tolkning_Brukerguide.pdf
 *.docx
 *.pptx
 
 # Keep tiny anonymized fixtures only
 !tests/fixtures/*.tsv
 !tests/fixtures/*.xlsx
+!reference_lists/Artefaktliste.xlsx
+!reference_lists/WHO-drivergener.xlsx
+reference_lists/*.inspect.ndjson
 
 # Local config
 .env

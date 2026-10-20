@@ -1,17 +1,23 @@
 from pathlib import Path
+import json
 
 import pytest
 from PIL import Image
 
 from archer_processor.io import ArcherTsvReader
+from archer_processor.services.capture_validation import CaptureValidation, IncompleteCaptureError
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
 from archer_processor.services.browser_review import (
     BrowserReviewCancelled,
     BrowserReviewService,
+    FRANKLIN_HOME_URL,
+    MTBP_REPORTS_URL,
     _cosmic_identifier,
     _cosmic_identifiers,
     _cosmic_numeric_id,
     _cosmic_source_url,
+    _clinvar_identity,
+    _clinvar_queries,
     _expanded_capture_box,
     _franklin_queries,
     _mtbp_genomic_query,
@@ -19,16 +25,44 @@ from archer_processor.services.browser_review import (
     _mtbp_retry_query,
     _mtbp_screenshot_row_matches,
     _mtbp_unmapped_queries,
+    _mtbp_uncertain_submission_evidence,
     _mtbp_variant_query,
+    _oncokb_query_urls,
     parse_franklin_page,
     parse_mtbp_report,
     parse_oncokb_page,
 )
-from archer_processor.services.capture_validation import CaptureValidation
-from archer_processor.services.provider_failures import ProviderFailureKind
+from archer_processor.services.provider_failures import (
+    ProviderFailureKind,
+    ProviderLookupError,
+)
 
 
 VALID_CAPTURE = lambda _: CaptureValidation(True, "ok", 800, 500, 10.0)
+
+
+def test_mtbp_variant_capture_uses_direct_fallback_when_report_crop_fails(tmp_path, monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+    full_report = tmp_path / "patient-report.png"
+    direct_image = tmp_path / "variant.png"
+    attempts = []
+
+    def failed_crop(*args):
+        attempts.append("crop")
+        raise IncompleteCaptureError(CaptureValidation(False, "missing row", 0, 0, 0.0))
+
+    def direct_capture(*args):
+        attempts.append("direct")
+        return direct_image
+
+    monkeypatch.setattr(service, "_crop_mtbp_variant_from_report", failed_crop)
+    monkeypatch.setattr(service, "_capture_mtbp_variant_screenshot", direct_capture)
+
+    assert service._capture_mtbp_variant_with_fallback(
+        object(), variant, tmp_path, full_report
+    ) == direct_image
+    assert attempts == ["crop", "direct"]
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_variants.tsv"
@@ -90,6 +124,28 @@ def test_browser_sources_use_canonical_order_with_mtbp_last(tmp_path, monkeypatc
     assert visited == ["COSMIC", "OncoKB", "Franklin", "MTBP"]
 
 
+def test_green_germline_variant_is_blocked_at_browser_service_boundary(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    variant.raw = {**variant.raw, "Germ": 11}
+    variant.af = 0.35
+    service = BrowserReviewService(profile_root=tmp_path)
+    monkeypatch.setattr(
+        service,
+        "_search_database",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("provider must not receive Germline variant")
+        ),
+    )
+
+    results = service.search_variants(
+        [variant], ["ClinVar"], tmp_path / "evidence"
+    )
+
+    assert results[service.variant_key(variant)] == []
+
+
 def test_browser_review_reports_provider_with_progress(tmp_path, monkeypatch):
     variant = ArcherTsvReader().read(FIXTURE)[3]
     service = BrowserReviewService(
@@ -119,6 +175,129 @@ def test_browser_review_reports_provider_with_progress(tmp_path, monkeypatch):
 
     assert seen[0][0] == "Franklin"
     assert "starting" in seen[0][1].casefold()
+    assert seen[-1] == ("Franklin", "Provider finished")
+
+
+def test_browser_review_logs_queryable_result_and_provider_summary(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(
+        profile_root=tmp_path,
+        request_delay_ms=0,
+        request_delay_max_ms=0,
+        provider_switch_delay_ms=0,
+    )
+    messages = []
+
+    monkeypatch.setattr(
+        service,
+        "_search_database",
+        lambda database, variants, artifact_directory, *, progress, prior_evidence=None: {
+            service.variant_key(variant): DatabaseEvidence(
+                database,
+                "not_found",
+                "No OncoKB web result for the requested variant.",
+            )
+        },
+    )
+
+    service.search_variants(
+        [variant], ["OncoKB"], tmp_path / "audit", progress=messages.append
+    )
+
+    result = next(message for message in messages if message.startswith("RESULT |"))
+    summary = next(message for message in messages if message.startswith("SUMMARY |"))
+    assert "source=OncoKB" in result
+    assert "status=not_found" in result
+    assert "retryable=no" in result
+    assert "reason=No OncoKB web result" in result
+    assert "source=OncoKB" in summary
+    assert "total=1" in summary
+    assert "not_found=1" in summary
+    assert "retryable=0" in summary
+
+
+def test_browser_review_persists_terminal_failure_before_checkpoint(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(
+        profile_root=tmp_path,
+        request_delay_ms=0,
+        request_delay_max_ms=0,
+        provider_switch_delay_ms=0,
+    )
+    key = service.variant_key(variant)
+    checkpoints = []
+
+    monkeypatch.setattr(
+        service,
+        "_search_database",
+        lambda *args, **kwargs: {
+            key: DatabaseEvidence(
+                "OncoKB",
+                "error",
+                "site unavailable",
+                accession="TP53:R175H",
+                raw={"failure_stage": "waiting", "query_attempts": ["TP53:R175H"]},
+            )
+        },
+    )
+
+    service.search_variants(
+        [variant],
+        ["OncoKB"],
+        tmp_path / "evidence",
+        checkpoint=lambda result: checkpoints.append(
+            list((tmp_path / "evidence" / "oncokb").glob("*.audit.json"))
+        ),
+    )
+
+    assert len(checkpoints) == 1
+    assert len(checkpoints[0]) == 1
+    payload = json.loads(checkpoints[0][0].read_text(encoding="utf-8"))
+    assert payload["status"] == "error"
+    assert payload["retryable"] is True
+    assert payload["query_attempts"] == ["TP53:R175H"]
+
+
+def test_browser_review_audit_write_failure_keeps_result_and_checkpoint(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(
+        profile_root=tmp_path,
+        request_delay_ms=0,
+        request_delay_max_ms=0,
+        provider_switch_delay_ms=0,
+    )
+    key = service.variant_key(variant)
+    checkpoints = []
+    messages = []
+    monkeypatch.setattr(
+        service,
+        "_search_database",
+        lambda *args, **kwargs: {
+            key: DatabaseEvidence("OncoKB", "not_found", "no exact result")
+        },
+    )
+    monkeypatch.setattr(
+        "archer_processor.services.browser_review.write_evidence_audit",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk unavailable")),
+    )
+
+    results = service.search_variants(
+        [variant],
+        ["OncoKB"],
+        tmp_path / "evidence",
+        progress=messages.append,
+        checkpoint=checkpoints.append,
+    )
+
+    assert results[key][0].status == "not_found"
+    assert len(checkpoints) == 1
+    assert any("audit" in message.casefold() and "disk unavailable" in message for message in messages)
 
 
 def test_browser_resume_skips_completed_sources_and_checkpoints_each_provider(
@@ -172,6 +351,26 @@ def test_cosmic_identifier_uses_first_archer_cosmic_id():
     ]
     assert _cosmic_numeric_id("COSM476; COSV56056643") == "476"
     assert _cosmic_numeric_id("") == ""
+
+
+def test_cosmic_without_any_input_ids_does_not_start_browser(tmp_path, monkeypatch):
+    variants = ArcherTsvReader().read(FIXTURE)[3:5]
+    for variant in variants:
+        variant.cosmic_id = ""
+    service = BrowserReviewService(profile_root=tmp_path)
+    monkeypatch.setattr(
+        service,
+        "_browser_api",
+        lambda: pytest.fail("COSMIC browser must not start without input IDs"),
+    )
+
+    results = service._search_cosmic(
+        variants, tmp_path / "cosmic", progress=None
+    )
+
+    assert set(results) == {service.variant_key(variant) for variant in variants}
+    assert all(evidence.status == "not_applicable" for evidence in results.values())
+    assert all(evidence.raw["query_attempts"] == [] for evidence in results.values())
 
 
 def test_cosmic_lookup_tries_each_identifier_until_verified_match(
@@ -255,6 +454,40 @@ def test_cosmic_stops_after_all_identifiers_miss(
     assert evidence.raw["query_attempts"] == ["COSM111", "COSV222"]
 
 
+def test_cosmic_cache_returns_independent_evidence_objects(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    first = ArcherTsvReader().read(FIXTURE)[3]
+    first.cosmic_id = "COSM10648"
+    second = replace(first, sample="second-patient-sample")
+    service = BrowserReviewService(profile_root=tmp_path)
+    calls = []
+
+    def lookup(page, candidate, query_url, artifact_directory, *, progress):
+        calls.append(candidate.cosmic_id)
+        return DatabaseEvidence(
+            "COSMIC",
+            "found",
+            "matched",
+            accession=candidate.cosmic_id,
+            raw={"screenshots": [{"path": "shared.png"}]},
+        )
+
+    monkeypatch.setattr(service, "_lookup_cosmic_with_retry", lookup)
+
+    first_result = service._lookup_cosmic_variant(
+        object(), first, tmp_path, progress=None
+    )
+    second_result = service._lookup_cosmic_variant(
+        object(), second, tmp_path, progress=None
+    )
+    second_result.raw["query_attempts"].append("mutated")
+
+    assert calls == ["COSM10648"]
+    assert first_result is not second_result
+    assert first_result.raw["query_attempts"] == ["COSM10648"]
+
+
 def test_cosmic_identifier_result_ignores_available_genomic_coordinates(
     tmp_path, monkeypatch
 ):
@@ -315,6 +548,8 @@ def test_cosmic_search_resolves_canonical_internal_mutation_id(tmp_path):
                 return Links([grch38])
             if selector == "a[href*='genome=37'][href*='id=']":
                 return Links([grch37])
+            if selector == "a[href*='genome=37']":
+                return Links([{"href": grch37, "text": "GRCh37 ✔"}])
             raise AssertionError(selector)
 
         def goto(self, url, **kwargs):
@@ -328,6 +563,99 @@ def test_cosmic_search_resolves_canonical_internal_mutation_id(tmp_path):
 
     assert page.url == grch37
     assert _cosmic_source_url(page.url, variant.cosmic_id) == grch37
+
+
+def test_cosmic_explicitly_selects_global_grch37_menu_option(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path, navigation_timeout_ms=500)
+
+    class Links:
+        def __init__(self, page):
+            self.page = page
+
+        def evaluate_all(self, script):
+            selected = "genome=37" in self.page.url
+            return [{
+                "href": "https://cancer.sanger.ac.uk/cosmic/login?genome=37",
+                "text": "GRCh37 ✔" if selected else "GRCh37",
+            }]
+
+    class Page:
+        url = "https://cancer.sanger.ac.uk/cosmic/login"
+
+        def __init__(self):
+            self.visited = []
+
+        def locator(self, selector):
+            assert selector == "a[href*='genome=37']"
+            return Links(self)
+
+        def goto(self, url, **kwargs):
+            self.url = url
+            self.visited.append(url)
+
+        def wait_for_timeout(self, milliseconds):
+            pass
+
+    page = Page()
+    service._ensure_cosmic_grch37(page)
+
+    assert page.visited == [
+        "https://cancer.sanger.ac.uk/cosmic/login?genome=37"
+    ]
+    service._verify_cosmic_grch37(page)
+
+
+def test_cosmic_accepts_selected_grch37_after_canonical_redirect(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path)
+
+    class Links:
+        def evaluate_all(self, script):
+            return [{"href": "?genome=37", "text": "GRCh37 ✔"}]
+
+    class Page:
+        url = (
+            "https://cancer.sanger.ac.uk/cosmic/mutation/overview"
+            "?cosm=COSM476&id=25001834&trans=BRAF"
+        )
+
+        def locator(self, selector):
+            return Links()
+
+    service._verify_cosmic_grch37(Page())
+
+
+def test_cosmic_rejects_explicit_grch38_even_when_grch37_menu_is_selected(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path)
+
+    class Links:
+        def evaluate_all(self, script):
+            return [{"href": "?genome=37", "text": "GRCh37 ✔"}]
+
+    class Page:
+        url = "https://cancer.sanger.ac.uk/cosmic/mutation/overview?genome=38"
+
+        def locator(self, selector):
+            return Links()
+
+    with pytest.raises(RuntimeError, match="GRCh37"):
+        service._verify_cosmic_grch37(Page())
+
+
+def test_cosmic_rejects_result_when_grch37_is_not_selected(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path)
+
+    class Links:
+        def evaluate_all(self, script):
+            return [{"href": "?genome=37", "text": "GRCh37"}]
+
+    class Page:
+        url = "https://cancer.sanger.ac.uk/cosmic/mutation/overview?genome=38"
+
+        def locator(self, selector):
+            return Links()
+
+    with pytest.raises(RuntimeError, match="GRCh37"):
+        service._verify_cosmic_grch37(Page())
 
 
 def test_cosmic_lookup_retries_transient_render_failure(tmp_path, monkeypatch):
@@ -431,6 +759,35 @@ def test_cosmic_ready_check_uses_sections_instead_of_duplicate_headings(
             pass
 
     service._wait_for_cosmic_result(Page())
+
+
+def test_cosmic_ready_check_stops_immediately_when_mutation_is_not_found(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path, navigation_timeout_ms=45_000)
+
+    class Body:
+        def inner_text(self):
+            return (
+                "Mutation not found\n"
+                "The mutation with ID 211028 was not found in our database."
+            )
+
+    class Page:
+        waits = []
+
+        def locator(self, selector):
+            assert selector == "body"
+            return Body()
+
+        def wait_for_timeout(self, milliseconds):
+            self.waits.append(milliseconds)
+
+    page = Page()
+    with pytest.raises(ProviderLookupError) as raised:
+        service._wait_for_cosmic_result(page)
+
+    assert getattr(raised.value, "kind", None) == ProviderFailureKind.NOT_FOUND
+    assert "211028" in str(raised.value)
+    assert page.waits == []
 
 
 def test_oncokb_rejects_cookie_banner_before_capture(tmp_path):
@@ -551,7 +908,7 @@ def test_cosmic_buffer_uses_shorter_delay_than_global_setting(
     assert "OncoKB: safety buffer" in progress[1]
 
 
-def test_oncokb_visible_page_parser_extracts_core_evidence():
+def test_oncokb_visible_page_parser_rejects_different_variant_content():
     variant = ArcherTsvReader().read(FIXTURE)[3]
     body = """
     BRAF V600E Somatic
@@ -567,10 +924,106 @@ def test_oncokb_visible_page_parser_extracts_core_evidence():
 
     evidence = parse_oncokb_page(body, variant, "https://www.oncokb.org/example")
 
+    assert evidence.status == "identity_mismatch"
+
+
+def test_oncokb_visible_page_parser_extracts_core_evidence_for_requested_variant():
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    body = """
+    TP53 R175H Somatic
+    Variant Overview
+    The TP53 R175H mutation is known to be oncogenic.
+    Mutation Effect
+    Oncogenicity
+    Oncogenic
+    Biological Effect
+    Gain-of-function
+    Highest Level of Evidence
+    """
+
+    evidence = parse_oncokb_page(
+        body, variant, "https://www.oncokb.org/gene/TP53/somatic/R175H"
+    )
+
     assert evidence.status == "found"
     assert evidence.clinical_significance == "Oncogenic"
     assert "mutation_effect=Gain-of-function" in evidence.summary
-    assert "known to be oncogenic" in evidence.summary
+
+
+def test_oncokb_queries_add_documented_grch37_hgvsg_fallback():
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+
+    assert _oncokb_query_urls(variant) == [
+        "https://www.oncokb.org/gene/TP53/somatic/R175H",
+        "https://www.oncokb.org/hgvsg/17:g.7578406G%3EA?refGenome=GRCh37",
+    ]
+
+
+def test_oncokb_fallback_runs_only_after_identity_failure(tmp_path, monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+    attempted = []
+
+    def lookup(page, candidate, url, artifact_directory):
+        attempted.append(url)
+        if "/gene/" in url:
+            return DatabaseEvidence(
+                "OncoKB",
+                "not_found",
+                "canonical transcript mismatch",
+                raw={"failure_kind": ProviderFailureKind.IDENTITY_MISMATCH.value},
+            )
+        return DatabaseEvidence("OncoKB", "found", "verified genomic result")
+
+    monkeypatch.setattr(service, "_lookup_oncokb_url", lookup)
+
+    evidence = service._lookup_oncokb_variant(object(), variant, tmp_path)
+
+    assert evidence.status == "found"
+    assert attempted == _oncokb_query_urls(variant)
+    assert evidence.raw["query_attempts"] == attempted
+
+
+def test_oncokb_transient_error_does_not_switch_query_identity(tmp_path, monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+    attempted = []
+
+    def lookup(page, candidate, url, artifact_directory):
+        attempted.append(url)
+        return DatabaseEvidence("OncoKB", "error", "provider unavailable")
+
+    monkeypatch.setattr(service, "_lookup_oncokb_url", lookup)
+
+    evidence = service._lookup_oncokb_variant(object(), variant, tmp_path)
+
+    assert evidence.status == "error"
+    assert attempted == [_oncokb_query_urls(variant)[0]]
+
+
+def test_oncokb_unresolved_transcript_mismatch_requires_manual_review(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+
+    def lookup(page, candidate, url, artifact_directory):
+        if "/gene/" in url:
+            return DatabaseEvidence(
+                "OncoKB",
+                "not_found",
+                "canonical transcript mismatch",
+                raw={"failure_kind": ProviderFailureKind.IDENTITY_MISMATCH.value},
+            )
+        return DatabaseEvidence("OncoKB", "not_found", "no genomic result")
+
+    monkeypatch.setattr(service, "_lookup_oncokb_url", lookup)
+
+    evidence = service._lookup_oncokb_variant(object(), variant, tmp_path)
+
+    assert evidence.status == "manual_review"
+    assert "transcript" in evidence.summary.casefold()
+    assert len(evidence.raw["query_attempts"]) == 2
 
 
 def test_oncokb_login_accepts_successful_redirect_after_click_error(tmp_path):
@@ -661,6 +1114,79 @@ def test_oncokb_waits_for_client_rendered_variant_content(tmp_path):
     page = Page()
     service._wait_for_oncokb_result(page)
     assert page.body.calls == 2
+
+
+@pytest.mark.parametrize(
+    "terminal_text",
+    [
+        "We do not have any information for this gene",
+        (
+            "NF1\nY2285Tfs*5\nInvalid\nSomatic\n"
+            "The reference amino acid at position 2285 is N instead of Y "
+            "on the OncoKB canonical transcript."
+        ),
+    ],
+)
+def test_oncokb_wait_recognizes_terminal_no_result_pages(tmp_path, terminal_text):
+    service = BrowserReviewService(profile_root=tmp_path, navigation_timeout_ms=45_000)
+
+    class Body:
+        def inner_text(self):
+            return terminal_text
+
+    class Page:
+        url = "https://www.oncokb.org/gene/NF1/somatic/Y2285Tfs*5"
+        waits = []
+
+        def locator(self, selector):
+            assert selector == "body"
+            return Body()
+
+        def wait_for_timeout(self, milliseconds):
+            self.waits.append(milliseconds)
+
+    page = Page()
+    service._wait_for_oncokb_result(page)
+
+    assert page.waits == []
+
+
+def test_oncokb_parser_explains_canonical_transcript_mismatch():
+    variant = VariantRecord(
+        source_file=Path("synthetic.tsv"),
+        source_row=1,
+        sample="SYNTHETIC",
+        symbol="NF1",
+        hgvsc="NM_001042492.2:c.6852_6855del",
+        hgvsp="p.Tyr2285ThrfsTer5",
+    )
+    body = (
+        "NF1\nY2285Tfs*5\nInvalid\nSomatic\n"
+        "NF1 Y2285Tfs*5: The reference amino acid at position 2285 is N "
+        "instead of Y on the OncoKB canonical transcript."
+    )
+
+    evidence = parse_oncokb_page(
+        body, variant, "https://www.oncokb.org/gene/NF1/somatic/Y2285Tfs*5"
+    )
+
+    assert evidence.status == "not_found"
+    assert "canonical transcript" in evidence.summary
+    assert evidence.raw["failure_kind"] == ProviderFailureKind.IDENTITY_MISMATCH
+
+
+def test_oncokb_parser_keeps_explicit_provider_error_retryable():
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+
+    evidence = parse_oncokb_page(
+        "An error has occurred\nPlease try again later.",
+        variant,
+        "https://www.oncokb.org/gene/TP53/somatic/R175H",
+    )
+
+    assert evidence.status == "error"
+    assert "provider error" in evidence.summary.casefold()
+    assert evidence.raw["failure_kind"] == ProviderFailureKind.TRANSIENT
 
 
 def test_franklin_visible_page_parser_returns_only_classification():
@@ -773,6 +1299,7 @@ def test_franklin_falls_back_after_identity_mismatch(tmp_path, monkeypatch):
     )
     service = BrowserReviewService(profile_root=tmp_path)
     calls = []
+    progress_messages = []
 
     def attempt(page, current_variant, query, artifact_directory, *, progress):
         calls.append(query)
@@ -782,12 +1309,25 @@ def test_franklin_falls_back_after_identity_mismatch(tmp_path, monkeypatch):
     monkeypatch.setattr(service, "_search_franklin_query", attempt, raising=False)
 
     evidence = service._resolve_franklin_queries(
-        object(), variant, tmp_path / "franklin", progress=None
+        object(), variant, tmp_path / "franklin", progress=progress_messages.append
     )
 
     assert evidence.status == "found"
     assert calls == ["LUC7L2:c.784dup", "chr7-139097298 T>TC"]
     assert evidence.raw["query_attempts"] == calls
+    assert [item["status"] for item in evidence.raw["query_timings"]] == [
+        "identity_mismatch",
+        "found",
+    ]
+    assert all(item["duration_seconds"] >= 0 for item in evidence.raw["query_timings"])
+    assert any(
+        "identity_mismatch" in message and "completed in" in message
+        for message in progress_messages
+    )
+    assert any(
+        "found" in message and "completed in" in message
+        for message in progress_messages
+    )
 
 
 def test_franklin_skips_fallback_after_verified_primary_result(tmp_path, monkeypatch):
@@ -879,6 +1419,46 @@ def test_franklin_query_is_attempted_once_before_outer_retry(tmp_path, monkeypat
     assert len(gotos) == 1
 
 
+def test_franklin_timeout_records_the_exact_failure_stage(tmp_path, monkeypatch):
+    variant = VariantRecord(
+        source_file=Path("synthetic.tsv"),
+        source_row=1,
+        sample="PATIENT_A",
+        symbol="LUC7L2",
+        hgvsc="NM_016019.4:c.784dup",
+    )
+    service = BrowserReviewService(profile_root=tmp_path)
+
+    class Search:
+        def wait_for(self, **kwargs):
+            raise TimeoutError("search input stayed hidden")
+
+    class Page:
+        url = FRANKLIN_HOME_URL
+
+        def goto(self, url, **kwargs):
+            pass
+
+        def locator(self, selector):
+            return Search()
+
+    monkeypatch.setattr(
+        service, "_browser_api", lambda: (object, Exception, TimeoutError)
+    )
+    monkeypatch.setattr(
+        "archer_processor.services.browser_review.dismiss_known_overlays",
+        lambda page: None,
+    )
+
+    evidence = service._search_franklin_query(
+        Page(), variant, "LUC7L2:c.784dup", tmp_path, progress=None
+    )
+
+    assert evidence.status == "timeout"
+    assert evidence.raw["failure_stage"] == "waiting for the Franklin search input"
+    assert "search input" in evidence.summary
+
+
 def test_franklin_retries_failed_patients_only_after_first_pass(tmp_path, monkeypatch):
     variants = [
         VariantRecord(
@@ -934,6 +1514,116 @@ def test_franklin_retries_failed_patients_only_after_first_pass(tmp_path, monkey
 
     assert calls == ["PATIENT_A", "PATIENT_B", "PATIENT_A", "PATIENT_B"]
     assert all(evidence.status == "found" for evidence in results.values())
+
+
+def test_franklin_default_runs_only_one_failed_pass(tmp_path, monkeypatch):
+    variant = VariantRecord(
+        source_file=Path("synthetic.tsv"),
+        source_row=1,
+        sample="PATIENT_A",
+        symbol="LUC7L2",
+        hgvsc="NM_016019.4:c.784dup",
+        genomic_location="chr7:139097298",
+        ref_allele="T",
+        alt_allele="TC",
+    )
+    service = BrowserReviewService(profile_root=tmp_path)
+    calls = []
+
+    class Context:
+        pages = [object()]
+
+        def close(self):
+            pass
+
+    class Runtime:
+        chromium = None
+
+        def __init__(self):
+            self.chromium = self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def launch_persistent_context(self, *args, **kwargs):
+            return Context()
+
+    def resolve(page, current_variant, artifact_directory, *, progress):
+        calls.append(current_variant.sample)
+        return DatabaseEvidence("Franklin", "error", "temporary failure")
+
+    monkeypatch.setattr(
+        service, "_browser_api", lambda: (lambda: Runtime(), Exception, TimeoutError)
+    )
+    monkeypatch.setattr(service, "_resolve_franklin_queries", resolve)
+    monkeypatch.setattr(service, "_wait_between_queries", lambda *args, **kwargs: None)
+
+    service._search_franklin([variant], tmp_path / "franklin", progress=None)
+
+    assert calls == ["PATIENT_A"]
+
+
+def test_browser_service_default_delay_range_is_three_to_eight_seconds(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path)
+
+    assert service.request_delay_ms == 3_000
+    assert service.request_delay_max_ms == 8_000
+
+
+@pytest.mark.parametrize("status", ["not_found", "identity_mismatch"])
+def test_franklin_does_not_repeat_terminal_results(
+    tmp_path, monkeypatch, status
+):
+    variant = VariantRecord(
+        source_file=Path("synthetic.tsv"),
+        source_row=1,
+        sample="PATIENT_A",
+        symbol="LUC7L2",
+        hgvsc="NM_016019.4:c.784dup",
+        genomic_location="chr7:139097298",
+        ref_allele="T",
+        alt_allele="TC",
+    )
+    service = BrowserReviewService(profile_root=tmp_path, franklin_attempts=3)
+    calls = []
+
+    class Context:
+        pages = [object()]
+
+        def close(self):
+            pass
+
+    class Runtime:
+        chromium = None
+
+        def __init__(self):
+            self.chromium = self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def launch_persistent_context(self, *args, **kwargs):
+            return Context()
+
+    def resolve(page, current_variant, artifact_directory, *, progress):
+        calls.append(current_variant.sample)
+        return DatabaseEvidence("Franklin", status, "terminal result")
+
+    monkeypatch.setattr(
+        service, "_browser_api", lambda: (lambda: Runtime(), Exception, TimeoutError)
+    )
+    monkeypatch.setattr(service, "_resolve_franklin_queries", resolve)
+    monkeypatch.setattr(service, "_wait_between_queries", lambda *args, **kwargs: None)
+
+    service._search_franklin([variant], tmp_path / "franklin", progress=None)
+
+    assert calls == ["PATIENT_A"]
 
 
 def test_franklin_category_titles_wait_for_nonempty_de_novo(tmp_path):
@@ -1049,6 +1739,289 @@ def test_clinvar_capture_is_cropped_to_title_and_classification_summary(tmp_path
         "width": 1000,
         "height": 410,
     }
+
+
+def test_clinvar_queries_use_protein_then_transcript_then_grch37_position():
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+
+    assert _clinvar_queries(variant) == [
+        "TP53 R175H",
+        "NM_000546.6:c.524G>A",
+        "TP53[gene] AND 17[chr] AND 7578406[chrpos37]",
+    ]
+
+
+def test_clinvar_identity_requires_requested_change_and_grch37_location():
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    matching = (
+        "NM_000546.6(TP53):c.524G>A (p.Arg175His)\n"
+        "Location\n17: 7578406 (GRCh37)"
+    )
+    wrong_allele = (
+        "NM_000546.6(TP53):c.524G>T (p.Arg175Leu)\n"
+        "Location\n17: 7578406 (GRCh37)"
+    )
+
+    accepted = _clinvar_identity(matching, variant)
+    rejected = _clinvar_identity(wrong_allele, variant)
+
+    assert accepted.accepted
+    assert accepted.basis == "exact_transcript_grch37"
+    assert not rejected.accepted
+
+
+def test_clinvar_protein_fallback_requires_gene_and_grch37_location(tmp_path, monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+    exact_url = "https://www.ncbi.nlm.nih.gov/clinvar/variation/12374/"
+    exact_body = (
+        "TP53 p.Arg175His\n"
+        "Variation ID: 12374 Accession: VCV000012374.86\n"
+        "Location\n17: 7578406 (GRCh37)"
+    )
+
+    class Locator:
+        def __init__(self, page):
+            self.page = page
+
+        def inner_text(self, **kwargs):
+            return exact_body if self.page.url == exact_url else "Search results"
+
+        def evaluate_all(self, script):
+            if "R175H" not in self.page.url:
+                return []
+            return [{"text": "TP53 p.Arg175His", "href": exact_url}]
+
+    class Page:
+        url = ""
+
+        def goto(self, url, **kwargs):
+            self.url = url
+
+        def locator(self, selector):
+            return Locator(self)
+
+    monkeypatch.setattr(service, "_capture_clinvar_result", lambda v, e, p, d: e)
+    evidence = service._lookup_clinvar_variant(Page(), variant, tmp_path)
+
+    assert evidence.status == "found"
+    assert evidence.raw["identity_verification"]["basis"] == "gene_protein_grch37"
+    assert evidence.raw["query_attempts"] == ["TP53 R175H"]
+    assert not _clinvar_identity(exact_body, variant).accepted
+    assert not _clinvar_identity(
+        exact_body.replace("7578406", "7578407"), variant, allow_protein=True
+    ).accepted
+    assert not _clinvar_identity(
+        exact_body.replace("TP53", "TP532"), variant, allow_protein=True
+    ).accepted
+    assert not _clinvar_identity(
+        exact_body + "\nNM_000546.6:c.524G>T", variant, allow_protein=True
+    ).accepted
+
+
+def test_clinvar_search_uses_browser_without_database_api(tmp_path, monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+
+    class Context:
+        pages = [object()]
+
+        def close(self):
+            pass
+
+    class Runtime:
+        chromium = None
+
+        def __init__(self):
+            self.chromium = self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def launch_persistent_context(self, *args, **kwargs):
+            return Context()
+
+    monkeypatch.setattr(
+        service, "_browser_api", lambda: (lambda: Runtime(), Exception, TimeoutError)
+    )
+    monkeypatch.setattr(
+        "archer_processor.services.database_search.DatabaseSearchService.search_variant",
+        lambda *args, **kwargs: pytest.fail("ClinVar database API must not be called"),
+    )
+    monkeypatch.setattr(
+        service,
+        "_lookup_clinvar_variant",
+        lambda page, candidate, directory: DatabaseEvidence(
+            "ClinVar", "found", "website result"
+        ),
+        raising=False,
+    )
+
+    results = service._search_clinvar([variant], tmp_path, progress=None)
+
+    assert results[service.variant_key(variant)].status == "found"
+
+
+def test_clinvar_website_lookup_verifies_redirected_variant_before_capture(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+    body = (
+        "NM_000546.6(TP53):c.524G>A (p.Arg175His)\n"
+        "Variation ID: 12374 Accession: VCV000012374.86\n"
+        "Location\n17: 7578406 (GRCh37)"
+    )
+
+    class Body:
+        def inner_text(self, **kwargs):
+            return body
+
+    class Links:
+        def evaluate_all(self, script):
+            return []
+
+    class Page:
+        url = ""
+
+        def goto(self, url, **kwargs):
+            self.url = "https://www.ncbi.nlm.nih.gov/clinvar/variation/12374/"
+
+        def locator(self, selector):
+            if selector == "body":
+                return Body()
+            assert selector == "a[href*='/clinvar/variation/']"
+            return Links()
+
+    captured = []
+    monkeypatch.setattr(
+        service,
+        "_capture_clinvar_result",
+        lambda requested, seed, page, directory: (captured.append(seed), seed)[1],
+    )
+
+    evidence = service._lookup_clinvar_variant(Page(), variant, tmp_path)
+
+    assert evidence.status == "found"
+    assert evidence.accession == "VCV000012374.86"
+    assert evidence.raw["assembly_verified"] == "GRCh37"
+    assert evidence.raw["query_attempts"] == ["TP53 R175H"]
+    assert len(captured) == 1
+
+
+def test_clinvar_website_lookup_uses_exact_row_from_grch37_fallback(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+    exact_url = "https://www.ncbi.nlm.nih.gov/clinvar/variation/12374/"
+    exact_body = (
+        "NM_000546.6(TP53):c.524G>A (p.Arg175His)\n"
+        "Variation ID: 12374 Accession: VCV000012374.86\n"
+        "Location\n17: 7578406 (GRCh37)"
+    )
+
+    class Locator:
+        def __init__(self, page, selector):
+            self.page = page
+            self.selector = selector
+
+        def inner_text(self, **kwargs):
+            if self.page.url == exact_url:
+                return exact_body
+            return "Search results" if "chrpos37" in self.page.last_query else "No items found."
+
+        def evaluate_all(self, script):
+            if "chrpos37" not in self.page.last_query:
+                return []
+            return [
+                {
+                    "text": "NM_000546.6(TP53):c.524G>T (p.Arg175Leu)",
+                    "href": "https://www.ncbi.nlm.nih.gov/clinvar/variation/182963/",
+                },
+                {
+                    "text": "NM_000546.6(TP53):c.524G>A (p.Arg175His)",
+                    "href": exact_url,
+                },
+            ]
+
+    class Page:
+        url = ""
+        last_query = ""
+
+        def goto(self, url, **kwargs):
+            self.url = url
+            self.last_query = url
+
+        def locator(self, selector):
+            return Locator(self, selector)
+
+    page = Page()
+    monkeypatch.setattr(
+        service,
+        "_capture_clinvar_result",
+        lambda requested, seed, page, directory: seed,
+    )
+
+    evidence = service._lookup_clinvar_variant(page, variant, tmp_path)
+
+    assert evidence.status == "found"
+    assert page.url == exact_url
+    assert evidence.raw["query_attempts"] == _clinvar_queries(variant)
+
+
+def test_clinvar_website_lookup_accepts_updated_transcript_in_result_row_context(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+    exact_url = "https://www.ncbi.nlm.nih.gov/clinvar/variation/12374/"
+    exact_body = (
+        "NM_000546.6(TP53):c.524G>A (p.Arg175His)\n"
+        "Variation ID: 12374 Accession: VCV000012374.86\n"
+        "Location\n17: 7578406 (GRCh37)"
+    )
+
+    class Locator:
+        def __init__(self, page, selector):
+            self.page = page
+            self.selector = selector
+
+        def inner_text(self, **kwargs):
+            return exact_body if self.page.url == exact_url else "Search results"
+
+        def evaluate_all(self, script):
+            if "closest" not in script:
+                return [{"text": "VCV000012374.86", "href": exact_url}]
+            return [
+                {
+                    "text": "NM_000546.7(TP53):c.524G>A (p.Arg175His)",
+                    "href": exact_url,
+                }
+            ]
+
+    class Page:
+        url = ""
+
+        def goto(self, url, **kwargs):
+            self.url = exact_url if "/variation/" in url else url
+
+        def locator(self, selector):
+            return Locator(self, selector)
+
+    monkeypatch.setattr(
+        service,
+        "_capture_clinvar_result",
+        lambda requested, seed, page, directory: seed,
+    )
+
+    evidence = service._lookup_clinvar_variant(Page(), variant, tmp_path)
+
+    assert evidence.status == "found"
+    assert evidence.url == exact_url
 
 
 def test_franklin_primary_capture_uses_full_page(tmp_path):
@@ -1209,6 +2182,22 @@ def test_franklin_computed_capture_uses_both_subtabs_and_skips_somatic(
             selected.append(self.label)
 
         def evaluate(self, script):
+            if "getBoundingClientRect" in script:
+                classification = self.label or "ACMG Classification"
+                return {
+                    "x": 16,
+                    "width": 1880,
+                    "height": 700,
+                    "viewport_width": 1920,
+                    "text": (
+                        f"{classification}\nSuggested Classification\n"
+                        + (
+                            "Likely Oncogenic"
+                            if classification == "Oncogenic Classification"
+                            else "Likely Pathogenic"
+                        )
+                    ),
+                }
             selected.append(self.label)
             return True
 
@@ -1231,7 +2220,11 @@ def test_franklin_computed_capture_uses_both_subtabs_and_skips_somatic(
                 "gnx-result-page",
                 "gnx-oncogenic-classification-app",
             }
-            return Locator()
+            label = {
+                "gnx-result-page": "ACMG Classification",
+                "gnx-oncogenic-classification-app": "Oncogenic Classification",
+            }.get(selector, "")
+            return Locator(label)
 
         def wait_for_timeout(self, milliseconds):
             pass
@@ -1265,6 +2258,53 @@ def test_franklin_computed_capture_uses_both_subtabs_and_skips_somatic(
         "ACMG Classification",
     ]
     assert [item["label"] for item in screenshots] == ["ACMG", "Oncogenic"]
+
+
+def test_franklin_subtab_switch_uses_fixed_render_buffer_for_narrow_valid_panel(
+    tmp_path,
+):
+    service = BrowserReviewService(profile_root=tmp_path)
+
+    class TabLocator:
+        def count(self):
+            return 1
+
+        def evaluate(self, script):
+            return True
+
+    class PanelLocator:
+        def wait_for(self, **kwargs):
+            pass
+
+        def evaluate(self, script):
+            raise AssertionError(
+                "A valid Franklin panel must not be rejected by a width/text heuristic"
+            )
+
+    class Page:
+        def __init__(self):
+            self.waits = []
+            self.panel = PanelLocator()
+
+        def get_by_text(self, label, exact):
+            return TabLocator()
+
+        def locator(self, selector):
+            assert selector == "gnx-oncogenic-classification-app"
+            return self.panel
+
+        def evaluate(self, script):
+            pass
+
+        def wait_for_timeout(self, milliseconds):
+            self.waits.append(milliseconds)
+
+    page = Page()
+    service._activate_franklin_classification_subtab(
+        page, "Oncogenic Classification"
+    )
+
+    assert page.waits == [1_000]
 
 
 def test_browser_review_can_be_cancelled_before_opening_edge(tmp_path):
@@ -1369,11 +2409,29 @@ def test_franklin_classification_capture_ends_with_complete_de_novo_card(tmp_pat
     assert not any("Population" in item["label"] for item in screenshots)
 
 
-def test_franklin_overview_starts_above_visible_gene_header(tmp_path):
+def test_franklin_overview_uses_only_active_panel_layout(
+    tmp_path, monkeypatch
+):
     service = BrowserReviewService(
         profile_root=tmp_path, capture_validator=VALID_CAPTURE
     )
     captures = []
+    expanded_selectors = []
+
+    class ActivePanelLayout:
+        def __init__(self, selector):
+            self.selector = selector
+
+        def __enter__(self):
+            expanded_selectors.append(self.selector)
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    monkeypatch.setattr(
+        "archer_processor.services.browser_review.expanded_capture_layout",
+        lambda page, selector: ActivePanelLayout(selector),
+    )
 
     class Element:
         def __init__(self, box):
@@ -1415,9 +2473,11 @@ def test_franklin_overview_starts_above_visible_gene_header(tmp_path):
         Panel({"x": 100, "y": 150, "width": 900, "height": 600}),
         Element({"x": 100, "y": 360, "width": 900, "height": 100}),
         tmp_path / "overview.png",
+        panel_selector="gnx-oncogenic-classification-app",
         gene_symbol="TP53",
     )
 
+    assert expanded_selectors == ["gnx-oncogenic-classification-app"]
     assert captures[0]["clip"] == {
         "x": 38,
         "y": 66,
@@ -1695,9 +2755,12 @@ def test_mtbp_screenshot_row_matching_requires_exact_variant_identity():
     )
 
 
-def test_mtbp_screenshot_rediscovers_target_after_hidden_incident(tmp_path):
+def test_mtbp_screenshot_rediscovers_target_after_hidden_incident(tmp_path, monkeypatch):
     variant = ArcherTsvReader().read(FIXTURE)[3]
     service = BrowserReviewService(profile_root=tmp_path)
+    monkeypatch.setattr(service, "_extract_mtbp_rows", lambda page: [{
+        "row_index": 0, "gene": "TP53", "identity_text": "p.Arg175His"
+    }])
     attempts = 0
 
     class Cells:
@@ -2221,6 +3284,149 @@ def test_mtbp_resume_does_not_duplicate_report_when_recovery_is_unavailable(
     assert results[key].raw["analysis_id"] == "ARCHER-pending"
 
 
+def test_mtbp_ambiguous_submission_preserves_recovery_identity(tmp_path):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+
+    evidence = _mtbp_uncertain_submission_evidence(
+        variant,
+        variant.hgvsc,
+        "ARCHER-uncertain",
+        [variant.hgvsc],
+        "https://mtbp.org/analyse/",
+        TimeoutError("no redirect"),
+    )
+
+    assert evidence.status == "submission_unknown"
+    assert evidence.raw["analysis_id"] == "ARCHER-uncertain"
+    assert evidence.raw["query_attempts"] == [variant.hgvsc]
+    assert evidence.raw["failure_stage"] == "submission_acceptance"
+    assert evidence.raw["remote_report_recovery"]["status"] == "pending"
+
+
+def test_oncokb_render_timeout_keeps_diagnostic_capture(tmp_path, monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+
+    class Body:
+        def inner_text(self, **kwargs):
+            return "OncoKB page shell without variant evidence"
+
+    class Page:
+        url = "https://www.oncokb.org/gene/TP53/R175H"
+
+        def __init__(self):
+            self.captures = []
+
+        def goto(self, url, **kwargs):
+            self.url = url
+
+        def locator(self, selector):
+            assert selector == "body"
+            return Body()
+
+        def screenshot(self, **kwargs):
+            self.captures.append(kwargs)
+
+    page = Page()
+    monkeypatch.setattr(
+        service,
+        "_wait_for_oncokb_result",
+        lambda candidate_page: (_ for _ in ()).throw(TimeoutError("slow render")),
+    )
+
+    evidence = service._lookup_oncokb_url(
+        page,
+        variant,
+        "https://www.oncokb.org/gene/TP53/R175H",
+        tmp_path / "oncokb",
+    )
+
+    assert evidence.status == "error"
+    assert evidence.raw["failure_stage"] == "result_rendering"
+    assert evidence.raw["failure_kind"] == "transient"
+    assert "page shell" in evidence.raw["visible_text_preview"]
+    assert evidence.raw["diagnostic_screenshot"].endswith(".png")
+    assert len(page.captures) == 1
+
+
+def test_mtbp_resume_recovers_ambiguous_submission_before_new_submission(
+    tmp_path, monkeypatch
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    service = BrowserReviewService(profile_root=tmp_path)
+    key = service.variant_key(variant)
+    prior = DatabaseEvidence(
+        "MTBP",
+        "submission_unknown",
+        "acceptance uncertain",
+        raw={"analysis_id": "ARCHER-uncertain"},
+    )
+    recovered_calls = []
+
+    def recover(pending, artifact_directory, *, progress):
+        recovered_calls.extend(pending)
+        return {
+            key: DatabaseEvidence(
+                "MTBP",
+                "found",
+                "recovered",
+                raw={"remote_report_cleanup": {"status": "deleted"}},
+            )
+        }
+
+    monkeypatch.setattr(service, "_recover_mtbp_timeouts", recover)
+    monkeypatch.setattr(
+        service,
+        "_search_mtbp_batch",
+        lambda *args, **kwargs: pytest.fail("uncertain submission must not be duplicated"),
+    )
+
+    result = service._search_mtbp(
+        [variant],
+        tmp_path / "mtbp",
+        progress=None,
+        prior_evidence={key: [prior]},
+    )
+
+    assert recovered_calls == [(variant, prior)]
+    assert result[key].status == "found"
+
+
+def test_mtbp_new_batch_protects_unavailable_retained_report(tmp_path, monkeypatch):
+    variants = ArcherTsvReader().read(FIXTURE)[3:5]
+    service = BrowserReviewService(profile_root=tmp_path)
+    retained_key = service.variant_key(variants[0])
+    retained = DatabaseEvidence(
+        "MTBP",
+        "timeout",
+        "pending",
+        raw={"analysis_id": "ARCHER-protected"},
+    )
+    captured_protection = []
+
+    monkeypatch.setattr(
+        service,
+        "_recover_mtbp_timeouts",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("Edge unavailable")),
+    )
+
+    def submit(batch, artifact_directory, *, progress, protected_analysis_ids):
+        captured_protection.extend(protected_analysis_ids)
+        variant = batch[0]
+        return {service.variant_key(variant): DatabaseEvidence("MTBP", "not_found", "")}
+
+    monkeypatch.setattr(service, "_search_mtbp_batch", submit)
+
+    service._search_mtbp(
+        variants,
+        tmp_path / "mtbp",
+        progress=None,
+        prior_evidence={retained_key: [retained]},
+    )
+
+    assert captured_protection == ["ARCHER-protected"]
+
+
 def test_mtbp_resume_resubmits_partial_capture_only_after_confirmed_absence(
     tmp_path, monkeypatch
 ):
@@ -2289,6 +3495,7 @@ def test_mtbp_late_recovery_opens_existing_report_without_form_submission(
     tmp_path, monkeypatch
 ):
     from dataclasses import replace
+    from archer_processor.services.evidence_audit import EvidenceAuditIndex, write_evidence_audit
 
     variant = ArcherTsvReader().read(FIXTURE)[3]
     second = replace(variant, sample=variant.sample + "-replicate")
@@ -2397,12 +3604,23 @@ def test_mtbp_late_recovery_opens_existing_report_without_form_submission(
     )
     deleted = []
 
+    for candidate in (variant, second):
+        write_evidence_audit(
+            tmp_path / "mtbp", "MTBP", candidate,
+            DatabaseEvidence("MTBP", "not_found", "Stale canonical result."),
+        )
+
     def delete_after_local_persistence(page, candidate_analysis_id):
         assert captured == [variant, second]
         audit_path = service._screenshot_path(
             tmp_path / "mtbp", "MTBP", variant
         ).with_suffix(".audit.json")
         assert audit_path.exists()
+        for candidate in (variant, second):
+            checkpoint = EvidenceAuditIndex.build(tmp_path).best("MTBP", candidate)
+            assert checkpoint[1]["status"] == "found"
+            assert checkpoint[1]["requested_identity"]["sample"] == candidate.sample
+            assert checkpoint[1]["query_attempts"] == [candidate.hgvsc]
         deleted.append(candidate_analysis_id)
         return {"status": "deleted", "message": "removed"}
 
@@ -2428,6 +3646,10 @@ def test_mtbp_late_recovery_opens_existing_report_without_form_submission(
     assert recovered[service.variant_key(variant)].raw["remote_report_cleanup"]["status"] == "deleted"
     assert deleted == [analysis_id]
     assert visited[0] == service.login_url("MTBP")
+    assert visited.count(MTBP_REPORTS_URL) == 1
+    for candidate in (variant, second):
+        checkpoint = EvidenceAuditIndex.build(tmp_path).best("MTBP", candidate)
+        assert checkpoint[1]["raw"]["remote_report_cleanup"]["status"] == "deleted"
 
 
 class _FakeMtbpDialog:
@@ -2518,6 +3740,7 @@ class _FakeMtbpReportsPage:
         self.url = "https://mtbp.org/analyse/"
         self.dialog_handler = None
         self.dialogs = []
+        self.waits = []
 
     def goto(self, url, **kwargs):
         self.url = url
@@ -2538,6 +3761,9 @@ class _FakeMtbpReportsPage:
         assert event == "dialog"
         self.dialog_handler = handler
 
+    def wait_for_timeout(self, milliseconds):
+        self.waits.append(milliseconds)
+
 
 def test_mtbp_deletes_exact_generated_report_after_confirming(tmp_path):
     service = BrowserReviewService(profile_root=tmp_path)
@@ -2551,6 +3777,7 @@ def test_mtbp_deletes_exact_generated_report_after_confirming(tmp_path):
     assert page.reports == ["manual-report"]
     assert len(page.dialogs) == 1
     assert page.dialogs[0].accepted
+    assert sum(page.waits) >= 3_000
 
 
 def test_mtbp_delete_is_idempotent_when_exact_report_is_already_absent(tmp_path):
@@ -2563,9 +3790,34 @@ def test_mtbp_delete_is_idempotent_when_exact_report_is_already_absent(tmp_path)
     assert page.reports == ["manual-report"]
 
 
+def test_mtbp_delete_reopens_report_list_from_detail_page(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path)
+    analysis_id = "ARCHER-on-detail-page"
+    page = _FakeMtbpReportsPage(["manual-report", analysis_id])
+    page.url = "https://mtbp.org/patients/42/sample/7/report/9/"
+    visited = []
+
+    def open_reports(candidate_page, url, **kwargs):
+        visited.append(url)
+        candidate_page.goto(url)
+
+    service._goto_with_retries = open_reports
+
+    outcome = service._delete_mtbp_report(page, analysis_id)
+
+    assert visited == [
+        "https://mtbp.org/patients/",
+        "https://mtbp.org/patients/",
+    ]
+    assert outcome["status"] == "deleted"
+    assert page.reports == ["manual-report"]
+
+
 def test_mtbp_resume_retries_failed_cleanup_without_resubmitting(
     tmp_path, monkeypatch
 ):
+    from archer_processor.services.evidence_audit import EvidenceAuditIndex, write_evidence_audit
+
     variant = ArcherTsvReader().read(FIXTURE)[3]
     analysis_id = "ARCHER-cleanup-retry"
     page = _FakeMtbpReportsPage(["manual-report", analysis_id])
@@ -2611,6 +3863,7 @@ def test_mtbp_resume_retries_failed_cleanup_without_resubmitting(
             "remote_report_cleanup": {"status": "failed"},
         },
     )
+    write_evidence_audit(tmp_path / "mtbp", "MTBP", variant, prior)
 
     recovered = service._recover_mtbp_timeouts(
         [(variant, prior)], tmp_path / "mtbp", progress=None
@@ -2620,12 +3873,15 @@ def test_mtbp_resume_retries_failed_cleanup_without_resubmitting(
     assert evidence is prior
     assert evidence.raw["remote_report_cleanup"]["status"] == "deleted"
     assert page.reports == ["manual-report"]
+    checkpoint = EvidenceAuditIndex.build(tmp_path).best("MTBP", variant)
+    assert checkpoint[1]["raw"]["remote_report_cleanup"]["status"] == "deleted"
 
 
-def test_mtbp_finalization_retains_incomplete_report_for_recovery(
+def test_mtbp_finalization_deletes_incomplete_report_after_saving_audit(
     tmp_path, monkeypatch
 ):
     service = BrowserReviewService(profile_root=tmp_path)
+    variant = ArcherTsvReader().read(FIXTURE)[3]
     evidence = DatabaseEvidence(
         "MTBP",
         "partial_capture",
@@ -2635,22 +3891,62 @@ def test_mtbp_finalization_retains_incomplete_report_for_recovery(
     audit_path = tmp_path / "mtbp" / "incomplete.audit.json"
     audit_path.parent.mkdir()
 
+    deleted = []
     monkeypatch.setattr(
         service,
         "_delete_mtbp_report",
-        lambda *args: pytest.fail("incomplete MTBP reports must not be deleted"),
+        lambda page, analysis_id: deleted.append(analysis_id)
+        or {"status": "deleted", "message": "deleted"},
     )
 
     outcome = service._finalize_mtbp_report(
-        object(), "ARCHER-incomplete", [(audit_path, evidence)]
+        object(), "ARCHER-incomplete", [(audit_path, variant, evidence)]
     )
 
-    assert outcome["status"] == "retained_incomplete"
+    assert outcome["status"] == "deleted"
+    assert deleted == ["ARCHER-incomplete"]
     assert audit_path.exists()
     assert evidence.raw["remote_report_cleanup"] == outcome
 
 
-def test_mtbp_preflight_removes_all_old_archer_reports(tmp_path):
+def test_mtbp_finalization_deletes_complete_report_with_legitimate_not_found(
+    tmp_path, monkeypatch
+):
+    service = BrowserReviewService(profile_root=tmp_path)
+    variants = ArcherTsvReader().read(FIXTURE)[3:5]
+    found = DatabaseEvidence(
+        "MTBP",
+        "found",
+        "matched",
+        raw={"analysis_id": "ARCHER-mixed", "screenshots": [{"path": "saved.png"}]},
+    )
+    not_found = DatabaseEvidence(
+        "MTBP",
+        "not_found",
+        "no matching row",
+        raw={"analysis_id": "ARCHER-mixed", "screenshots": []},
+    )
+    (tmp_path / "mtbp").mkdir()
+    records = [
+        (tmp_path / "mtbp" / "found.audit.json", variants[0], found),
+        (tmp_path / "mtbp" / "not-found.audit.json", variants[1], not_found),
+    ]
+    deleted = []
+    monkeypatch.setattr(
+        service,
+        "_delete_mtbp_report",
+        lambda page, analysis_id: deleted.append(analysis_id)
+        or {"status": "deleted", "message": "deleted"},
+    )
+
+    outcome = service._finalize_mtbp_report(object(), "ARCHER-mixed", records)
+
+    assert outcome["status"] == "deleted"
+    assert deleted == ["ARCHER-mixed"]
+    assert all(item.raw["remote_report_cleanup"]["status"] == "deleted" for _, _, item in records)
+
+
+def test_mtbp_preflight_removes_every_archer_report_before_submission(tmp_path):
     service = BrowserReviewService(profile_root=tmp_path)
     reports = [
         "manual-1",
@@ -2671,9 +3967,12 @@ def test_mtbp_preflight_removes_all_old_archer_reports(tmp_path):
         "ARCHER-old-3",
     ]
     assert outcome["remaining_reports"] == 2
+    assert outcome["remaining_archer_reports"] == 0
 
 
-def test_mtbp_preflight_removes_archer_reports_even_below_capacity(tmp_path):
+def test_mtbp_preflight_enforces_one_archer_report_limit_even_below_account_capacity(
+    tmp_path,
+):
     service = BrowserReviewService(profile_root=tmp_path)
     reports = ["manual-1", "ARCHER-pending", "manual-2", "manual-3"]
     page = _FakeMtbpReportsPage(reports)
@@ -2686,9 +3985,50 @@ def test_mtbp_preflight_removes_archer_reports_even_below_capacity(tmp_path):
     assert outcome["remaining_archer_reports"] == 0
 
 
-def test_mtbp_preflight_refuses_to_delete_five_manual_reports(tmp_path):
+def test_mtbp_preflight_logs_capacity_and_protected_report_counts(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path)
+    page = _FakeMtbpReportsPage(
+        ["manual-1", "ARCHER-incomplete", "manual-2"]
+    )
+    messages = []
+
+    outcome = service._cleanup_stale_mtbp_reports(
+        page,
+        progress=messages.append,
+        protected_analysis_ids={"ARCHER-incomplete"},
+    )
+
+    assert outcome["remaining_reports"] == 2
+    assert messages == [
+        "MTBP: removed old app report ARCHER-incomplete",
+        "MTBP PREFLIGHT | reports=2 | archer_reports=0 | protected_reports=1 | "
+        "available_archer_slots=1 | cleanup=deleted_stale"
+    ]
+
+
+def test_mtbp_preflight_removes_protected_archer_report_before_new_submission(tmp_path):
+    service = BrowserReviewService(profile_root=tmp_path)
+    page = _FakeMtbpReportsPage(
+        ["manual-1", "ARCHER-incomplete", "manual-2", "ARCHER-safe", "manual-3"]
+    )
+
+    outcome = service._cleanup_stale_mtbp_reports(
+        page,
+        progress=None,
+        protected_analysis_ids={"ARCHER-incomplete"},
+    )
+
+    assert "ARCHER-incomplete" not in page.reports
+    assert "ARCHER-safe" not in page.reports
+    assert outcome["deleted_stale_reports"] == ["ARCHER-incomplete", "ARCHER-safe"]
+
+
+def test_mtbp_preflight_never_treats_manual_reports_as_archer_capacity(tmp_path):
     service = BrowserReviewService(profile_root=tmp_path)
     page = _FakeMtbpReportsPage([f"manual-{index}" for index in range(5)])
 
-    with pytest.raises(RuntimeError, match="delete an older report manually"):
-        service._cleanup_stale_mtbp_reports(page, progress=None)
+    outcome = service._cleanup_stale_mtbp_reports(page, progress=None)
+
+    assert page.reports == [f"manual-{index}" for index in range(5)]
+    assert outcome["remaining_archer_reports"] == 0
+    assert outcome["available_archer_slots"] == 1
