@@ -27,6 +27,7 @@ outputs/
 *.fq
 *.fq.gz
 *.pdf
+!docs/brukerguide/VPM_Tolkning_Brukerguide.pdf
 *.docx
 *.pptx
 

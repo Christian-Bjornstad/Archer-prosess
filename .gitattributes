@@ -1,0 +1,3 @@
+# Keep the illustrated guide byte-for-byte intact across platforms.
+docs/brukerguide/*.pdf binary
+docs/brukerguide/bilder/*.png binary
