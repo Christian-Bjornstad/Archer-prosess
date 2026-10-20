@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import openpyxl
 
@@ -17,7 +17,16 @@ from archer_processor.core.rules import FilterEngine
 from archer_processor.io import ArcherTsvReader
 
 from .database_selection import HGVSC_HEADER, SAMPLE_HEADER, SELECTION_SHEET, SKIP_HEADER
-from .evidence_audit import EvidenceAuditIndex, migrate_loaded_evidence
+from .evidence_audit import (
+    AUDIT_SCHEMA_VERSION,
+    EvidenceAuditIndex,
+    is_completed_evidence,
+    migrate_loaded_evidence,
+)
+from .evidence_history import EvidenceHistoryError
+
+if TYPE_CHECKING:
+    from .evidence_history import EvidenceHistoryStore
 
 
 @dataclass(slots=True)
@@ -34,15 +43,19 @@ class ProcessedWorkbookLoader:
         self,
         *,
         filter_engine: FilterEngine | None = None,
+        history_store: EvidenceHistoryStore | None = None,
     ) -> None:
         self.reader = ArcherTsvReader()
         self.filter_engine = filter_engine or FilterEngine()
+        self.history_store = history_store
+        self.load_warnings: list[str] = []
 
     def load(
         self,
         workbook_path: Path,
         progress: Callable[[int, int, str], None] | None = None,
     ) -> ProcessedWorkbookState:
+        self.load_warnings = []
         workbook_path = workbook_path.resolve()
         if not workbook_path.exists():
             raise ValueError(f"Workbook not found: {workbook_path}")
@@ -169,6 +182,7 @@ class ProcessedWorkbookLoader:
             run_date=resolved_run_date,
             variants=variants,
             rules_applied=[rule.rule_id for rule in self.filter_engine.rules],
+            warnings=list(self.load_warnings),
             started_at=timestamp,
             finished_at=timestamp,
             archer_version=self.reader.detect_version(raw_headers),
@@ -240,7 +254,51 @@ class ProcessedWorkbookLoader:
             url=self._text(payload.get("url")),
             raw=raw if isinstance(raw, dict) else {},
         )
-        return migrate_loaded_evidence(evidence, artifact_root)
+        evidence = migrate_loaded_evidence(evidence, artifact_root)
+        self._backfill_history(variant, evidence, payload)
+        return evidence
+
+    def _backfill_history(
+        self,
+        variant: VariantRecord,
+        evidence: DatabaseEvidence,
+        payload: dict[str, Any],
+    ) -> None:
+        """Seed only identity-qualified, complete audits with their original time."""
+        if (
+            self.history_store is None
+            or evidence.status != "found"
+            or not is_completed_evidence(evidence)
+            or payload.get("schema_version") != AUDIT_SCHEMA_VERSION
+            or not isinstance(payload.get("requested_identity"), dict)
+        ):
+            return
+        timestamp = (
+            evidence.raw["captured_at"]
+            if "captured_at" in evidence.raw
+            else payload.get("written_at")
+        )
+        if not isinstance(timestamp, str):
+            return
+        try:
+            captured_at = datetime.fromisoformat(timestamp)
+        except ValueError:
+            return
+        if captured_at.utcoffset() is None:
+            return
+        context = (
+            str(evidence.raw.get("cancer_type") or "")
+            if evidence.database == "MTBP"
+            else ""
+        )
+        try:
+            self.history_store.record(
+                variant, evidence, context=context, captured_at=captured_at,
+            )
+        except EvidenceHistoryError as exc:
+            warning = f"Historical evidence backup could not be updated: {exc}"
+            if warning not in self.load_warnings:
+                self.load_warnings.append(warning)
 
     @staticmethod
     def _parse_evidence_cell(

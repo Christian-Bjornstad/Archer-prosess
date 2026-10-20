@@ -18,6 +18,7 @@ from PIL import Image as PillowImage
 
 from archer_processor.core.highlights import is_report_omitted, variant_highlight
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
+from archer_processor.core.evidence_display import evidence_display_text, evidence_status_label, is_historical
 from archer_processor.core.sorting import variant_sort_key
 from archer_processor.reports.who_genes import WHO_DRIVER_GENES
 from archer_processor.reports.manual_fields import (
@@ -346,7 +347,7 @@ class PatientExcelReportWriter:
                 ),
                 manual.comment,
                 *[
-                    self._cosmic_id_label(variant)
+                    self._cosmic_overview_label(variant, by_database.get(database, []))
                     if database == "COSMIC"
                     else self._compact_evidence(by_database.get(database, []))
                     for database in REPORT_DATABASES
@@ -547,7 +548,7 @@ class PatientExcelReportWriter:
                 value.hyperlink = items[0].url
                 value.style = "Hyperlink"
                 value.alignment = Alignment(vertical="top", wrap_text=True)
-            ws.row_dimensions[row].height = 34
+            ws.row_dimensions[row].height = 50 if any(is_historical(item) for item in items) else 34
             row += 1
 
         row += 1
@@ -615,7 +616,7 @@ class PatientExcelReportWriter:
                     variant.hgvsc,
                     variant.hgvsp,
                     item.database,
-                    item.status,
+                    evidence_status_label(item),
                     item.clinical_significance,
                     item.accession,
                     item.summary,
@@ -849,7 +850,14 @@ class PatientExcelReportWriter:
                     "ambiguous_result": "Tvetydig resultat",
                 }
                 label = status_labels.get(item.status, item.status.replace("_", " ").title())
-        return self._append_mtbp_functional_evidence(item, label)
+        return evidence_display_text(item, self._append_mtbp_functional_evidence(item, label))
+
+    def _cosmic_overview_label(
+        self, variant: VariantRecord, items: list[DatabaseEvidence]
+    ) -> str:
+        label = self._cosmic_id_label(variant)
+        selected = next((item for item in items if item.status == "found"), items[0] if items else None)
+        return evidence_display_text(selected, label) if selected is not None else label
 
     @staticmethod
     def _mtbp_functional_evidence_label(item: DatabaseEvidence) -> str:
@@ -883,7 +891,7 @@ class PatientExcelReportWriter:
             " | ".join(
                 part
                 for part in [
-                    f"Status: {item.status.replace('_', ' ').title()}",
+                    f"Status: {evidence_status_label(item)}",
                     f"Classification: {item.clinical_significance}"
                     if item.clinical_significance
                     else "",
@@ -902,7 +910,7 @@ class PatientExcelReportWriter:
         if not items:
             return "Not queried"
         return ", ".join(
-            dict.fromkeys(item.status.replace("_", " ").title() for item in items)
+            dict.fromkeys(evidence_status_label(item) for item in items)
         )
 
     def _screenshot_records(
@@ -920,9 +928,12 @@ class PatientExcelReportWriter:
                     if not path or path in seen:
                         continue
                     seen.add(path)
+                    label = str(record.get("label") or f"{item.database} evidence")
+                    if is_historical(item):
+                        label = evidence_display_text(item, label).replace("\n", " · ")
                     records.append(
                         {
-                            "label": str(record.get("label") or f"{item.database} evidence"),
+                            "label": label,
                             "path": path,
                             "url": ""
                             if item.database == "MTBP"
@@ -934,7 +945,7 @@ class PatientExcelReportWriter:
                 seen.add(legacy)
                 records.append(
                     {
-                        "label": f"{item.database} evidence",
+                        "label": evidence_display_text(item, f"{item.database} evidence").replace("\n", " · "),
                         "path": legacy,
                         "url": "" if item.database == "MTBP" else item.url,
                     }

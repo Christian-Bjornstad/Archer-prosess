@@ -18,6 +18,7 @@ from archer_processor.core.highlights import (
     variant_highlight,
 )
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
+from archer_processor.core.evidence_display import evidence_display_text, evidence_status_label
 from archer_processor.core.sorting import variant_sort_key
 from archer_processor.reports.who_genes import WHO_DRIVER_GENES
 from archer_processor.reports.archer_layout import V7_COLUMNS, V7_HIDDEN_COLUMNS
@@ -357,7 +358,7 @@ class ExcelReportWriter:
             items = evidence.get(self._key(variant), [])
             sources = ", ".join(dict.fromkeys(item.database for item in items))
             findings = "\n".join(
-                f"{item.database} [{item.status.replace('_', ' ')}]: "
+                f"{item.database} [{evidence_status_label(item)}]: "
                 f"{item.clinical_significance or item.summary}".strip()
                 for item in items
             )
@@ -513,7 +514,7 @@ class ExcelReportWriter:
                     variant.symbol,
                     variant.hgvsc,
                     item.database,
-                    item.status.replace("_", " ").title(),
+                    evidence_status_label(item),
                     item.clinical_significance,
                     item.accession,
                     item.summary,
@@ -739,6 +740,6 @@ class ExcelReportWriter:
 
     def _evidence_cell(self, evidence_items: list[DatabaseEvidence]) -> str:
         return "\n".join(
-            f"[{item.status}] {item.summary}".strip()
+            f"[{item.status}] {evidence_display_text(item, item.summary)}".strip()
             for item in evidence_items
         )

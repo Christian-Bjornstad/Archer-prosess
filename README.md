@@ -366,6 +366,26 @@ Non-secret settings are stored in `%USERPROFILE%\.archer-prosess\config.json`.
 Passwords are excluded from that JSON file and handled through the operating
 system credential store.
 
+## Previous evidence as a backup
+
+Successful browser lookups are retained locally in
+`%USERPROFILE%\.archer-prosess\evidence_history`, together with validated copies
+of their variant captures. The application always tries the provider first. If
+that lookup fails or returns no match, an exact genomic variant match can supply
+the previous result. MTBP also requires the same cancer context.
+
+Backups appear in amber as **Tidligere resultat**, with the original local date,
+time and UTC offset. They remain available for a fresh search and are explicitly
+marked in Excel and PDF. Using a backup does not refresh its age or erase the
+current lookup error. Existing review workbooks can contribute validated,
+identity-qualified audit results when opened; undated or unverified records are
+excluded.
+
+The history belongs to the current Windows user and computer. This feature does
+not synchronize results between computers. Source TSV files, full patient report
+captures, patient identifiers and credentials are not copied into the shared
+variant snapshots. Attachment image layout is unchanged.
+
 ## Development
 
 Run the full automated test suite:

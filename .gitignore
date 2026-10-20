@@ -41,3 +41,6 @@ reference_lists/*.inspect.ndjson
 .env
 config.json
 *.log
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
