@@ -125,7 +125,7 @@ def artifact_filter_rules(entries: list[dict[str, str]]) -> list[FilterRule]:
         if not hgvsc:
             continue
         reason = str(entry.get("reason") or "").strip() or "Configured artifact; excluded regardless of AF."
-        max_af = _parse_af_threshold(entry.get("max_af"))
+        max_af = parse_artifact_af_threshold(entry.get("max_af"))
         name = f"{gene + ' ' if gene else ''}{_cdna_label(hgvsc)} artifact".strip()
         rules.append(
             FilterRule(
@@ -142,7 +142,7 @@ def artifact_filter_rules(entries: list[dict[str, str]]) -> list[FilterRule]:
 
 class FilterEngine:
     def __init__(self, rules: list[FilterRule] | None = None) -> None:
-        self.rules = rules or production_rules()
+        self.rules = production_rules() if rules is None else rules
 
     def apply(self, variants: list[VariantRecord]) -> list[VariantRecord]:
         for variant in variants:
@@ -190,8 +190,9 @@ def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
 
 
-def _parse_af_threshold(value: object) -> float | None:
-    text = str(value or "").strip().replace(",", ".")
+def parse_artifact_af_threshold(value: object) -> float | None:
+    """Accept a fractional AF, a percentage, or an explicitly blank limit."""
+    text = ("" if value is None else str(value)).strip().replace(",", ".")
     if not text:
         return None
     try:

@@ -288,6 +288,81 @@ def test_edge_launcher_retries_transient_broker_failures(tmp_path, monkeypatch):
     assert sleeps == [1.5, 3.0]
 
 
+@pytest.mark.parametrize(
+    "exit_code, endpoint_ready_at, expected_error",
+    [
+        pytest.param(0, 5.0, None, id="clean-handoff-ready-after-three-seconds"),
+        pytest.param(0, 19.0, None, id="clean-handoff-ready-before-deadline"),
+        pytest.param(0, None, EdgeCdpTimeout, id="clean-handoff-never-ready"),
+        pytest.param(7, None, EdgeCdpError, id="nonzero-exit-fails-early"),
+    ],
+)
+def test_launch_waits_for_clean_broker_handoff_but_bounds_failure(
+    tmp_path, monkeypatch, exit_code, endpoint_ready_at, expected_error,
+):
+    from types import SimpleNamespace
+    from archer_processor.services import edge_cdp
+
+    clock = {"now": 0.0}
+    cleanup = []
+    process = SimpleNamespace(returncode=exit_code, poll=lambda: exit_code)
+    monkeypatch.setattr(edge_cdp.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        edge_cdp.time, "sleep",
+        lambda delay: clock.__setitem__("now", clock["now"] + delay),
+    )
+    monkeypatch.setattr(edge_cdp.subprocess, "Popen", lambda *a, **k: process)
+    monkeypatch.setattr(
+        edge_cdp, "_close_failed_browser",
+        lambda owned_process, version: cleanup.append((owned_process, version)),
+    )
+
+    def read_port(port_file):
+        if endpoint_ready_at is None or clock["now"] < endpoint_ready_at:
+            raise FileNotFoundError("Broker has not announced DevTools yet")
+        return 25687
+
+    def http_json(url, **kwargs):
+        if url.endswith("/json/version"):
+            return {"webSocketDebuggerUrl": "ws://127.0.0.1:25687/devtools/browser/owned"}
+        assert url.endswith("/json/list")
+        return [{"id": "page-1", "type": "page", "webSocketDebuggerUrl":
+                 "ws://127.0.0.1:25687/devtools/page/page-1"}]
+
+    class Connection:
+        def __init__(self, url):
+            pass
+
+        def call(self, *args, **kwargs):
+            return {}
+
+    monkeypatch.setattr(edge_cdp, "_read_devtools_active_port", read_port)
+    monkeypatch.setattr(edge_cdp, "_http_json", http_json)
+    monkeypatch.setattr(edge_cdp, "_CdpConnection", Connection)
+
+    def launch():
+        return EdgeCdpContext._launch_owned(
+            tmp_path, Path("msedge.exe"), viewport={"width": 1024, "height": 640},
+            accept_downloads=False, background=False,
+        )
+
+    if expected_error is None:
+        context = launch()
+        assert context.endpoint == "http://127.0.0.1:25687"
+        assert endpoint_ready_at <= clock["now"] < 20
+        assert cleanup == []
+    else:
+        with pytest.raises(expected_error) as caught:
+            launch()
+        assert type(caught.value) is expected_error
+        assert cleanup == [(process, {})]
+        if exit_code == 0:
+            assert 20 <= clock["now"] < 20.3
+        else:
+            assert 3 <= clock["now"] < 3.3
+            assert "code 7" in str(caught.value)
+
+
 def test_locator_can_scroll_visible_element_before_screenshot():
     class Page:
         def __init__(self):

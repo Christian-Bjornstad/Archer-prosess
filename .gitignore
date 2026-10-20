@@ -33,6 +33,9 @@ outputs/
 # Keep tiny anonymized fixtures only
 !tests/fixtures/*.tsv
 !tests/fixtures/*.xlsx
+!reference_lists/Artefaktliste.xlsx
+!reference_lists/WHO-drivergener.xlsx
+reference_lists/*.inspect.ndjson
 
 # Local config
 .env

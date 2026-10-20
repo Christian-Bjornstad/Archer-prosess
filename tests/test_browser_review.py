@@ -1930,7 +1930,9 @@ def test_clinvar_website_lookup_uses_exact_row_from_grch37_fallback(
             self.selector = selector
 
         def inner_text(self, **kwargs):
-            return exact_body if self.page.url == exact_url else "Search results"
+            if self.page.url == exact_url:
+                return exact_body
+            return "Search results" if "chrpos37" in self.page.last_query else "No items found."
 
         def evaluate_all(self, script):
             if "chrpos37" not in self.page.last_query:
@@ -2753,9 +2755,12 @@ def test_mtbp_screenshot_row_matching_requires_exact_variant_identity():
     )
 
 
-def test_mtbp_screenshot_rediscovers_target_after_hidden_incident(tmp_path):
+def test_mtbp_screenshot_rediscovers_target_after_hidden_incident(tmp_path, monkeypatch):
     variant = ArcherTsvReader().read(FIXTURE)[3]
     service = BrowserReviewService(profile_root=tmp_path)
+    monkeypatch.setattr(service, "_extract_mtbp_rows", lambda page: [{
+        "row_index": 0, "gene": "TP53", "identity_text": "p.Arg175His"
+    }])
     attempts = 0
 
     class Cells:
@@ -3490,6 +3495,7 @@ def test_mtbp_late_recovery_opens_existing_report_without_form_submission(
     tmp_path, monkeypatch
 ):
     from dataclasses import replace
+    from archer_processor.services.evidence_audit import EvidenceAuditIndex, write_evidence_audit
 
     variant = ArcherTsvReader().read(FIXTURE)[3]
     second = replace(variant, sample=variant.sample + "-replicate")
@@ -3598,12 +3604,23 @@ def test_mtbp_late_recovery_opens_existing_report_without_form_submission(
     )
     deleted = []
 
+    for candidate in (variant, second):
+        write_evidence_audit(
+            tmp_path / "mtbp", "MTBP", candidate,
+            DatabaseEvidence("MTBP", "not_found", "Stale canonical result."),
+        )
+
     def delete_after_local_persistence(page, candidate_analysis_id):
         assert captured == [variant, second]
         audit_path = service._screenshot_path(
             tmp_path / "mtbp", "MTBP", variant
         ).with_suffix(".audit.json")
         assert audit_path.exists()
+        for candidate in (variant, second):
+            checkpoint = EvidenceAuditIndex.build(tmp_path).best("MTBP", candidate)
+            assert checkpoint[1]["status"] == "found"
+            assert checkpoint[1]["requested_identity"]["sample"] == candidate.sample
+            assert checkpoint[1]["query_attempts"] == [candidate.hgvsc]
         deleted.append(candidate_analysis_id)
         return {"status": "deleted", "message": "removed"}
 
@@ -3630,6 +3647,9 @@ def test_mtbp_late_recovery_opens_existing_report_without_form_submission(
     assert deleted == [analysis_id]
     assert visited[0] == service.login_url("MTBP")
     assert visited.count(MTBP_REPORTS_URL) == 1
+    for candidate in (variant, second):
+        checkpoint = EvidenceAuditIndex.build(tmp_path).best("MTBP", candidate)
+        assert checkpoint[1]["raw"]["remote_report_cleanup"]["status"] == "deleted"
 
 
 class _FakeMtbpDialog:
@@ -3796,6 +3816,8 @@ def test_mtbp_delete_reopens_report_list_from_detail_page(tmp_path):
 def test_mtbp_resume_retries_failed_cleanup_without_resubmitting(
     tmp_path, monkeypatch
 ):
+    from archer_processor.services.evidence_audit import EvidenceAuditIndex, write_evidence_audit
+
     variant = ArcherTsvReader().read(FIXTURE)[3]
     analysis_id = "ARCHER-cleanup-retry"
     page = _FakeMtbpReportsPage(["manual-report", analysis_id])
@@ -3841,6 +3863,7 @@ def test_mtbp_resume_retries_failed_cleanup_without_resubmitting(
             "remote_report_cleanup": {"status": "failed"},
         },
     )
+    write_evidence_audit(tmp_path / "mtbp", "MTBP", variant, prior)
 
     recovered = service._recover_mtbp_timeouts(
         [(variant, prior)], tmp_path / "mtbp", progress=None
@@ -3850,12 +3873,15 @@ def test_mtbp_resume_retries_failed_cleanup_without_resubmitting(
     assert evidence is prior
     assert evidence.raw["remote_report_cleanup"]["status"] == "deleted"
     assert page.reports == ["manual-report"]
+    checkpoint = EvidenceAuditIndex.build(tmp_path).best("MTBP", variant)
+    assert checkpoint[1]["raw"]["remote_report_cleanup"]["status"] == "deleted"
 
 
 def test_mtbp_finalization_deletes_incomplete_report_after_saving_audit(
     tmp_path, monkeypatch
 ):
     service = BrowserReviewService(profile_root=tmp_path)
+    variant = ArcherTsvReader().read(FIXTURE)[3]
     evidence = DatabaseEvidence(
         "MTBP",
         "partial_capture",
@@ -3874,7 +3900,7 @@ def test_mtbp_finalization_deletes_incomplete_report_after_saving_audit(
     )
 
     outcome = service._finalize_mtbp_report(
-        object(), "ARCHER-incomplete", [(audit_path, evidence)]
+        object(), "ARCHER-incomplete", [(audit_path, variant, evidence)]
     )
 
     assert outcome["status"] == "deleted"
@@ -3887,6 +3913,7 @@ def test_mtbp_finalization_deletes_complete_report_with_legitimate_not_found(
     tmp_path, monkeypatch
 ):
     service = BrowserReviewService(profile_root=tmp_path)
+    variants = ArcherTsvReader().read(FIXTURE)[3:5]
     found = DatabaseEvidence(
         "MTBP",
         "found",
@@ -3901,8 +3928,8 @@ def test_mtbp_finalization_deletes_complete_report_with_legitimate_not_found(
     )
     (tmp_path / "mtbp").mkdir()
     records = [
-        (tmp_path / "mtbp" / "found.audit.json", found),
-        (tmp_path / "mtbp" / "not-found.audit.json", not_found),
+        (tmp_path / "mtbp" / "found.audit.json", variants[0], found),
+        (tmp_path / "mtbp" / "not-found.audit.json", variants[1], not_found),
     ]
     deleted = []
     monkeypatch.setattr(
@@ -3916,7 +3943,7 @@ def test_mtbp_finalization_deletes_complete_report_with_legitimate_not_found(
 
     assert outcome["status"] == "deleted"
     assert deleted == ["ARCHER-mixed"]
-    assert all(item.raw["remote_report_cleanup"]["status"] == "deleted" for _, item in records)
+    assert all(item.raw["remote_report_cleanup"]["status"] == "deleted" for _, _, item in records)
 
 
 def test_mtbp_preflight_removes_every_archer_report_before_submission(tmp_path):
