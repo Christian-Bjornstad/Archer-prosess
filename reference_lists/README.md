@@ -7,8 +7,8 @@ Disse filene inneholder dagens innebygde innhold, uendret:
 - **WHO-drivergener.xlsx:** 54 gensymboler. Arket `WHO` har `Gen` på rad 1.
 
 Kopier filene til en fast lokal mappe dere kan redigere. I appen velges de under
-**Settings → Local files**, i feltene **Artefaktliste** og **WHO-drivergener**.
-Trykk **Save Configuration**. Deretter kan filene oppdateres i Excel uten å
+**Innstillinger → Referanselister**, i feltene **Artefaktliste** og **WHO-drivergener**.
+Trykk **Lagre innstillinger**. Deretter kan filene oppdateres i Excel uten å
 endre kode. Appen overskriver ikke referansefilene.
 
 En valgt artefaktfil erstatter hele artefaktlisten ved neste behandling eller

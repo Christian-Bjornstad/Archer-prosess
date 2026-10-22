@@ -13,9 +13,28 @@ dist/
 htmlcov/
 tmp/
 .worktrees/
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini
+~$*
+
+# Local agent notes and superseded implementation plans
+/.codex/
+/.agents/
+/tasks/
+/design-system/
+/docs/superpowers/
 
 # Local generated outputs and sensitive clinical data
 outputs/
+/test_data/
+/captures/
+*_browser_evidence/
+*.audit.json
+*.geometry.json
+*.jsonl
+*.har
 *.xlsx
 *.xlsm
 *.tsv
@@ -40,5 +59,13 @@ reference_lists/*.inspect.ndjson
 
 # Local config
 .env
+.env.*
+!.env.example
 config.json
 *.log
+*.pem
+*.key
+*.pfx
+*.p12
+.archer-prosess/
+browser_profiles/
