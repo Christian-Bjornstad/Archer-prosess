@@ -428,6 +428,43 @@ def test_matrix_tracks_source_completion_failure_and_search_scope(qt_app, tmp_pa
     assert not window._active_sources
 
 
+def test_mtbp_result_stays_visible_when_workbook_write_is_denied(qt_app, tmp_path, monkeypatch):
+    window = MainWindow()
+    window.result = VariantProcessor().process(
+        Path(__file__).parent / 'fixtures' / 'sample_variants.tsv',
+        '2026-10-22', tmp_path / 'review.xlsx')
+    window.included_only_check.setChecked(False)
+    variant = window._variants_for_search()[0]
+    window.result.variants = [variant]
+    key = BrowserReviewService.variant_key(variant)
+    window._prepare_search_status([variant], ['MTBP'], set())
+    window._source_state_changed(variant.patient_id, 'MTBP', True)
+    window._search_evidence_updated({key: [DatabaseEvidence('MTBP', 'partial_capture', 'matched',
+        raw={'lookup_status': 'found', 'analysis_id': 'ARCHER-synthetic'})]})
+
+    def denied():
+        raise PermissionError('workbook has no write permission')
+
+    monkeypatch.setattr(window, '_write_evidence_workbook', denied)
+    monkeypatch.setattr('archer_processor.gui.app.QMessageBox.warning', lambda *a: None)
+    assert window._try_write_evidence_workbook(show_errors=False) is False
+    column = 2 + window.databases.index('MTBP')
+    assert 'Found: 1' in window.status_matrix.item(0, column).text()
+    assert window.workbook_write_pending
+    assert window.evidence[key][0].raw['lookup_status'] == 'found'
+
+    # Exercise the background writer used by the live search as well.
+    monkeypatch.setattr('archer_processor.gui.app.ExcelReportWriter.write', lambda *a, **kw: denied())
+    worker = WorkbookWriteWorker(window.result, window.evidence,
+        hide_excluded=False, database_skip_keys=set())
+    worker.failed.connect(window._background_workbook_failed)
+    worker.run()
+    window._background_workbook_thread_finished()
+    assert 'Found: 1' in window.status_matrix.item(0, column).text()
+    assert window.workbook_write_pending
+    window.close()
+
+
 def test_matrix_marks_unsearched_variants_as_skipped(qt_app, tmp_path):
     window = MainWindow()
     window.result = VariantProcessor().process(

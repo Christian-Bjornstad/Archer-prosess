@@ -181,7 +181,17 @@ the provider exposes that choice.
 | **Franklin** | Classification-only ACMG/Oncology overviews, each named evidence card, Predictions, and Population Frequencies | Explicit **hg19** + **Somatic** search; each ACMG/Oncology subtab gets a fixed one-second render buffer before capture; only the active panel is expanded, preserving the classification scale/score area without mixing pixels from the preceding tab; ACMG stops after De Novo Data; Somatic Clinical Evidence and Add More Evidence are excluded; blank or truncated captures are rejected and retried on resume |
 | **ClinVar** | Variant title and focused germline/somatic classification summary | Indels first use an exact chromosome/position/reference/alternate search with GRCh37, followed by transcript HGVS, gene/cDNA and genomic-position fallbacks. Simple protein substitutions retain their protein-first search. Completed records support single positions and coordinate ranges, but acceptance still requires the gene, matching change and exact GRCh37 reference or anchor-trimmed span. Render timeouts report missing fields in the activity log; older unverified results are queued for verification. |
 | **OncoKB** | Variant Overview and Mutation Effect | Rejects the cookie overlay before taking the screenshot |
-| **COSMIC** | Overview, Tissue distribution, and Samples filtered to `lymphoid` | Explicitly selects **GRCh37** in COSMIC's global Genome Version menu before searching and requires its active menu marker before capture. Canonical result redirects may omit the genome parameter, but any explicit genome value other than `37` is rejected. Tries every distinct COSM/COSV identifier from the Archer `COSMICID` column in source order; multiple candidates or an identity mismatch fail closed |
+| **COSMIC** | Overview, Tissue distribution, and Samples filtered to `lymphoid` | Explicitly selects **GRCh37** in COSMIC's global Genome Version menu before searching and requires its active menu marker before capture. Canonical result redirects may omit the genome parameter, but any explicit genome value other than `37` is rejected. Tries every distinct COSM/COSV identifier from the Archer `COSMICID` column in source order. A not-found result triggers a GRCh38 lookup for an explicit, directed ID migration notice, followed by a new lookup of the replacement ID in GRCh37. Changed IDs additionally require matching gene and cDNA/protein identity; ambiguous mappings fail closed. Original/replacement IDs and the migration source are retained in the audit. |
+
+Franklin's first-visit case questions are advanced with **Skip question** for
+optional clinical details and **Unknown** for patient sex. No cancer type,
+ethnicity, or classification is invented; hg19/Somatic and variant verification
+still apply. An unrecognized or stuck questionnaire fails with a retryable error.
+
+MTBP publishes parsed matches to the app before screenshot capture and workbook
+saving. Its status cell shows separate **Found**/**Not found** counts alongside
+any remaining Running/Retry state. Excel write failures leave these results in
+memory; remote reports are retained if the local audit could not be saved.
 
 Patient report images are embedded in this order:
 
@@ -278,6 +288,10 @@ Patient reports are named `<DIT>_VPM_Tolkning_APP.xlsx` (for example,
   on regeneration. Patient number and sequencing date occupy rows 3 and 4.
   The WHO driver-gene column sits to the right of gnomAD. The COSMIC-ID column
   shows the Archer COSMIC ID with a link, or **Ikke ID i Archer** when absent.
+  Verified ID replacements show **endret cosmic id: original → replacement** in
+  the COSMIC column, compact evidence, and variant sheet, with a link to the
+  validated GRCh37 result. The original Archer record is preserved. This also
+  applies to explicit migration notices encountered directly in GRCh37.
 - **MTBP** — the combined MTBP report without the portal/header intro above the Genomics content. The original full screenshot remains in the local evidence directory. The sheet keeps visible gridlines and four light guide rows above the report.
 - **One sheet per variant** — linked compact evidence followed by embedded screenshots with plain, non-linked captions.
 

@@ -346,7 +346,7 @@ class PatientExcelReportWriter:
                 ),
                 manual.comment,
                 *[
-                    self._cosmic_id_label(variant)
+                    (self._cosmic_change_label(by_database.get(database, [])) or self._cosmic_id_label(variant))
                     if database == "COSMIC"
                     else self._compact_evidence(by_database.get(database, []))
                     for database in REPORT_DATABASES
@@ -824,6 +824,9 @@ class PatientExcelReportWriter:
         if not items:
             return "Ikke søkt"
         item = next((candidate for candidate in items if candidate.status == "found"), items[0])
+        changed = self._cosmic_change_label([item])
+        if changed:
+            return f"Funnet – {changed}"
         if item.clinical_significance:
             label = item.clinical_significance.strip()
         else:
@@ -876,6 +879,16 @@ class PatientExcelReportWriter:
             return label
         return f"{label} – {evidence_label}"
 
+    @staticmethod
+    def _cosmic_change_label(items: list[DatabaseEvidence]) -> str:
+        for item in items:
+            if item.database == "COSMIC" and item.status == "found" and item.raw.get("cosmic_id_changed") is True:
+                original = item.raw.get("original_cosmic_id", "")
+                resolved = item.raw.get("resolved_cosmic_id", "")
+                if original and resolved and original != resolved:
+                    return f"endret cosmic id: {original} → {resolved}"
+        return ""
+
     def _text_evidence(self, items: list[DatabaseEvidence]) -> str:
         if not items:
             return "Not queried or no evidence record available."
@@ -888,6 +901,7 @@ class PatientExcelReportWriter:
                     if item.clinical_significance
                     else "",
                     f"Accession: {item.accession}" if item.accession else "",
+                    self._cosmic_change_label([item]),
                     item.summary,
                     f"Source: {item.url}"
                     if item.url and item.database != "MTBP"
