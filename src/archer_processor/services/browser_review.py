@@ -1505,7 +1505,9 @@ class BrowserReviewService:
                 for value in (cdna, protein)
             )
         )
-        if (require_variant_identity and not variant_identity_matches) or (
+        if _cosmic_identity_conflicts(body_text, variant) or (
+            require_variant_identity and not variant_identity_matches
+        ) or (
             cosmic_id and not identifier_matches and not variant_identity_matches
         ):
             return DatabaseEvidence(
@@ -4395,6 +4397,28 @@ def _cosmic_migration_target(text: str, original: str) -> str:
     if not targets:
         raise ProviderLookupError(ProviderFailureKind.NOT_FOUND, f"No explicit COSMIC ID migration was found for {original}.")
     return targets.pop()
+
+
+def _cosmic_identity_conflicts(text: str, variant: VariantRecord) -> bool:
+    """A matching protein or COSMIC ID cannot override explicit DNA conflicts."""
+    cdna = _cdna_change(variant.hgvsc)
+    if cdna and re.search(r"\b[cn]\.\s*[-+*0-9]", text, re.I):
+        if not _contains_hgvs_change(text, cdna):
+            return True
+        transcript = (
+            variant.hgvsc.split(":", 1)[0]
+            if ":" in variant.hgvsc else variant.transcript
+        )
+        if transcript and not _mtbp_row_cdna_matches(text, variant):
+            return True
+    expected = genomic_identity(variant)
+    if expected is not None:
+        reported = _franklin_genomic_identity(text, "")
+        if reported is not None and reported != expected:
+            return True
+        if _mtbp_row_genomic_state(text, variant) is False:
+            return True
+    return False
 
 
 def _cosmic_identifier(value: str | None) -> str:
