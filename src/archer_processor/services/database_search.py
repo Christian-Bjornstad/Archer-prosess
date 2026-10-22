@@ -194,7 +194,7 @@ class DatabaseSearchService:
                         DatabaseEvidence(
                             database="Search",
                             status="error",
-                            summary=f"Parallel search failed for {variant.display_name}: {exc}",
+                            summary=f"Parallel search failed for {variant.display_name}: {self._safe_error_detail(exc)}",
                         )
                     ]
                 completed += 1
@@ -204,6 +204,16 @@ class DatabaseSearchService:
 
     def variant_key(self, variant: VariantRecord) -> str:
         return f"{variant.sample}|{variant.hgvsc}"
+
+    @staticmethod
+    def _safe_error_detail(exc: Exception) -> str:
+        """Keep failure context without request URLs, headers, or credentials."""
+        category = type(exc).__name__
+        if isinstance(exc, requests.HTTPError) and exc.response is not None:
+            status = exc.response.status_code
+            if isinstance(status, int) and 100 <= status <= 599:
+                return f"{category} (HTTP {status})"
+        return category
 
     def _manual_evidence(self, database: str, variant: VariantRecord) -> DatabaseEvidence:
         query = self._review_query(variant)
@@ -341,14 +351,14 @@ class DatabaseSearchService:
             return DatabaseEvidence(
                 database="ClinVar",
                 status="error",
-                summary=f"ClinVar lookup failed: {exc}",
+                summary=f"ClinVar lookup failed: {self._safe_error_detail(exc)}",
                 url=self._clinvar_search_url(query),
             )
         except Exception as exc:
             return DatabaseEvidence(
                 database="ClinVar",
                 status="error",
-                summary=f"ClinVar lookup failed: {exc}",
+                summary=f"ClinVar lookup failed: {self._safe_error_detail(exc)}",
                 url=self._clinvar_search_url(query),
             )
 

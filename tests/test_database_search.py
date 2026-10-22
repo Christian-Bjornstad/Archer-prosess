@@ -1,6 +1,9 @@
 from pathlib import Path
-from dataclasses import replace
+from dataclasses import asdict, replace
+import json
+from urllib.parse import quote
 
+import pytest
 import requests
 
 from archer_processor.core.models import DatabaseEvidence
@@ -129,6 +132,72 @@ def test_clinvar_rate_limit_is_reported_after_retries(monkeypatch):
     assert evidence.status == "rate_limited"
     assert "lower Workers to 1" in evidence.summary
     assert len(calls) == 4
+
+
+@pytest.mark.parametrize("operation", ["esearch", "efetch"])
+@pytest.mark.parametrize("error_type,detail", [
+    (requests.HTTPError, "HTTP 403"),
+    (requests.ConnectionError, "ConnectionError"),
+    (RuntimeError, "RuntimeError"),
+])
+def test_clinvar_errors_do_not_persist_request_credentials(
+    monkeypatch, caplog, operation, error_type, detail
+):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    secret = "SYNTHETIC_CLINVAR_KEY/+?=123"
+    service = DatabaseSearchService(AppSettings(clinvar_api_key=secret), timeout=1)
+    failing_url = (
+        "https://synthetic-user:synthetic-password@eutils.ncbi.nlm.nih.gov/"
+        f"entrez/eutils/{operation}.fcgi?db=clinvar&api_key={quote(secret, safe='')}"
+    )
+
+    def fake_get(url, params):
+        assert params["api_key"] == secret
+        if operation == "efetch" and "esearch" in url:
+            response = FakeResponse({})
+            response.content = b"<eSearchResult><IdList><Id>37</Id></IdList></eSearchResult>"
+            return response
+        if error_type is requests.HTTPError:
+            response = requests.Response()
+            response.status_code = 403
+            response.url = failing_url
+            response.reason = f"Forbidden; API key {secret}"
+            response.raise_for_status()
+        raise error_type(f"Request failed at {failing_url}; credential={secret}")
+
+    monkeypatch.setattr(service, "_eutils_get", fake_get)
+
+    evidence = service._search_clinvar(variant)
+
+    assert evidence.status == "error"
+    persisted = json.dumps(asdict(evidence)) + caplog.text
+    for sensitive in (secret, quote(secret, safe=""), "synthetic-user", "synthetic-password"):
+        assert sensitive not in persisted
+    assert detail in evidence.summary
+    assert "ClinVar lookup failed" in evidence.summary
+    assert evidence.url.startswith("https://www.ncbi.nlm.nih.gov/clinvar/?term=")
+
+
+def test_parallel_search_error_does_not_persist_clinvar_request_credentials(monkeypatch):
+    variant = ArcherTsvReader().read(FIXTURE)[3]
+    secret = "SYNTHETIC_CLINVAR_KEY/+?=123"
+    service = DatabaseSearchService(AppSettings(clinvar_api_key=secret), timeout=1)
+
+    def fail_search(*args):
+        raise RuntimeError(
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+            f"?api_key={quote(secret, safe='')}; credential={secret}"
+        )
+
+    monkeypatch.setattr(service, "search_variant", fail_search)
+
+    result = service.search_variants_parallel([variant], ["ClinVar"])
+    evidence = result[service.variant_key(variant)][0]
+
+    assert evidence.status == "error"
+    assert secret not in json.dumps(asdict(evidence))
+    assert quote(secret, safe="") not in json.dumps(asdict(evidence))
+    assert "RuntimeError" in evidence.summary
 
 
 def test_clinvar_accepts_only_exact_grch37_candidate(monkeypatch):
