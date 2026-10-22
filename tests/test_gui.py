@@ -1011,8 +1011,8 @@ def test_browser_worker_pauses_mtbp_after_ambiguous_submission_and_defers_next_p
         tmp_path / "review.xlsx",
     ).variants[0]
     variants = [
-        replace(base, sample="26OUM90001_VPM"),
-        replace(base, sample="26OUM90002_VPM"),
+        replace(base, sample="SYNTHETIC-PAUSE01_VPM"),
+        replace(base, sample="SYNTHETIC-PAUSE02_VPM"),
     ]
     worker = BrowserReviewWorker(
         variants,
@@ -1104,8 +1104,8 @@ def test_browser_worker_pauses_mtbp_after_incomplete_retained_report(
         tmp_path / "review.xlsx",
     ).variants[0]
     variants = [
-        replace(base, sample="26OUM91001_VPM"),
-        replace(base, sample="26OUM91002_VPM"),
+        replace(base, sample="SYNTHETIC-RETAIN01_VPM"),
+        replace(base, sample="SYNTHETIC-RETAIN02_VPM"),
     ]
     worker = BrowserReviewWorker(
         variants,
@@ -1156,7 +1156,7 @@ def test_browser_worker_pauses_oncokb_after_two_consecutive_patient_failures(
         tmp_path / "review.xlsx",
     ).variants[0]
     variants = [
-        replace(base, sample=f"26OUM9200{index}_VPM") for index in range(1, 4)
+        replace(base, sample=f"SYNTHETIC-FAIL{index:02}_VPM") for index in range(1, 4)
     ]
     worker = BrowserReviewWorker(
         variants,

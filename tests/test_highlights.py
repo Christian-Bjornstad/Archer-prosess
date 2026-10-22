@@ -8,7 +8,7 @@ def variant(**kwargs) -> VariantRecord:
     values = {
         "source_file": Path("input.tsv"),
         "source_row": 2,
-        "sample": "26OUM00001",
+        "sample": "SYNTHETIC01",
         "symbol": "FLT3",
         "hgvsc": "NM_004119.2:c.1419-4dup",
     }
