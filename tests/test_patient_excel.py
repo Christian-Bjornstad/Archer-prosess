@@ -1,4 +1,5 @@
 from dataclasses import replace
+from io import BytesIO
 from pathlib import Path
 
 import openpyxl
@@ -597,7 +598,21 @@ def test_patient_excel_report_uses_requested_sheet_layout_and_image_order(tmp_pa
         for row in range(screenshot_heading_row + 1, variant_sheet.max_row + 1)
     )
     assert len(variant_sheet._images) == 6
-    assert IMAGE_DATABASES == ("MTBP", "Franklin", "ClinVar", "OncoKB", "COSMIC")
+    assert IMAGE_DATABASES == ("MTBP", "ClinVar", "Franklin", "OncoKB", "COSMIC")
+    assert [
+        variant_sheet.cell(row, 1).value
+        for row in range(screenshot_heading_row + 1, variant_sheet.max_row + 1)
+        if variant_sheet.cell(row, 1).value in IMAGE_DATABASES
+    ] == ["MTBP", "ClinVar", "Franklin", "OncoKB", "COSMIC"]
+    actual_colours = []
+    for embedded in variant_sheet._images:
+        with Image.open(BytesIO(embedded._data())) as image:
+            actual_colours.append(image.convert("RGB").getpixel((0, 0)))
+    expected_colours = []
+    for index in (0, 3, 1, 2, 4, 5):
+        with Image.open(image_paths[index]) as image:
+            expected_colours.append(image.getpixel((0, 0)))
+    assert actual_colours == expected_colours
     workbook.close()
 
 

@@ -37,7 +37,7 @@ def patient_report_filename(patient_id: str) -> str:
     safe_id = re.sub(r"[^A-Za-z0-9_-]+", "_", patient_id).strip("_")
     return f"{safe_id}_VPM_Tolkning_APP.xlsx"
 TEXT_DATABASES = REPORT_DATABASES
-IMAGE_DATABASES = REPORT_DATABASES
+IMAGE_DATABASES = ("MTBP", "ClinVar", "Franklin", "OncoKB", "COSMIC")
 COSMIC_FIELDS = (
     "AccessionNumber",
     "GeneCDS_Length",

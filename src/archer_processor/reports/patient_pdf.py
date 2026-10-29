@@ -27,7 +27,7 @@ from reportlab.platypus import (
 from archer_processor.core.models import DatabaseEvidence, ProcessingResult, VariantRecord
 
 
-SCREENSHOT_DATABASE_ORDER = ("MTBP", "Franklin", "ClinVar", "OncoKB", "COSMIC")
+SCREENSHOT_DATABASE_ORDER = ("MTBP", "ClinVar", "Franklin", "OncoKB", "COSMIC")
 
 
 DIT_PATTERN = re.compile(r"^\d{2}OUM\d{5}$", flags=re.IGNORECASE)
