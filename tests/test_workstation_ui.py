@@ -160,7 +160,7 @@ def test_session_check_updates_individual_results_and_unlocks_ui(window, qt_app,
     assert not window._operation_active
     assert window.check_sessions_btn.isEnabled()
     assert window.session_status_labels["ClinVar"].text() == "Offentlig tilgang"
-    assert window.session_status_labels["Franklin"].text() == "Krever innlogging"
+    assert window.session_status_labels["Franklin"].text() == "Ikke innlogget"
     assert "1/5" in window.session_check_summary.text()
     assert "Sjekket" in window.session_status_labels["ClinVar"].toolTip()
     # Let the worker thread's queued quit/delete callbacks finish before teardown.

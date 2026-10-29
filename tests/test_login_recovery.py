@@ -171,7 +171,7 @@ def test_single_provider_recheck_preserves_other_results_and_does_not_save_setti
     assert checked == ["Franklin"]
     assert window._session_results["ClinVar"] is prior
     assert window.session_status_labels["ClinVar"].text() == "Offentlig tilgang"
-    assert window.session_status_labels["Franklin"].text() == "Krever innlogging"
+    assert window.session_status_labels["Franklin"].text() == "Ikke innlogget"
     assert "Franklin" in window.session_check_summary.text()
 
 
@@ -361,6 +361,43 @@ def test_session_worker_honors_saved_browser_visibility(qt_app, monkeypatch, bac
     monkeypatch.setattr(BrowserSessionCheckService, 'check', check)
     app.BrowserSessionCheckWorker('ClinVar', AppSettings(browser_background=background)).run()
     assert observed == [background]
+
+
+def test_session_worker_receives_all_saved_login_credentials(qt_app, monkeypatch):
+    from archer_processor.services.browser_sessions import BrowserSessionCheckService
+
+    credentials = {
+        f"{provider}_{field}": f"synthetic-{provider}-{field}"
+        for provider in ("cosmic", "oncokb", "franklin", "mtbp")
+        for field in ("email", "password")
+    }
+    observed = []
+
+    def check(checker, database):
+        observed.append({name: getattr(checker.review_service, name) for name in credentials})
+        return BrowserSessionStatus(database, "authenticated", "Synthetic confirmed session")
+
+    monkeypatch.setattr(BrowserSessionCheckService, "check", check)
+    app.BrowserSessionCheckWorker("COSMIC", AppSettings(**credentials)).run()
+
+    assert observed == [credentials]
+
+
+def test_session_check_shows_actual_login_results_below_each_database(window, qt_app, monkeypatch):
+    from archer_processor.services.browser_sessions import BrowserSessionCheckService
+
+    expected = {"COSMIC": "authenticated", "OncoKB": "login_required",
+                "Franklin": "unknown", "ClinVar": "public", "MTBP": "error"}
+    monkeypatch.setattr(BrowserSessionCheckService, "check", lambda self, name:
+                        BrowserSessionStatus(name, expected[name], "Synthetic session result"))
+
+    window.check_sessions_btn.click()
+    wait_for_recovery(window, qt_app)
+
+    assert {name: label.text() for name, label in window.session_status_labels.items()} == {
+        "COSMIC": "Innlogget", "OncoKB": "Ikke innlogget", "Franklin": "Ikke bekreftet",
+        "ClinVar": "Offentlig tilgang", "MTBP": "Kunne ikke sjekke",
+    }
 
 
 def test_all_login_controls_unlock_when_the_owning_worker_exits(window, monkeypatch):

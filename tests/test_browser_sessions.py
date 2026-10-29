@@ -233,3 +233,154 @@ def test_single_provider_check_honors_cancellation_before_browser_launch(tmp_pat
     assert result.database == "Franklin"
     assert result.status == "unknown"
     assert "cancel" in result.message.lower()
+
+
+@pytest.fixture
+def saved_login_check(tmp_path, monkeypatch):
+    from archer_processor.services.browser_sessions import BrowserSessionCheckService
+
+    review = BrowserReviewService(profile_root=tmp_path, **{
+        f"{provider}_{field}": f"synthetic-{field}"
+        for provider in ("cosmic", "oncokb", "franklin", "mtbp")
+        for field in ("email", "password")
+    })
+    closed = []
+    page = Page(review.login_url("COSMIC"), selectors=("#password",))
+
+    @contextmanager
+    def browser():
+        yield SimpleNamespace(chromium=SimpleNamespace(
+            launch_persistent_context=lambda *args, **kwargs: SimpleNamespace(
+                pages=[page], close=lambda: closed.append(True),
+            ),
+        ))
+
+    monkeypatch.setattr(review, "_browser_api", lambda: (browser, RuntimeError, TimeoutError))
+    return BrowserSessionCheckService(review, settle_timeout_ms=0), page, closed
+
+
+@pytest.mark.parametrize("database,url,selectors,controls", [
+    ("COSMIC", "https://cancer.sanger.ac.uk/cosmic/", (), ("Log out",)),
+    ("OncoKB", "https://www.oncokb.org/", (), ("Sign out",)),
+    ("Franklin", "https://franklin.genoox.com/clinical-db/home",
+     ("input[placeholder='Enter variant, gene or select an example above']",), ()),
+    ("MTBP", "https://mtbp.org/analyse/", ("#variant-input",), ()),
+])
+def test_check_signs_in_with_saved_credentials_and_verifies_page(
+    saved_login_check, monkeypatch, database, url, selectors, controls
+):
+    checker, page, closed = saved_login_check
+    page.url = checker.review_service.login_url(database)
+    attempts = []
+
+    def login(provider, active_page):
+        attempts.append(provider)
+        active_page.url = url
+        active_page.selectors = set(selectors)
+        active_page.controls = set(controls)
+        # The final page is authoritative, even if the submit helper timed out.
+        return False
+
+    monkeypatch.setattr(checker.review_service, "_try_saved_login", login)
+
+    result = checker.check(database)
+
+    assert result.status == "authenticated"
+    assert attempts == [database]
+    assert closed == [True]
+
+
+def test_submit_success_without_authenticated_page_is_not_logged_in(saved_login_check, monkeypatch):
+    checker, page, closed = saved_login_check
+    calls = []
+    monkeypatch.setattr(checker.review_service, "_try_saved_login", lambda *args: calls.append(True) or True)
+
+    result = checker.check("COSMIC")
+
+    assert result.status == "login_required"
+    assert calls == [True]
+    assert "bekreftet" in result.message
+    assert closed == [True]
+
+
+@pytest.mark.parametrize("missing", ["email", "password"])
+def test_check_reports_missing_saved_credentials_without_submitting(saved_login_check, monkeypatch, missing):
+    checker, page, closed = saved_login_check
+    setattr(checker.review_service, f"cosmic_{missing}", "")
+    monkeypatch.setattr(checker.review_service, "_try_saved_login", lambda *args: pytest.fail("Incomplete credentials"))
+
+    result = checker.check("COSMIC")
+
+    assert result.status == "login_required"
+    assert "Innstillinger" in result.message
+    assert closed == [True]
+
+
+def test_check_never_submits_credentials_to_an_unrelated_redirect(saved_login_check, monkeypatch):
+    checker, page, closed = saved_login_check
+    page.url = "https://cancer.sanger.ac.uk.attacker.invalid/cosmic/login"
+    monkeypatch.setattr(checker.review_service, "_try_saved_login", lambda *args: pytest.fail("Untrusted page"))
+
+    assert checker.check("COSMIC").status == "unknown"
+    assert closed == [True]
+
+
+def test_check_reuses_authenticated_session_without_submitting(saved_login_check, monkeypatch):
+    checker, page, closed = saved_login_check
+    page.url = "https://cancer.sanger.ac.uk/cosmic/"
+    page.selectors.clear()
+    page.controls.add("Log out")
+    monkeypatch.setattr(checker.review_service, "_try_saved_login", lambda *args: pytest.fail("Already signed in"))
+
+    assert checker.check("COSMIC").status == "authenticated"
+    assert closed == [True]
+
+
+def test_check_clinvar_never_attempts_sign_in(saved_login_check, monkeypatch):
+    checker, page, closed = saved_login_check
+    page.url = checker.review_service.login_url("ClinVar")
+    page.selectors.clear()
+    page.body = "ClinVar"
+    monkeypatch.setattr(checker.review_service, "_try_saved_login", lambda *args: pytest.fail("Public provider"))
+
+    assert checker.check("ClinVar").status == "public"
+    assert closed == [True]
+
+
+def test_check_releases_profile_if_cancelled_during_login(saved_login_check, monkeypatch):
+    checker, page, closed = saved_login_check
+    cancelled = [False]
+    checker.review_service.stop_requested = lambda: cancelled[0]
+
+    def login(*args):
+        cancelled[0] = True
+        return True
+
+    monkeypatch.setattr(checker.review_service, "_try_saved_login", login)
+
+    result = checker.check("COSMIC")
+
+    assert result.status == "unknown"
+    assert "cancel" in result.message.lower()
+    assert closed == [True]
+
+
+@pytest.mark.parametrize("error_name", ["RuntimeError", "EdgeCdpError", "EdgeCdpTimeout"])
+def test_check_does_not_expose_credentials_from_login_exceptions(saved_login_check, monkeypatch, error_name):
+    from archer_processor.services.edge_cdp import EdgeCdpError, EdgeCdpTimeout
+
+    checker, page, closed = saved_login_check
+    error_type = {"RuntimeError": RuntimeError, "EdgeCdpError": EdgeCdpError,
+                  "EdgeCdpTimeout": EdgeCdpTimeout}[error_name]
+
+    def login(*args):
+        raise error_type("synthetic-password synthetic-email")
+
+    monkeypatch.setattr(checker.review_service, "_try_saved_login", login)
+
+    result = checker.check("COSMIC")
+
+    assert result.status == "error"
+    assert "synthetic-password" not in result.message
+    assert "synthetic-email" not in result.message
+    assert closed == [True]

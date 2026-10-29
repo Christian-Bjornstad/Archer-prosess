@@ -34,6 +34,17 @@ deling av hentet materiale.
 
 ## Innlogging og første besøk
 
+Lagre brukernavn og passord under **Innstillinger**. **Sjekk innlogging**
+kontrollerer alle kildene og forsøker automatisk innlogging der en kilde ber
+om det. **Sjekk** ved én database gjør det samme bare for denne kilden.
+Appen gjenbruker en bekreftet økt uten å sende inn passord på nytt.
+
+Status vises under hver kilde: **Innlogget**, **Ikke innlogget**,
+**Ikke bekreftet** eller **Kunne ikke sjekke**. ClinVar viser **Offentlig tilgang**
+når siden er bekreftet; den krever ikke innlogging. En sendt innloggingsforespørsel
+er ikke tilstrekkelig til å vise **Innlogget**. Ved ekstra innloggingssteg eller
+feil opplysninger brukes **Logg inn** for å fullføre manuelt.
+
 Bruk **Logg inn** for den aktuelle kilden og fullfør innloggingen i vinduet
 som åpnes. Appen gjenbruker økten i sin egen Edge-profil. Den vanlige
 nettleserprofilen din er ikke den samme som appens profil.

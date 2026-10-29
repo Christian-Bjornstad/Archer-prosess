@@ -1,4 +1,4 @@
-"""Check evidence-site sessions using only Archer's dedicated Edge profiles."""
+"""Check and restore evidence-site sessions in Archer's dedicated Edge profiles."""
 from __future__ import annotations
 
 import time
@@ -45,8 +45,9 @@ class BrowserSessionCheckService:
     """Blocking worker API; the GUI must exclude searches and login workers.
 
     Each provider runs sequentially in the same profile used by evidence
-    searches. This checks existing cookies only: it never fills credentials,
-    submits queries, creates reports, downloads files, or captures evidence.
+    searches. A provider login form triggers one attempt with saved credentials,
+    followed by verification of the actual page. No evidence queries, reports,
+    downloads, or captures are created.
     `on_result` runs on the calling worker thread, once per provider.
     """
 
@@ -66,7 +67,7 @@ class BrowserSessionCheckService:
         return results
 
     def check(self, database: str) -> BrowserSessionStatus:
-        """Check one known provider, using only its dedicated profile.
+        """Check one provider, restoring its session with saved credentials if needed.
 
         Unknown providers raise ValueError before opening any browser. Runtime
         failures and cancellation use the same status contract as check_all.
@@ -93,14 +94,34 @@ class BrowserSessionCheckService:
                         review.login_url(database), wait_until="domcontentloaded",
                         timeout=max(1, min(15_000, review.navigation_timeout_ms)),
                     )
-                    deadline = time.monotonic() + self.settle_timeout_ms / 1_000
-                    while True:
-                        if review.stop_requested():
-                            return BrowserSessionStatus(database, "unknown", "Session check cancelled.")
-                        result = self.inspect_page(database, page)
-                        if result.status != "unknown" or time.monotonic() >= deadline:
-                            return result
-                        page.wait_for_timeout(250)
+                    result = self._settle_page(database, page)
+                    # Only a visible form on the provider's trusted HTTPS host
+                    # can trigger credential entry. A redirect or public page cannot.
+                    if database == "ClinVar" or result.status != "login_required":
+                        return result
+                    prefix = database.lower()
+                    if not (
+                        getattr(review, f"{prefix}_email")
+                        and getattr(review, f"{prefix}_password")
+                    ):
+                        return BrowserSessionStatus(
+                            database, "login_required",
+                            "Ikke innlogget. Lagre brukernavn og passord under Innstillinger, "
+                            "eller bruk Logg inn for manuell innlogging.",
+                        )
+                    if review.stop_requested():
+                        return BrowserSessionStatus(database, "unknown", "Session check cancelled.")
+                    review._try_saved_login(database, page)
+                    # A successful submission/redirect is not proof of sign-in.
+                    result = self._settle_page(database, page, after_login=True)
+                    if result.status == "login_required":
+                        return BrowserSessionStatus(
+                            database, "login_required",
+                            "Innlogging med lagrede opplysninger ble ikke bekreftet. "
+                            "Kontroller opplysningene i Innstillinger eller bruk Logg inn "
+                            "for eventuelle ekstra innloggingssteg.",
+                        )
+                    return result
                 finally:
                     context.close()
         except Exception as exc:
@@ -110,11 +131,22 @@ class BrowserSessionCheckService:
                 f"Could not check {database}: {type(exc).__name__}. {self._error_guidance(exc)}",
             )
 
+    def _settle_page(self, database: str, page: Any, *, after_login: bool = False) -> BrowserSessionStatus:
+        deadline = time.monotonic() + self.settle_timeout_ms / 1_000
+        pending = {"unknown", "login_required"} if after_login else {"unknown"}
+        while True:
+            if self.review_service.stop_requested():
+                return BrowserSessionStatus(database, "unknown", "Session check cancelled.")
+            result = self.inspect_page(database, page)
+            if result.status not in pending or time.monotonic() >= deadline:
+                return result
+            page.wait_for_timeout(250)
+
     @staticmethod
     def _error_guidance(exc: Exception) -> str:
-        from archer_processor.services.edge_cdp import EdgeCdpError, EdgeCdpTimeout
-
-        if isinstance(exc, (EdgeCdpError, EdgeCdpTimeout, BrowserAutomationUnavailable)):
+        # Only startup diagnostics precede credential entry. Runtime DOM/CDP
+        # errors can contain submitted values or redirected authentication URLs.
+        if isinstance(exc, BrowserAutomationUnavailable):
             return str(exc)
         return (
             "Check network access and the dedicated Edge profile. If Edge cannot "
