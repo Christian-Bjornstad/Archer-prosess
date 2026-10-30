@@ -515,7 +515,7 @@ def test_cosmic_search_resolves_canonical_internal_mutation_id(tmp_path):
     variant = VariantRecord(
         source_file=Path("synthetic.tsv"),
         source_row=1,
-        sample="26OUM09411_VPM_S20_R1_001",
+        sample="SYNTHETIC-COSMIC_VPM_S1_R1_001",
         symbol="ASXL1",
         hgvsc="NM_015338.5:c.1934dup",
         cosmic_id="COSM1411076",
@@ -2994,7 +2994,7 @@ def test_mtbp_reuses_proven_genomic_fallback_after_transcript_rejection(tmp_path
     variant = VariantRecord(
         source_file=Path("synthetic.tsv"),
         source_row=1,
-        sample="26OUM10892_VPM_S30_R1_001",
+        sample="SYNTHETIC-MTBP_VPM_S1_R1_001",
         symbol="ASXL1",
         hgvsc="NM_015338.5:c.1854dup",
         hgvsp="NP_056153.2:p.Ala619SerfsTer16",

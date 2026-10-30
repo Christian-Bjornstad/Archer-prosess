@@ -164,6 +164,7 @@ class BrowserReviewService:
         self.capture_validator = capture_validator
         self.login_confirmed = False
         self._cosmic_cache: dict[tuple[str, ...], DatabaseEvidence] = {}
+        self._result_checkpoint: Callable[[dict[str, list[DatabaseEvidence]]], None] | None = None
         self._mtbp_rejected_transcript_queries: set[str] = set()
         self._variant_result_callback: Callable[[VariantRecord, DatabaseEvidence], None] | None = None
 
@@ -356,6 +357,8 @@ class BrowserReviewService:
                 if checkpoint:
                     checkpoint(deepcopy({key: [evidence]}))
 
+            previous_checkpoint = self._result_checkpoint
+            self._result_checkpoint = checkpoint
             previous_callback = self._variant_result_callback
             self._variant_result_callback = publish_result
             try:
@@ -368,6 +371,7 @@ class BrowserReviewService:
                 )
             finally:
                 self._variant_result_callback = previous_callback
+                self._result_checkpoint = previous_checkpoint
             provider_duration = time.monotonic() - provider_started_at
             unpublished_results = {
                 key: evidence for key, evidence in database_results.items()
@@ -899,8 +903,6 @@ class BrowserReviewService:
                     timeout=self.navigation_timeout_ms,
                 )
                 dismiss_known_overlays(page)
-                self._resolve_cosmic_mutation_page(page, variant)
-                dismiss_known_overlays(page)
                 if self._login_required("COSMIC", page.url):
                     return DatabaseEvidence(
                         "COSMIC",
@@ -909,7 +911,18 @@ class BrowserReviewService:
                         accession=variant.cosmic_id,
                         url=page.url,
                     )
-                self._wait_for_cosmic_result(page)
+                try:
+                    self._resolve_cosmic_mutation_page(page, variant)
+                    dismiss_known_overlays(page)
+                    if self._login_required("COSMIC", page.url):
+                        raise ProviderLookupError(ProviderFailureKind.LOGIN_REQUIRED, "COSMIC session expired.")
+                    self._wait_for_cosmic_result(page)
+                except ProviderLookupError as exc:
+                    if exc.kind != ProviderFailureKind.NOT_FOUND:
+                        raise
+                    return self._lookup_cosmic_migration(
+                        page, variant, artifact_directory, progress=progress
+                    )
                 return self._capture_cosmic_result(
                     variant, page, artifact_directory
                 )
@@ -950,10 +963,60 @@ class BrowserReviewService:
             self._interruptible_page_wait(page, 750)
         raise RuntimeError("COSMIC retry loop ended unexpectedly.")
 
-    def _resolve_cosmic_mutation_page(
+    def _lookup_cosmic_migration(
+        self, page: Any, variant: VariantRecord, artifact_directory: Path,
+        *, progress: Callable[[str], None] | None,
+    ) -> DatabaseEvidence:
+        """Use GRCh38 only to discover an explicit legacy-ID replacement."""
+        original = _cosmic_identifier(variant.cosmic_id)
+        if progress:
+            progress(f"COSMIC: {original} not found in GRCh37; checking GRCh38 for an ID migration")
+        try:
+            self._ensure_cosmic_genome(page, "38")
+            page.goto(
+                self.query_url("COSMIC", variant) + "&genome=38",
+                wait_until="domcontentloaded", timeout=self.navigation_timeout_ms,
+            )
+            if self._login_required("COSMIC", page.url):
+                raise ProviderLookupError(ProviderFailureKind.LOGIN_REQUIRED, "COSMIC session expired.")
+            self._open_cosmic_mutation_page(page, variant)
+            notice = page.locator("body").inner_text(timeout=self.navigation_timeout_ms)
+            replacement = _cosmic_migration_target(notice, original)
+            migration_url = page.url
+        finally:
+            # Never leave the provider lane in GRCh38, even on rejection/cancellation.
+            if not self._login_required("COSMIC", page.url):
+                self._ensure_cosmic_grch37(page)
+        candidate = replace(variant, cosmic_id=replacement)
+        page.goto(
+            self.query_url("COSMIC", candidate),
+            wait_until="domcontentloaded", timeout=self.navigation_timeout_ms,
+        )
+        if self._login_required("COSMIC", page.url):
+            raise ProviderLookupError(ProviderFailureKind.LOGIN_REQUIRED, "COSMIC session expired.")
+        self._resolve_cosmic_mutation_page(page, candidate)
+        self._verify_cosmic_grch37(page)
+        self._wait_for_cosmic_result(page)
+        evidence = self._capture_cosmic_result(
+            candidate, page, artifact_directory, require_variant_identity=True,
+        )
+        evidence.raw.update({
+            "original_cosmic_id": original,
+            "resolved_cosmic_id": replacement,
+            "migration_source_url": migration_url,
+            "migration_notice": notice[:12_000],
+            "fallback_route": "GRCh37 -> GRCh38 ID migration -> GRCh37",
+        })
+        if evidence.status == "found":
+            evidence.raw.update({"cosmic_id_changed": True, "assembly_verified": "GRCh37"})
+            evidence.summary = f"endret cosmic id: {original} → {replacement}. {evidence.summary}"
+        self._write_audit(evidence, self._screenshot_path(artifact_directory, "COSMIC", variant).with_suffix(".audit.json"))
+        return evidence
+
+    def _open_cosmic_mutation_page(
         self, page: Any, variant: VariantRecord
     ) -> None:
-        """Resolve a legacy identifier and switch the canonical page to GRCh37."""
+        """Resolve an exact legacy identifier within the selected assembly."""
         cosmic_number = _cosmic_numeric_id(variant.cosmic_id)
         if not cosmic_number:
             raise ValueError("COSMIC identifier is missing its numeric component.")
@@ -997,6 +1060,11 @@ class BrowserReviewService:
                     },
                 )
 
+    def _resolve_cosmic_mutation_page(
+        self, page: Any, variant: VariantRecord
+    ) -> None:
+        """Resolve a legacy identifier and switch the canonical page to GRCh37."""
+        self._open_cosmic_mutation_page(page, variant)
         grch37_links = page.locator("a[href*='genome=37'][href*='id=']")
         candidates: list[str] = []
         for _ in range(max(1, self.navigation_timeout_ms // 500)):
@@ -1076,6 +1144,19 @@ class BrowserReviewService:
         )
         page.wait_for_timeout(250)
         self._verify_cosmic_grch37(page)
+
+    def _ensure_cosmic_genome(self, page: Any, genome: str) -> None:
+        options = page.locator(f"a[href*='genome={genome}']").evaluate_all(
+            "nodes => nodes.map(node => ({href: node.href, text: node.textContent.trim()}))"
+        )
+        options = [option for option in options if isinstance(option, dict)
+                   and re.match(rf"^GRCh{genome}\b", option.get("text", ""), re.I)]
+        if any("✔" in option["text"] or "✓" in option["text"] for option in options):
+            return
+        targets = list(dict.fromkeys(option["href"] for option in options if option.get("href")))
+        if len(targets) != 1:
+            raise ProviderLookupError(ProviderFailureKind.LAYOUT_CHANGED, f"COSMIC GRCh{genome} menu was not unique.")
+        page.goto(targets[0], wait_until="domcontentloaded", timeout=self.navigation_timeout_ms)
 
     def _verify_cosmic_grch37(self, page: Any) -> None:
         options = self._cosmic_grch37_options(page)
@@ -1398,9 +1479,17 @@ class BrowserReviewService:
         variant: VariantRecord,
         page: Any,
         artifact_directory: Path,
+        *, require_variant_identity: bool = False,
     ) -> DatabaseEvidence:
         body_text = page.locator("body").inner_text(timeout=self.navigation_timeout_ms)
         cosmic_id = _cosmic_identifier(variant.cosmic_id)
+        original_cosmic_id = cosmic_id
+        try:
+            cosmic_id = _cosmic_migration_target(body_text, original_cosmic_id)
+            require_variant_identity = True
+        except ProviderLookupError as exc:
+            if exc.kind != ProviderFailureKind.NOT_FOUND:
+                raise
         cdna = _cdna_change(variant.hgvsc)
         protein = _protein_change(variant.hgvsp)
         identifier_matches = cosmic_id in _cosmic_identifiers(body_text)
@@ -1416,7 +1505,11 @@ class BrowserReviewService:
                 for value in (cdna, protein)
             )
         )
-        if cosmic_id and not identifier_matches and not variant_identity_matches:
+        if _cosmic_identity_conflicts(body_text, variant) or (
+            require_variant_identity and not variant_identity_matches
+        ) or (
+            cosmic_id and not identifier_matches and not variant_identity_matches
+        ):
             return DatabaseEvidence(
                 "COSMIC",
                 "identity_mismatch",
@@ -1483,6 +1576,16 @@ class BrowserReviewService:
                 ),
             },
         )
+        if cosmic_id != original_cosmic_id:
+            self._verify_cosmic_grch37(page)
+            evidence.raw.update({
+                "cosmic_id_changed": True,
+                "original_cosmic_id": original_cosmic_id,
+                "resolved_cosmic_id": cosmic_id,
+                "assembly_verified": "GRCh37",
+                "migration_source_url": page.url,
+            })
+            evidence.summary = f"endret cosmic id: {original_cosmic_id} → {cosmic_id}. {evidence.summary}"
         self._write_audit(evidence, base_path.with_suffix(".audit.json"))
         return evidence
 
@@ -1777,11 +1880,18 @@ class BrowserReviewService:
         )
 
     def _open_franklin_resolved_variant(self, page: Any, variant: VariantRecord) -> None:
+        question_actions = 0
         for _ in range(40):
             self._check_cancelled()
             dismiss_franklin_onboarding(page)
             if re.search(r"/clinical-db/variant/snp(?:Tumor)?/", page.url):
                 return
+            if self._advance_franklin_case_questions(page):
+                question_actions += 1
+                if question_actions == 4:
+                    break
+                page.wait_for_timeout(250)
+                continue
             options = page.locator(".option")
             if options.count():
                 option_texts = options.all_inner_texts()
@@ -1834,6 +1944,30 @@ class BrowserReviewService:
             timeout=self.navigation_timeout_ms,
         )
 
+    @staticmethod
+    def _advance_franklin_case_questions(page: Any) -> bool:
+        """Skip optional first-visit case details without inventing clinical data."""
+        if "/clinical-db/home" not in page.url:
+            return False
+        text = " ".join(page.locator("body").inner_text().split())
+        if "Add your case details" not in text:
+            return False
+        skip = page.get_by_text("Skip question", exact=True)
+        if skip.count() == 1 and skip.is_visible():
+            skip.click()
+            return True
+        if "What is the patient sex?" in text:
+            unknown = page.get_by_text("Unknown", exact=True)
+            if unknown.count() == 1 and unknown.is_visible():
+                unknown.click()
+                search = page.get_by_role("button", name="Search", exact=True)
+                search.wait_for(state="visible", timeout=2_000)
+                if search.count() != 1:
+                    raise RuntimeError("Franklin case-details Search button was not unique.")
+                search.click()
+                return True
+        raise RuntimeError("Franklin case questions were visible but no safe skip action was available.")
+
     def _select_franklin_search_mode(self, page: Any) -> None:
         """Choose the explicitly requested GRCh37/hg19 somatic search mode."""
         comboboxes = page.get_by_role("combobox")
@@ -1870,6 +2004,22 @@ class BrowserReviewService:
             option_click = getattr(option, "click_physical", option.click)
             option_click()
             page.wait_for_timeout(150)
+
+    def _publish_mtbp_results(self, results: dict[str, DatabaseEvidence]) -> None:
+        """Publish parsed results before image capture and disk writes finish.
+
+        Each provider lane is serial. Snapshot objects must be independent of
+        later capture/cleanup mutations delivered through Qt's queued signals.
+        """
+        if self._result_checkpoint is None:
+            return
+        snapshot = {}
+        for key, evidence in results.items():
+            item = deepcopy(evidence)
+            if item.status == "found":
+                item.status = "partial_capture"
+            snapshot[key] = [item]
+        self._result_checkpoint(snapshot)
 
     def _search_mtbp(
         self,
@@ -2139,6 +2289,8 @@ class BrowserReviewService:
                         cancer_type=self.mtbp_cancer_type,
                         complete_submission=False,
                     )[self.variant_key(variant)]
+                    evidence.raw["analysis_id"] = analysis_id
+                    self._publish_mtbp_results({self.variant_key(variant): evidence})
                     evidence.accession = timed_out.accession
                     screenshot_path = None
                     if analysis_id not in report_captures:
@@ -2154,7 +2306,7 @@ class BrowserReviewService:
                             screenshot_path = self._capture_mtbp_variant_with_fallback(
                                 page, variant, artifact_directory, full_report_path
                             )
-                        except IncompleteCaptureError as exc:
+                        except (IncompleteCaptureError, OSError) as exc:
                             if evidence.status == "found":
                                 evidence.status = "partial_capture"
                             evidence.summary = (
@@ -2162,7 +2314,7 @@ class BrowserReviewService:
                             ).strip()
                             evidence.raw["capture_validation"] = {
                                 "valid": False,
-                                "reason": exc.validation.reason,
+                                "reason": exc.validation.reason if isinstance(exc, IncompleteCaptureError) else str(exc),
                             }
                     screenshots = (
                         [
@@ -2229,6 +2381,7 @@ class BrowserReviewService:
     ) -> dict[str, DatabaseEvidence]:
         """Submit one pseudonymous MTBP analysis and parse its report."""
         results: dict[str, DatabaseEvidence] = {}
+        parsed: dict[str, DatabaseEvidence] = {}
         query_pairs: list[tuple[VariantRecord, str]] = []
         initial_query_attempts: dict[str, list[str]] = {}
         learned_fallback_keys: set[str] = set()
@@ -2447,6 +2600,11 @@ class BrowserReviewService:
                     page.url,
                     cancer_type=self.mtbp_cancer_type,
                 )
+                for variant, query in active_pairs:
+                    item = parsed[self.variant_key(variant)]
+                    item.accession = query
+                    item.raw.update({"analysis_id": analysis_id, "submitted_query": query})
+                self._publish_mtbp_results(parsed)
                 full_report_path: Path | None = None
                 full_report_error = ""
                 try:
@@ -2481,7 +2639,7 @@ class BrowserReviewService:
                             screenshot_path = self._capture_mtbp_variant_with_fallback(
                                 page, variant, artifact_directory, full_report_path
                             )
-                        except IncompleteCaptureError as exc:
+                        except (IncompleteCaptureError, OSError) as exc:
                             if evidence.status == "found":
                                 evidence.status = "partial_capture"
                             evidence.summary = (
@@ -2489,7 +2647,7 @@ class BrowserReviewService:
                             ).strip()
                             evidence.raw["capture_validation"] = {
                                 "valid": False,
-                                "reason": exc.validation.reason,
+                                "reason": exc.validation.reason if isinstance(exc, IncompleteCaptureError) else str(exc),
                             }
                     screenshot_records = (
                         [
@@ -2628,19 +2786,27 @@ class BrowserReviewService:
                     )
                 else:
                     status = "partial_capture" if failure_stage == "report_capture" else "error"
-                    evidence = DatabaseEvidence(
-                        "MTBP",
-                        status,
-                        f"MTBP browser lookup failed while {failure_stage}: {exc}",
-                        accession=query,
-                        url=current_url,
-                        raw={
-                            "analysis_id": analysis_id,
-                            "submitted_query": query,
-                            "query_attempts": query_attempts.get(key, [query]),
-                            "failure_stage": failure_stage,
-                        },
-                    )
+                    if failure_stage == "report_capture" and key in parsed:
+                        evidence = deepcopy(parsed[key])
+                        if evidence.status == "found":
+                            evidence.status = "partial_capture"
+                        evidence.summary += f" MTBP capture requires retry: {exc}"
+                        evidence.raw["capture_error"] = str(exc)
+                        evidence.raw["failure_stage"] = failure_stage
+                    else:
+                        evidence = DatabaseEvidence(
+                            "MTBP",
+                            status,
+                            f"MTBP browser lookup failed while {failure_stage}: {exc}",
+                            accession=query,
+                            url=current_url,
+                            raw={
+                                "analysis_id": analysis_id,
+                                "submitted_query": query,
+                                "query_attempts": query_attempts.get(key, [query]),
+                                "failure_stage": failure_stage,
+                            },
+                        )
                 self._write_audit(
                     evidence,
                     self._screenshot_path(
@@ -2737,12 +2903,22 @@ class BrowserReviewService:
         audit_records: list[tuple[Path, VariantRecord, DatabaseEvidence]],
     ) -> dict[str, str]:
         """Persist local audit state before removing one exact ARCHER report."""
-        for audit_path, variant, evidence in audit_records:
-            self._persist_mtbp_report_audit(audit_path, variant, evidence)
+        try:
+            for audit_path, variant, evidence in audit_records:
+                self._persist_mtbp_report_audit(audit_path, variant, evidence)
+        except OSError as exc:
+            outcome = {"status": "pending", "message": f"Local audit could not be saved: {exc}"}
+            for _, _, evidence in audit_records:
+                evidence.raw["remote_report_cleanup"] = outcome
+                evidence.raw["audit_write_error"] = str(exc)
+            return outcome
         outcome = self._delete_mtbp_report(page, analysis_id)
         for audit_path, variant, evidence in audit_records:
             evidence.raw["remote_report_cleanup"] = outcome
-            self._persist_mtbp_report_audit(audit_path, variant, evidence)
+            try:
+                self._persist_mtbp_report_audit(audit_path, variant, evidence)
+            except OSError as exc:
+                evidence.raw["audit_write_error"] = str(exc)
         return outcome
 
     def _persist_mtbp_report_audit(
@@ -4199,6 +4375,52 @@ def _expanded_capture_box(
     }
 
 
+def _cosmic_migration_target(text: str, original: str) -> str:
+    """Accept directed provider notices, never unrelated IDs or internal page IDs."""
+    normalized = " ".join(text.split())
+    matches = re.findall(
+        rf"\b{re.escape(original)}\b\s+(?:has\s+(?:now\s+)?been\s+|was\s+|is\s+)?"
+        r"(?:merged\s+(?:into|with)|migrated\s+to|replaced\s+by|redirected\s+to)"
+        r"\s+(?:mutation\s+)?(?:ID\s*:?\s*)?(COS[MV]\d+)\b",
+        normalized, flags=re.I,
+    )
+    # COSMIC v104 puts the destination in its labelled overview fields rather
+    # than in the merge sentence. Bind those fields to this exact source ID.
+    matches.extend(re.findall(
+        rf"\bThe legacy mutation\s+{re.escape(original)}\s+has now been merged into the following mutation\.\s*"
+        r"Genomic Mutation ID\s+COSV\d+\s+Legacy Identifier\s+(COSM\d+)\b",
+        normalized, flags=re.I,
+    ))
+    targets = {target.upper() for target in matches if target.upper() != original.upper()}
+    if len(targets) > 1:
+        raise ProviderLookupError(ProviderFailureKind.AMBIGUOUS, "COSMIC exposed multiple replacement IDs.")
+    if not targets:
+        raise ProviderLookupError(ProviderFailureKind.NOT_FOUND, f"No explicit COSMIC ID migration was found for {original}.")
+    return targets.pop()
+
+
+def _cosmic_identity_conflicts(text: str, variant: VariantRecord) -> bool:
+    """A matching protein or COSMIC ID cannot override explicit DNA conflicts."""
+    cdna = _cdna_change(variant.hgvsc)
+    if cdna and re.search(r"\b[cn]\.\s*[-+*0-9]", text, re.I):
+        if not _contains_hgvs_change(text, cdna):
+            return True
+        transcript = (
+            variant.hgvsc.split(":", 1)[0]
+            if ":" in variant.hgvsc else variant.transcript
+        )
+        if transcript and not _mtbp_row_cdna_matches(text, variant):
+            return True
+    expected = genomic_identity(variant)
+    if expected is not None:
+        reported = _franklin_genomic_identity(text, "")
+        if reported is not None and reported != expected:
+            return True
+        if _mtbp_row_genomic_state(text, variant) is False:
+            return True
+    return False
+
+
 def _cosmic_identifier(value: str | None) -> str:
     identifiers = _cosmic_identifiers(value)
     return identifiers[0] if identifiers else ""
@@ -4703,6 +4925,7 @@ def parse_mtbp_report(
                 url=url,
                 raw={
                     **metadata,
+                    "lookup_status": status,
                     "candidate_count": len(candidates),
                     "gene_candidate_count": len(gene_candidates),
                     "submitted_gene_variant_count": submitted_count,
@@ -4755,6 +4978,7 @@ def parse_mtbp_report(
             url=url,
             raw={
                 **metadata,
+                "lookup_status": "found",
                 "gene": row.get("gene", ""),
                 "gene_info": row.get("gene_info", ""),
                 "alteration": row.get("alteration", ""),

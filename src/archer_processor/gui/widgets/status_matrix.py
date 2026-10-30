@@ -213,6 +213,7 @@ class StatusMatrix(QTableWidget):
                 minimum_width = 132 if database == "Report" else 110
                 width = max((metrics.horizontalAdvance(display_status_label(row.cells[database].label)) + 24 for row in rows), default=minimum_width)
                 self.setColumnWidth(column, max(minimum_width, width, self.columnWidth(column)))
+            self.resizeRowsToContents()
             self.verticalScrollBar().setValue(vertical_position)
             self.horizontalScrollBar().setValue(horizontal_position)
         finally:

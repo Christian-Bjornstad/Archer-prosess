@@ -1,0 +1,19 @@
+# Keep the source distribution testable with its synthetic input and reference lists.
+recursive-include tests *.py
+recursive-include tests/fixtures *.tsv *.json
+include tests/fixtures/README.md
+include reference_lists/Artefaktliste.xlsx
+include reference_lists/WHO-drivergener.xlsx
+include reference_lists/README.md
+
+# Ship maintained user and contributor material with the source, not the runtime wheel.
+include README.md CONTRIBUTING.md LICENSE THIRD_PARTY_NOTICES.md
+include docs/drift.md
+include docs/assets/vpm-tolkning-evidence.png
+include docs/brukerguide/README.md
+include docs/brukerguide/VPM_Tolkning_Brukerguide.html
+include docs/brukerguide/VPM_Tolkning_Brukerguide.pdf
+include docs/brukerguide/guideinnhold.json
+recursive-include docs/brukerguide/bilder *.png
+include scripts/verify_capture_locally.py
+include scripts/verify_provider_recovery_dom.py

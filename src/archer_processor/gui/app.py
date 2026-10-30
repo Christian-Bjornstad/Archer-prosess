@@ -769,6 +769,14 @@ class BrowserSessionCheckWorker(QObject):
                 profile_root=self.settings.browser_profile_root_path,
                 browser_background=self.settings.browser_background,
                 stop_requested=QThread.currentThread().isInterruptionRequested,
+                cosmic_email=self.settings.cosmic_email,
+                cosmic_password=self.settings.cosmic_password,
+                oncokb_email=self.settings.oncokb_email,
+                oncokb_password=self.settings.oncokb_password,
+                franklin_email=self.settings.franklin_email,
+                franklin_password=self.settings.franklin_password,
+                mtbp_email=self.settings.mtbp_email,
+                mtbp_password=self.settings.mtbp_password,
             ))
             if self.database is None:
                 results = service.check_all(on_result=self.checked.emit)
@@ -1772,8 +1780,8 @@ class MainWindow(QMainWindow):
         self.check_sessions_btn = QPushButton('Sjekk innlogging')
         self.check_sessions_btn.setObjectName('OutlineButton')
         self.check_sessions_btn.setToolTip(
-            'Sjekker eksisterende tilgang i lagrede Edge-profiler. '
-            'Bruk Logg inn ved kilden for å logge inn. Lagre endret profilmappe først.'
+            'Sjekker innlogging og prøver lagret brukernavn og passord ved behov. '
+            'Viser bekreftet status under hver kilde. Lagre endringer i Innstillinger først.'
         )
         self.check_sessions_btn.clicked.connect(self._start_session_check)
         file_row.addWidget(self.current_workbook_label, 1)
@@ -1818,7 +1826,10 @@ class MainWindow(QMainWindow):
             access.setMaximumWidth(44)
             access.setAccessibleName(f'Sjekk tilgang til {database}')
             access.setCursor(Qt.CursorShape.PointingHandCursor)
-            access.setToolTip(f'Sjekker eksisterende tilgang til {database} i den lagrede profilmappen.')
+            access.setToolTip(
+                'Sjekker offentlig tilgang til ClinVar.' if database == 'ClinVar' else
+                f'Sjekker {database} og forsøker innlogging med lagrede opplysninger ved behov.'
+            )
             access.clicked.connect(lambda checked=False, db=database: self._check_browser_sessions(db))
             self.source_access_buttons[database] = access
             if database != 'ClinVar':
@@ -2881,9 +2892,9 @@ class MainWindow(QMainWindow):
             raise ValueError(f"Unknown evidence provider: {database!r}")
         scope = tuple(self.databases) if database is None else (database,)
         self._session_check_scope = scope
-        self._set_busy("Checking browser sessions")
+        self._set_busy("Sjekker innlogging og prøver lagrede opplysninger")
         self.session_check_summary.setText(
-            "Sjekker alle fem kilder i Edge …" if database is None else f"Sjekker {database} i Edge …"
+            "Sjekker innlogging til alle fem kilder i Edge …" if database is None else f"Sjekker innlogging til {database} …"
         )
         for provider in scope:
             self._session_results.pop(provider, None)
@@ -2924,7 +2935,7 @@ class MainWindow(QMainWindow):
         text, color = {
             "authenticated": ("Innlogget", Palette.green),
             "public": ("Offentlig tilgang", Palette.navy),
-            "login_required": ("Krever innlogging", Palette.yellow),
+            "login_required": ("Ikke innlogget", Palette.yellow),
             "unknown": ("Ikke bekreftet", Palette.yellow),
             "error": ("Kunne ikke sjekke", Palette.red),
         }.get(result.status, ("Ikke bekreftet", Palette.yellow))
@@ -2951,7 +2962,7 @@ class MainWindow(QMainWindow):
         detail = (
             "Tilgangen er bekreftet."
             if ready == len(scope)
-            else "Se status ved kilden. Logg inn ved behov og sjekk igjen."
+            else "Se status ved kilden. Kontroller lagrede opplysninger eller bruk Logg inn ved behov."
         )
         source = f"{scope[0]} · " if len(scope) == 1 else ""
         self.session_check_summary.setText(f"Sjekket {datetime.now():%H:%M} · {source}{ready}/{len(scope)} klare. {detail}")

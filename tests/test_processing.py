@@ -239,7 +239,7 @@ def test_review_workbook_sorts_each_patient_by_descending_numeric_percent_af(tmp
     base = result.variants[3]
 
     def same_patient_variant(source_row, hgvsc, af):
-        sample = f"26OUM00999_VPM_S{source_row}_R1_001"
+        sample = f"SYNTHETIC-SORT_VPM_S{source_row}_R1_001"
         raw = {**base.raw, "Sample": sample, "HGVSc": hgvsc, "AF": af}
         return replace(
             base,

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77.0.3", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,8 @@ name = "archer-prosess"
 version = "0.1.0"
 description = "Clinical desktop workstation for somatic VPM variant interpretation"
 readme = "README.md"
+license = "GPL-3.0-only"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 requires-python = ">=3.11"
 dependencies = [
     "PyQt6>=6.7",
@@ -27,6 +29,8 @@ dev = [
 
 [project.scripts]
 archer-prosess = "archer_processor.__main__:main"
+
+[project.gui-scripts]
 vpm-tolkning = "archer_processor.__main__:main"
 
 [tool.setuptools.packages.find]

@@ -104,3 +104,57 @@ def test_cosmic_unknown_protein_is_not_identity_proof(service, tmp_path, protein
 
     assert evidence.status == "identity_mismatch"
     assert not page.captures
+
+
+@pytest.mark.parametrize("identity", [
+    "c.100G>T p.R100S",
+    "NM_888888.1:c.100G>A p.R100S",
+    "NM_999999.1:c.100G>T NM_888888.1:c.100G>A p.R100S",
+    "c.100G>A p.R100S chr17:g.1000G>T (GRCh37)",
+    "c.100G>A p.R100S chr17:1000 G>T",
+])
+@pytest.mark.parametrize("prefix", [
+    "Mutation ID: COSM123 ",
+    "Canonical COSMIC ID: COSM999 ",
+    "COSM123 has been merged into COSM999. ",
+])
+def test_cosmic_rejects_explicit_dna_conflicts_before_protein_fallback(
+    service, tmp_path, identity, prefix, monkeypatch
+):
+    page = CapturePage(prefix + "TESTGENE " + identity)
+    monkeypatch.setattr(service, "_verify_cosmic_grch37", lambda page: None)
+
+    evidence = service._capture_cosmic_result(requested_variant(), page, tmp_path)
+
+    assert evidence.status == "identity_mismatch"
+    assert not page.captures
+
+
+@pytest.mark.parametrize("identity", [
+    "p.R100S",
+    "NM_999999.2:c.100G>A p.R100S",
+    "c.100G>A p.R100S chr17:g.1000G>A (GRCh37)",
+    "c.100G>A p.R100S chr17:1000 G>A",
+])
+def test_cosmic_migration_keeps_nonconflicting_identity_fallbacks(
+    service, tmp_path, identity, monkeypatch
+):
+    page = CapturePage("COSM123 has been merged into COSM999. TESTGENE " + identity)
+    monkeypatch.setattr(service, "_verify_cosmic_grch37", lambda page: None)
+
+    evidence = service._capture_cosmic_result(requested_variant(), page, tmp_path)
+
+    assert evidence.status == "found"
+    assert evidence.raw["cosmic_id_changed"] is True
+    assert len(page.captures) == 3
+
+
+def test_cosmic_does_not_invent_transcript_conflict_for_unqualified_input(service, tmp_path):
+    requested = requested_variant()
+    requested.hgvsc = "c.100G>A"
+    page = CapturePage("Canonical COSMIC ID: COSM999 TESTGENE NM_999999.1:c.100G>A")
+
+    evidence = service._capture_cosmic_result(requested, page, tmp_path)
+
+    assert evidence.status == "found"
+    assert len(page.captures) == 3

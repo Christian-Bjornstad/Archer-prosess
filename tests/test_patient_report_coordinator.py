@@ -28,16 +28,16 @@ def _result(tmp_path: Path):
 def test_patient_report_path_uses_approved_directory_and_name(tmp_path):
     review = tmp_path / "run_VPM_review.xlsx"
 
-    assert patient_report_path(review, "26OUM12345") == (
-        tmp_path / "VEDLEGG_APP" / "26OUM12345_VPM_Tolkning_APP.xlsx"
+    assert patient_report_path(review, "SYNTHETIC01") == (
+        tmp_path / "VEDLEGG_APP" / "SYNTHETIC01_VPM_Tolkning_APP.xlsx"
     )
 
 
 def test_patient_report_path_sanitises_unsafe_characters(tmp_path):
     review = tmp_path / "run_VPM_review.xlsx"
 
-    assert patient_report_path(review, "26 OUM/12345") == (
-        tmp_path / "VEDLEGG_APP" / "26_OUM_12345_VPM_Tolkning_APP.xlsx"
+    assert patient_report_path(review, "SYNTHETIC 01/TEST") == (
+        tmp_path / "VEDLEGG_APP" / "SYNTHETIC_01_TEST_VPM_Tolkning_APP.xlsx"
     )
 
 

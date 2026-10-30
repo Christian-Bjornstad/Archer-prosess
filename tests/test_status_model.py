@@ -1,5 +1,6 @@
 from datetime import datetime
 from pathlib import Path
+import pytest
 
 from archer_processor.core.models import DatabaseEvidence, VariantRecord
 from archer_processor.gui.status_model import (
@@ -152,3 +153,15 @@ def test_mixed_patient_status_explains_found_and_missing_counts():
     assert cell.label == "Not found (1/2)"
     assert "Complete: 1" in cell.detail
     assert "no exact result" in cell.detail
+
+
+@pytest.mark.parametrize('status,lookup_status', [('found', 'found'), ('partial_capture', 'found'), ('not_found', 'not_found')])
+def test_mtbp_lookup_result_survives_pending_capture_and_locked_excel(status, lookup_status):
+    variant = VariantRecord(Path('synthetic.tsv'), 1, 'SYNTHETIC01', 'TP53', 'c.524G>A')
+    evidence = DatabaseEvidence('MTBP', status, 'parsed report', raw={
+        'analysis_id': 'ARCHER-synthetic', 'lookup_status': lookup_status})
+    rows = build_patient_status_rows([variant], databases=['MTBP'],
+        evidence={'SYNTHETIC01|c.524G>A': [evidence]}, skipped_keys=set(),
+        report_outcomes={'SYNTHETIC01': 'locked'}, active={('SYNTHETIC01', 'MTBP')})
+    assert ('Found' if lookup_status == 'found' else 'Not found') in rows[0].cells['MTBP'].label
+    assert rows[0].cells['Report'].state is CellState.SAVE_PENDING

@@ -87,7 +87,7 @@ def test_run_journal_extracts_provider_fields_after_patient_lane_prefix(tmp_path
     journal = RunJournal.start(tmp_path, run_mode="evidence", app_version="0.1.0")
 
     journal.record(
-        "Patient 9/22 (26OUM13887) · MTBP: RESULT | source=MTBP | "
+        "Patient 9/22 (SYNTHETIC09) · MTBP: RESULT | source=MTBP | "
         "variant=NM_002467.4:c.221C>A | status=submission_unknown | "
         "retryable=yes | stage=submission_acceptance"
     )
@@ -99,7 +99,7 @@ def test_run_journal_extracts_provider_fields_after_patient_lane_prefix(tmp_path
     assert record["stage"] == "submission_acceptance"
     assert record["patient_index"] == "9"
     assert record["patient_total"] == "22"
-    assert record["patient_id"] == "26OUM13887"
+    assert record["patient_id"] == "SYNTHETIC09"
     assert record["lane"] == "MTBP"
 
 
@@ -110,7 +110,7 @@ def test_run_journal_structures_operational_summary_events(tmp_path):
         "RUN SUMMARY | found_complete=3 | found_incomplete=1 | deferred=2 | total=6"
     )
     journal.record(
-        "Patient 2/4 (26OUM2) · MTBP: MTBP PREFLIGHT | reports=4 | "
+        "Patient 2/4 (SYNTHETIC02) · MTBP: MTBP PREFLIGHT | reports=4 | "
         "protected_reports=1 | available_slots=1"
     )
 
@@ -121,5 +121,5 @@ def test_run_journal_structures_operational_summary_events(tmp_path):
     assert records[0]["event_type"] == "RUN_SUMMARY"
     assert records[0]["total"] == "6"
     assert records[1]["event_type"] == "MTBP_PREFLIGHT"
-    assert records[1]["patient_id"] == "26OUM2"
+    assert records[1]["patient_id"] == "SYNTHETIC02"
     assert records[1]["available_slots"] == "1"

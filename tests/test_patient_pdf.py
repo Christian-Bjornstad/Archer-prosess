@@ -42,6 +42,14 @@ def test_patient_pdf_writer_groups_included_variants_by_dit(tmp_path):
         ]
     }
 
+    for database in ("Franklin", "ClinVar"):
+        image_path = tmp_path / f"{database}.png"
+        Image.new("RGB", (600, 200), "#D9EAF7").save(image_path)
+        evidence[f"{tp53.sample}|{tp53.hgvsc}"].append(DatabaseEvidence(
+            database, "found", "Synthetic evidence",
+            raw={"screenshots": [{"path": str(image_path), "label": f"Synthetic {database} capture"}]},
+        ))
+
     outputs = PatientPdfReportWriter().write_all(
         result, tmp_path / "patient-reports", evidence
     )
@@ -70,6 +78,8 @@ def test_patient_pdf_writer_groups_included_variants_by_dit(tmp_path):
     assert "Responsible physician conclusion" in text
     assert "does not establish a diagnosis" in text
     assert "Evidence image appendix" in text
+    appendix = text.split("Evidence image appendix", 1)[1]
+    assert appendix.index("Synthetic ClinVar capture") < appendix.index("Synthetic Franklin capture")
     assert "Variant overview and mutation effect" in text
     assert "https://www.oncokb.org/gene/TP53/somatic/R175H" in uris
     assert any(

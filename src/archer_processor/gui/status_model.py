@@ -153,6 +153,7 @@ def build_patient_status_rows(
         for database in databases:
             states: list[CellState] = []
             details: list[str] = []
+            lookup_counts: Counter[str] = Counter()
             for variant in patient_variants:
                 key = f"{variant.sample}|{variant.hgvsc}"
                 if key in skipped_keys:
@@ -185,11 +186,24 @@ def build_patient_status_rows(
                         details.append(f"{variant.display_name}: {item.summary}")
                     elif state is CellState.NOT_SELECTED:
                         details.append("This source is not selected for the current search.")
+                    if item is not None and database == "MTBP":
+                        lookup = item.raw.get("lookup_status", item.status)
+                        if lookup in {"found", "not_found"}:
+                            lookup_counts[lookup] += 1
             state = max(states, key=STATE_PRIORITY.get)
             counts = Counter(states)
             label = STATE_LABELS[state]
             if len(counts) > 1:
                 label += f" ({counts[state]}/{len(states)})"
+            if database == "MTBP" and lookup_counts:
+                outcomes = []
+                if lookup_counts["found"]:
+                    outcomes.append(f"Found: {lookup_counts['found']}")
+                if lookup_counts["not_found"]:
+                    outcomes.append(f"Not found: {lookup_counts['not_found']}")
+                label = "\n".join(outcomes)
+                if state in {CellState.RUNNING, CellState.RETRY, CellState.QUEUED}:
+                    label += f"\n{STATE_LABELS[state]}"
             summary = " · ".join(
                 f"{STATE_LABELS[item_state]}: {count}"
                 for item_state, count in counts.items()
